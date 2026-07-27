@@ -94,6 +94,13 @@ pub fn build_routes(state: AppState) -> Router {
                 .post(database::post_doc)
                 .delete(database::delete_db),
         )
+        .route(
+            "/{db}/",
+            get(database::get_db_info)
+                .put(database::put_db)
+                .post(database::post_doc)
+                .delete(database::delete_db),
+        )
         // Attachments (before generic doc catch-all)
         .route(
             "/{db}/{docid}/{attname}",
