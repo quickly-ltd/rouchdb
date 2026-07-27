@@ -179,8 +179,9 @@ in CouchDB's HTTP API is stripped -- the key is just the ID portion.
 **Value:** Raw JSON bytes (`serde_json::Value` serialized with `to_vec`).
 
 Local documents do not have revision trees or sequence numbers. They are
-simple key-value pairs that can be read, written, and deleted. They do not
-appear in the changes feed or in `_all_docs` results.
+simple key-value pairs that can be read, written, and deleted via `Adapter::get_local`,
+`put_local`, and `remove_local`, or through HTTP server endpoints (`GET`, `PUT`, `DELETE /{db}/_local/{id}`).
+They do not appear in the changes feed.
 
 ### ATTACHMENT_TABLE (`"attachments"`)
 

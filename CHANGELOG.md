@@ -4,6 +4,19 @@ All notable changes to RouchDB are documented here.
 
 This project follows [Semantic Versioning](https://semver.org/). Since we are pre-1.0, minor version bumps may include breaking changes.
 
+## [Unreleased]
+
+### Added
+
+- **PouchDB 9 Replication Surface Compatibility (rouchdb-server):**
+  - Added `/{db}/` trailing-slash database route.
+  - Implemented `POST /{db}/_revs_diff` endpoint for missing revision checks.
+  - Implemented `POST /{db}/_bulk_get` endpoint for bulk document retrieval by ID and revision.
+  - Implemented `GET`, `PUT`, `DELETE /{db}/_local/{id}` endpoints for local checkpoint document CRUD.
+  - Implemented `longpoll` and `continuous` live changes feeds in `/{db}/_changes` with keep-alive heartbeats.
+  - Surfaced `_conflicts` in `GET /{db}/{docid}` and `GET /{db}/_all_docs` when `?conflicts=true`.
+  - Added JSON string unquoting for `startkey`, `endkey`, and `key` in `_all_docs`.
+
 ---
 
 ## [0.4.0] — 2026-06-09

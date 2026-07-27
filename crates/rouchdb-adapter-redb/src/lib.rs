@@ -536,6 +536,59 @@ impl Adapter for RedbAdapter {
             });
         }
 
+        let includes_local = opts.start_key.as_deref().is_some_and(|k| k.starts_with("_local/"))
+            || opts.end_key.as_deref().is_some_and(|k| k.starts_with("_local/"))
+            || opts.key.as_deref().is_some_and(|k| k.starts_with("_local/"))
+            || opts.keys.as_ref().is_some_and(|keys| keys.iter().any(|k| k.starts_with("_local/")));
+
+        if includes_local {
+            let local_table = db_err!(read_txn.open_table(LOCAL_TABLE))?;
+            for entry in db_err!(local_table.iter())? {
+                let entry = db_err!(entry)?;
+                let clean_id = entry.0.value();
+                let doc_id = format!("_local/{}", clean_id);
+
+                if let Some(ref start) = opts.start_key
+                    && ((!opts.descending && doc_id.as_str() < start.as_str())
+                        || (opts.descending && doc_id.as_str() > start.as_str()))
+                {
+                    continue;
+                }
+                if let Some(ref end) = opts.end_key {
+                    if opts.inclusive_end {
+                        if (!opts.descending && doc_id.as_str() > end.as_str())
+                            || (opts.descending && doc_id.as_str() < end.as_str())
+                        {
+                            continue;
+                        }
+                    } else if (!opts.descending && doc_id.as_str() >= end.as_str())
+                        || (opts.descending && doc_id.as_str() <= end.as_str())
+                    {
+                        continue;
+                    }
+                }
+                if let Some(ref key) = opts.key && &doc_id != key {
+                    continue;
+                }
+                if let Some(ref keys) = opts.keys && !keys.contains(&doc_id) {
+                    continue;
+                }
+
+                let val: serde_json::Value = serde_json::from_slice(entry.1.value())?;
+                let rev = val.get("_rev").and_then(|v| v.as_str()).unwrap_or("0-1").to_string();
+
+                rows.push(AllDocsRow {
+                    id: doc_id.clone(),
+                    key: doc_id,
+                    value: AllDocsRowValue {
+                        rev,
+                        deleted: None,
+                    },
+                    doc: if opts.include_docs { Some(val) } else { None },
+                });
+            }
+        }
+
         if opts.descending {
             rows.reverse();
         }

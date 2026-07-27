@@ -20,6 +20,7 @@
 - [Design Documents & Views](./guides/design-documents.md)
 - [Plugins](./guides/plugins.md)
 - [Partitioned Databases](./guides/partitions.md)
+- [HTTP Server & PouchDB Sync](./guides/http-server.md)
 
 # Reference
 
