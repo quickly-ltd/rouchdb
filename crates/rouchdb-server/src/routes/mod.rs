@@ -10,6 +10,7 @@ pub mod database;
 pub mod design;
 pub mod document;
 pub mod fauxton;
+pub mod local;
 pub mod membership;
 pub mod query;
 pub mod revs_diff;
@@ -104,6 +105,13 @@ pub fn build_routes(state: AppState) -> Router {
                 .put(database::put_db)
                 .post(database::post_doc)
                 .delete(database::delete_db),
+        )
+        // Local documents / checkpoints (must come before 3-segment attachment route)
+        .route(
+            "/{db}/_local/{*id}",
+            get(local::get_local)
+                .put(local::put_local)
+                .delete(local::delete_local),
         )
         // Attachments (before generic doc catch-all)
         .route(
