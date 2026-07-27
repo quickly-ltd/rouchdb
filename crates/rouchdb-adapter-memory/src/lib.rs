@@ -991,16 +991,16 @@ fn process_doc_new_edits(inner: &mut Inner, doc: Document) -> DocResult {
         let winner = winning_rev(&stored.rev_tree);
 
         match (&doc.rev, &winner) {
-            (Some(provided_rev), Some(current_winner)) => {
-                if provided_rev.to_string() != current_winner.to_string() {
-                    return DocResult {
-                        ok: false,
-                        id: doc_id,
-                        rev: None,
-                        error: Some("conflict".into()),
-                        reason: Some("Document update conflict".into()),
-                    };
-                }
+            (Some(provided_rev), Some(current_winner))
+                if provided_rev.to_string() != current_winner.to_string() =>
+            {
+                return DocResult {
+                    ok: false,
+                    id: doc_id,
+                    rev: None,
+                    error: Some("conflict".to_string()),
+                    reason: Some("Document update conflict.".to_string()),
+                };
             }
             // Creating a doc that already exists and is not deleted is a
             // conflict; if the current winner is deleted, fall through and
