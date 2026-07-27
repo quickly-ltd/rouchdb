@@ -11,6 +11,7 @@ pub mod document;
 pub mod fauxton;
 pub mod membership;
 pub mod query;
+pub mod revs_diff;
 pub mod root;
 pub mod security;
 pub mod session;
@@ -50,6 +51,7 @@ pub fn build_routes(state: AppState) -> Router {
             get(all_docs::get_all_docs).post(all_docs::post_all_docs),
         )
         .route("/{db}/_bulk_docs", post(bulk::bulk_docs))
+        .route("/{db}/_revs_diff", post(revs_diff::post_revs_diff))
         .route(
             "/{db}/_changes",
             get(changes::get_changes).post(changes::post_changes),
