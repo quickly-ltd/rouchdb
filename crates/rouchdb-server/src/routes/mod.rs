@@ -3,6 +3,7 @@ pub mod all_dbs;
 pub mod all_docs;
 pub mod attachment;
 pub mod bulk;
+pub mod bulk_get;
 pub mod changes;
 pub mod compact;
 pub mod database;
@@ -51,6 +52,7 @@ pub fn build_routes(state: AppState) -> Router {
             get(all_docs::get_all_docs).post(all_docs::post_all_docs),
         )
         .route("/{db}/_bulk_docs", post(bulk::bulk_docs))
+        .route("/{db}/_bulk_get", post(bulk_get::post_bulk_get))
         .route("/{db}/_revs_diff", post(revs_diff::post_revs_diff))
         .route(
             "/{db}/_changes",
