@@ -26,6 +26,27 @@ fn normalize_id(id: &str) -> (&str, String) {
     (clean, full)
 }
 
+/// GET /{db}/_local or /{db}/_local/ — list all local documents.
+pub async fn get_all_local(
+    State(state): State<AppState>,
+    Path(db): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    validate_db(&db, &state)?;
+    let opts = rouchdb_core::document::AllDocsOptions {
+        include_docs: true,
+        start_key: Some("_local/".to_string()),
+        end_key: Some("_local/\u{ffff}".to_string()),
+        ..Default::default()
+    };
+    let response = state.db.adapter().all_docs(opts).await?;
+    let total_rows = response.rows.len() as u64;
+    Ok(Json(serde_json::json!({
+        "offset": 0,
+        "rows": response.rows,
+        "total_rows": total_rows,
+    })))
+}
+
 /// GET /{db}/_local/{*id} — get a local document (checkpoint).
 pub async fn get_local(
     State(state): State<AppState>,
@@ -34,11 +55,20 @@ pub async fn get_local(
     validate_db(&db, &state)?;
     let (clean_id, full_id) = normalize_id(&id);
 
-    let mut doc = state.db.adapter().get_local(clean_id).await?;
-    if let serde_json::Value::Object(ref mut map) = doc {
-        map.insert("_id".into(), serde_json::Value::String(full_id));
+    match state.db.adapter().get_local(clean_id).await {
+        Ok(mut doc) => {
+            if let serde_json::Value::Object(ref mut map) = doc {
+                map.insert("_id".into(), serde_json::Value::String(full_id));
+            }
+            Ok(Json(doc))
+        }
+        Err(rouchdb_core::error::RouchError::NotFound(_)) => {
+            Err(AppError(rouchdb_core::error::RouchError::NotFound(
+                "missing".to_string(),
+            )))
+        }
+        Err(err) => Err(AppError(err)),
     }
-    Ok(Json(doc))
 }
 
 /// PUT /{db}/_local/{*id} — create or update a local document (checkpoint).

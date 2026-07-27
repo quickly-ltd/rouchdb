@@ -108,6 +108,14 @@ pub fn build_routes(state: AppState) -> Router {
         )
         // Local documents / checkpoints (must come before 3-segment attachment route)
         .route(
+            "/{db}/_local",
+            get(local::get_all_local),
+        )
+        .route(
+            "/{db}/_local/",
+            get(local::get_all_local),
+        )
+        .route(
             "/{db}/_local/{*id}",
             get(local::get_local)
                 .put(local::put_local)
