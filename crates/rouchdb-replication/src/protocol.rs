@@ -85,7 +85,14 @@ pub struct ReplicationResult {
 /// Events emitted during replication for progress tracking.
 #[derive(Debug, Clone)]
 pub enum ReplicationEvent {
-    Change { docs_read: u64 },
+    /// One batch was processed. Counts are deltas for *this batch only*
+    /// (not running totals) — a listener that wants a lifetime total, as
+    /// CouchDB's `_active_tasks` reports, should accumulate them itself.
+    Change {
+        docs_read: u64,
+        docs_written: u64,
+        doc_write_failures: u64,
+    },
     Paused,
     Active,
     Complete(ReplicationResult),
@@ -367,7 +374,8 @@ async fn replicate_with_events_inner(
             _ => changes.results.iter().collect(),
         };
 
-        total_docs_read += filtered_changes.len() as u64;
+        let batch_docs_read = filtered_changes.len() as u64;
+        total_docs_read += batch_docs_read;
 
         if filtered_changes.is_empty() {
             current_seq = batch_last_seq;
@@ -407,6 +415,7 @@ async fn replicate_with_events_inner(
 
         let mut docs_to_write: Vec<Document> = Vec::new();
         let mut batch_failed = false;
+        let mut batch_write_failures = 0u64;
         for result in &bulk_get_response.results {
             for doc in &result.docs {
                 if let Some(ref json) = doc.ok {
@@ -415,6 +424,7 @@ async fn replicate_with_events_inner(
                         Err(e) => {
                             errors.push(format!("parse error for {}: {}", result.id, e));
                             batch_failed = true;
+                            batch_write_failures += 1;
                         }
                     }
                 }
@@ -425,6 +435,7 @@ async fn replicate_with_events_inner(
             docs_to_write.retain(|doc| rouchdb_query::matches_selector(&doc.data, selector));
         }
 
+        let mut batch_docs_written = 0u64;
         if !docs_to_write.is_empty() {
             let write_results = target
                 .bulk_docs(docs_to_write, BulkDocsOptions::replication())
@@ -438,16 +449,20 @@ async fn replicate_with_events_inner(
                         wr.reason.as_deref().unwrap_or("unknown")
                     ));
                     batch_failed = true;
+                    batch_write_failures += 1;
                 }
             }
 
-            total_docs_written += write_results.iter().filter(|wr| wr.ok).count() as u64;
+            batch_docs_written = write_results.iter().filter(|wr| wr.ok).count() as u64;
+            total_docs_written += batch_docs_written;
         }
 
-        // Emit change event
+        // Emit change event (batch-local deltas — see ReplicationEvent::Change doc comment).
         let _ = events_tx
             .send(ReplicationEvent::Change {
-                docs_read: total_docs_read,
+                docs_read: batch_docs_read,
+                docs_written: batch_docs_written,
+                doc_write_failures: batch_write_failures,
             })
             .await;
 

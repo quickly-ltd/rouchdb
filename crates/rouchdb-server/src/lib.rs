@@ -1,6 +1,7 @@
 pub mod error;
 pub mod routes;
 pub mod state;
+pub mod tasks;
 
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use rouchdb::Database;
 use tower_http::cors::CorsLayer;
 
 use crate::state::AppState;
+pub use crate::tasks::{ActiveTaskInfo, ActiveTasks};
 
 /// Configuration for the RouchDB HTTP server.
 #[derive(Debug, Clone)]
@@ -30,10 +32,16 @@ impl Default for ServerConfig {
 }
 
 /// Build the Axum router with all routes and middleware.
-pub fn build_router(db: Arc<Database>, config: &ServerConfig) -> Router {
+///
+/// `active_tasks` backs `GET /_active_tasks`. Pass the same registry you use
+/// to start replication (via [`ActiveTasks::start_live_replication`]) so the
+/// endpoint reflects real progress; pass a fresh [`ActiveTasks::new`] if this
+/// server instance never drives replication itself.
+pub fn build_router(db: Arc<Database>, config: &ServerConfig, active_tasks: ActiveTasks) -> Router {
     let state = AppState {
         db,
         db_name: config.db_name.clone(),
+        active_tasks,
     };
 
     let cors = CorsLayer::new()
@@ -55,7 +63,7 @@ pub fn build_router(db: Arc<Database>, config: &ServerConfig) -> Router {
 
 /// Start the HTTP server and block until shutdown.
 pub async fn start_server(db: Arc<Database>, config: ServerConfig) -> std::io::Result<()> {
-    let router = build_router(db, &config);
+    let router = build_router(db, &config, ActiveTasks::new());
 
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

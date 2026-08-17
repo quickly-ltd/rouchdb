@@ -7,3 +7,5 @@
 *.redb
 /test-results
 /node_modules
+/.infigraph
+/.claude
