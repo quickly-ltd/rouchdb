@@ -32,7 +32,7 @@ use crate::state::AppState;
 pub fn build_routes(state: AppState) -> Router {
     Router::new()
         // Server-level endpoints
-        .route("/", get(root::root_info))
+        .route("/", get(root::root_info).head(root::root_info))
         .route(
             "/_session",
             get(session::get_session)
@@ -95,6 +95,7 @@ pub fn build_routes(state: AppState) -> Router {
         .route(
             "/{db}",
             get(database::get_db_info)
+                .head(database::get_db_info)
                 .put(database::put_db)
                 .post(database::post_doc)
                 .delete(database::delete_db),
@@ -102,6 +103,7 @@ pub fn build_routes(state: AppState) -> Router {
         .route(
             "/{db}/",
             get(database::get_db_info)
+                .head(database::get_db_info)
                 .put(database::put_db)
                 .post(database::post_doc)
                 .delete(database::delete_db),

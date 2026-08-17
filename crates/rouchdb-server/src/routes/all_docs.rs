@@ -8,6 +8,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct AllDocsQuery {
     pub include_docs: Option<bool>,
     pub startkey: Option<String>,
@@ -21,6 +22,8 @@ pub struct AllDocsQuery {
     pub inclusive_end: Option<bool>,
     pub conflicts: Option<bool>,
     pub update_seq: Option<bool>,
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 fn unquote_key(key: Option<String>) -> Option<String> {

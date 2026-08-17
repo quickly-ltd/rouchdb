@@ -13,21 +13,21 @@ use crate::error::AppError;
 use crate::state::AppState;
 
 #[derive(Deserialize, Default, Clone)]
+#[serde(default)]
 pub struct ChangesQuery {
     pub since: Option<String>,
     pub limit: Option<u64>,
-    #[serde(default)]
     pub descending: Option<bool>,
-    #[serde(default)]
     pub include_docs: Option<bool>,
     pub style: Option<String>,
-    #[serde(default)]
     pub conflicts: Option<bool>,
     pub doc_ids: Option<String>,
     pub filter: Option<String>,
     pub feed: Option<String>,
     pub timeout: Option<u64>,
     pub heartbeat: Option<u64>,
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 fn validate_db(db: &str, state: &AppState) -> Result<(), AppError> {
