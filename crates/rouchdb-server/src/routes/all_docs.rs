@@ -8,6 +8,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct AllDocsQuery {
     pub include_docs: Option<bool>,
     pub startkey: Option<String>,
@@ -21,15 +22,28 @@ pub struct AllDocsQuery {
     pub inclusive_end: Option<bool>,
     pub conflicts: Option<bool>,
     pub update_seq: Option<bool>,
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+fn unquote_key(key: Option<String>) -> Option<String> {
+    let s = key?;
+    if let Ok(parsed) = serde_json::from_str::<String>(&s) {
+        Some(parsed)
+    } else if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        Some(s[1..s.len() - 1].to_string())
+    } else {
+        Some(s)
+    }
 }
 
 impl AllDocsQuery {
     fn into_options(self, keys: Option<Vec<String>>) -> AllDocsOptions {
         AllDocsOptions {
             include_docs: self.include_docs.unwrap_or(false),
-            start_key: self.startkey.or(self.start_key),
-            end_key: self.endkey.or(self.end_key),
-            key: self.key,
+            start_key: unquote_key(self.startkey.or(self.start_key)),
+            end_key: unquote_key(self.endkey.or(self.end_key)),
+            key: unquote_key(self.key),
             keys,
             limit: self.limit,
             skip: self.skip.unwrap_or(0),

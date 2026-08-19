@@ -155,6 +155,11 @@ impl Database {
         self.adapter.as_ref()
     }
 
+    /// Get an Arc clone of the underlying adapter.
+    pub fn adapter_arc(&self) -> Arc<dyn Adapter> {
+        self.adapter.clone()
+    }
+
     // -----------------------------------------------------------------
     // Document operations
     // -----------------------------------------------------------------

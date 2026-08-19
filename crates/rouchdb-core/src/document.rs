@@ -432,7 +432,9 @@ pub struct BulkGetResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkGetDoc {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ok: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<BulkGetError>,
 }
 

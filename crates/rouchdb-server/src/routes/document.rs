@@ -9,23 +9,25 @@ use crate::error::AppError;
 use crate::state::AppState;
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct GetDocQuery {
     pub rev: Option<String>,
-    #[serde(default)]
     pub conflicts: bool,
-    #[serde(default)]
     pub revs: bool,
-    #[serde(default)]
     pub revs_info: bool,
-    #[serde(default)]
     pub latest: bool,
-    #[serde(default)]
     pub attachments: bool,
+    pub open_revs: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct DeleteDocQuery {
     pub rev: Option<String>,
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 fn validate_db(db: &str, state: &AppState) -> Result<(), AppError> {

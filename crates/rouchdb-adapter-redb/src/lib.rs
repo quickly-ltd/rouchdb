@@ -66,6 +66,42 @@ struct SerializedRevNode {
     children: Vec<SerializedRevNode>,
 }
 
+/// Deserializes a `DocRecord` from its stored JSON bytes.
+///
+/// `DocRecord.rev_tree` embeds `SerializedRevNode.children`, a
+/// self-referential tree. A document that is updated repeatedly with no
+/// conflicts (no branching) accumulates a purely linear chain — nesting
+/// depth grows by one for every revision, forever, because RouchDB does not
+/// stem/prune old tree nodes. Verified against a live production CouchDB: a
+/// single frequently-toggled record reached revision 321 with zero
+/// branching. `serde_json::from_slice`'s default recursion guard (128
+/// levels — a deliberate anti-DoS limit for *untrusted* input, not a real
+/// Rust call-stack constraint; see
+/// <https://github.com/serde-rs/json/issues/334>) rejects that document
+/// outright with "recursion limit exceeded", and because every accessor in
+/// this file (`get`, `info`, `all_docs`, attachments, ...) deserializes the
+/// full `DocRecord` to do its job, a single such document turns EVERY read
+/// path that touches it into a hard failure — not just the one deep
+/// document, but any endpoint that has to scan or list past it too (e.g.
+/// `GET /{db}` info, which must open every record to count non-deleted
+/// docs).
+///
+/// Fix: disable serde_json's checked-depth counter and grow the real call
+/// stack dynamically instead via `serde_stacker`, the crate designed for
+/// exactly this situation
+/// (<https://docs.rs/serde_json/latest/serde_json/struct.Deserializer.html#method.disable_recursion_limit>).
+/// This only changes how already-stored bytes are *read*; the on-disk JSON
+/// shape is unchanged, so no migration is needed and existing databases
+/// keep working. ALL `DocRecord` deserialization must go through this
+/// helper — a stray direct `serde_json::from_slice::<DocRecord>` call would
+/// silently reintroduce the bug for that one call site.
+fn deserialize_doc_record(bytes: &[u8]) -> std::result::Result<DocRecord, serde_json::Error> {
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    de.disable_recursion_limit();
+    let de = serde_stacker::Deserializer::new(&mut de);
+    DocRecord::deserialize(de)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct RevDataRecord {
     data: serde_json::Value,
@@ -283,7 +319,7 @@ impl Adapter for RedbAdapter {
         let iter = db_err!(table.iter())?;
         for entry in iter {
             let entry = db_err!(entry)?;
-            let record: DocRecord = serde_json::from_slice(entry.1.value())?;
+            let record: DocRecord = deserialize_doc_record(entry.1.value())?;
             let tree = serialized_to_rev_tree(&record.rev_tree);
             if is_deleted(&tree) {
                 doc_del_count += 1;
@@ -307,7 +343,7 @@ impl Adapter for RedbAdapter {
 
         let guard =
             db_err!(doc_table.get(id))?.ok_or_else(|| RouchError::NotFound(id.to_string()))?;
-        let record: DocRecord = serde_json::from_slice(guard.value())?;
+        let record: DocRecord = deserialize_doc_record(guard.value())?;
         let tree = serialized_to_rev_tree(&record.rev_tree);
 
         let target_rev = if let Some(ref rev_str) = opts.rev {
@@ -436,7 +472,7 @@ impl Adapter for RedbAdapter {
         for entry in iter {
             let entry = db_err!(entry)?;
             let doc_id = entry.0.value().to_string();
-            let record: DocRecord = serde_json::from_slice(entry.1.value())?;
+            let record: DocRecord = deserialize_doc_record(entry.1.value())?;
             let tree = serialized_to_rev_tree(&record.rev_tree);
 
             let winner = match winning_rev(&tree) {
@@ -536,6 +572,59 @@ impl Adapter for RedbAdapter {
             });
         }
 
+        let includes_local = opts.start_key.as_deref().is_some_and(|k| k.starts_with("_local/"))
+            || opts.end_key.as_deref().is_some_and(|k| k.starts_with("_local/"))
+            || opts.key.as_deref().is_some_and(|k| k.starts_with("_local/"))
+            || opts.keys.as_ref().is_some_and(|keys| keys.iter().any(|k| k.starts_with("_local/")));
+
+        if includes_local {
+            let local_table = db_err!(read_txn.open_table(LOCAL_TABLE))?;
+            for entry in db_err!(local_table.iter())? {
+                let entry = db_err!(entry)?;
+                let clean_id = entry.0.value();
+                let doc_id = format!("_local/{}", clean_id);
+
+                if let Some(ref start) = opts.start_key
+                    && ((!opts.descending && doc_id.as_str() < start.as_str())
+                        || (opts.descending && doc_id.as_str() > start.as_str()))
+                {
+                    continue;
+                }
+                if let Some(ref end) = opts.end_key {
+                    if opts.inclusive_end {
+                        if (!opts.descending && doc_id.as_str() > end.as_str())
+                            || (opts.descending && doc_id.as_str() < end.as_str())
+                        {
+                            continue;
+                        }
+                    } else if (!opts.descending && doc_id.as_str() >= end.as_str())
+                        || (opts.descending && doc_id.as_str() <= end.as_str())
+                    {
+                        continue;
+                    }
+                }
+                if let Some(ref key) = opts.key && &doc_id != key {
+                    continue;
+                }
+                if let Some(ref keys) = opts.keys && !keys.contains(&doc_id) {
+                    continue;
+                }
+
+                let val: serde_json::Value = serde_json::from_slice(entry.1.value())?;
+                let rev = val.get("_rev").and_then(|v| v.as_str()).unwrap_or("0-1").to_string();
+
+                rows.push(AllDocsRow {
+                    id: doc_id.clone(),
+                    key: doc_id,
+                    value: AllDocsRowValue {
+                        rev,
+                        deleted: None,
+                    },
+                    doc: if opts.include_docs { Some(val) } else { None },
+                });
+            }
+        }
+
         if opts.descending {
             rows.reverse();
         }
@@ -615,7 +704,7 @@ impl Adapter for RedbAdapter {
 
             let rev_str = db_err!(doc_table.get(change.doc_id.as_str()))?
                 .and_then(|guard| {
-                    let record: DocRecord = serde_json::from_slice(guard.value()).ok()?;
+                    let record: DocRecord = deserialize_doc_record(guard.value()).ok()?;
                     let tree = serialized_to_rev_tree(&record.rev_tree);
                     winning_rev(&tree).map(|r| r.to_string())
                 })
@@ -650,7 +739,7 @@ impl Adapter for RedbAdapter {
             let changes_list = if opts.style == ChangesStyle::AllDocs {
                 // Fetch all leaf revisions for AllDocs style
                 if let Some(guard) = db_err!(doc_table.get(change.doc_id.as_str()))? {
-                    let record: DocRecord = serde_json::from_slice(guard.value())?;
+                    let record: DocRecord = deserialize_doc_record(guard.value())?;
                     let tree = serialized_to_rev_tree(&record.rev_tree);
                     collect_leaves(&tree)
                         .iter()
@@ -670,7 +759,7 @@ impl Adapter for RedbAdapter {
             // Collect conflicts if requested
             let conflicts = if opts.conflicts {
                 if let Some(guard) = db_err!(doc_table.get(change.doc_id.as_str()))? {
-                    let record: DocRecord = serde_json::from_slice(guard.value())?;
+                    let record: DocRecord = deserialize_doc_record(guard.value())?;
                     let tree = serialized_to_rev_tree(&record.rev_tree);
                     let c = collect_conflicts(&tree);
                     if c.is_empty() {
@@ -722,7 +811,7 @@ impl Adapter for RedbAdapter {
 
             let stored = db_err!(doc_table.get(doc_id.as_str()))?;
             let tree = stored.as_ref().and_then(|guard| {
-                let record: DocRecord = serde_json::from_slice(guard.value()).ok()?;
+                let record: DocRecord = deserialize_doc_record(guard.value()).ok()?;
                 Some(serialized_to_rev_tree(&record.rev_tree))
             });
 
@@ -775,7 +864,7 @@ impl Adapter for RedbAdapter {
 
             match db_err!(doc_table.get(item.id.as_str()))? {
                 Some(guard) => {
-                    let record: DocRecord = serde_json::from_slice(guard.value())?;
+                    let record: DocRecord = deserialize_doc_record(guard.value())?;
                     let tree = serialized_to_rev_tree(&record.rev_tree);
 
                     let rev_str = if let Some(ref rev) = item.rev {
@@ -894,7 +983,7 @@ impl Adapter for RedbAdapter {
                 let existing = db_err!(doc_table.get(doc_id))?;
                 existing
                     .as_ref()
-                    .and_then(|g| serde_json::from_slice(g.value()).ok())
+                    .and_then(|g| deserialize_doc_record(g.value()).ok())
             };
 
             let record = existing_record.ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
@@ -991,7 +1080,7 @@ impl Adapter for RedbAdapter {
         let rev_table = db_err!(read_txn.open_table(REV_DATA_TABLE))?;
 
         let record: DocRecord = db_err!(doc_table.get(doc_id))?
-            .map(|g| serde_json::from_slice(g.value()).unwrap())
+            .map(|g| deserialize_doc_record(g.value()).unwrap())
             .ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
 
         let tree = serialized_to_rev_tree(&record.rev_tree);
@@ -1037,7 +1126,7 @@ impl Adapter for RedbAdapter {
 
             // Load existing doc and verify rev
             let record: DocRecord = db_err!(doc_table.get(doc_id))?
-                .map(|g| serde_json::from_slice(g.value()).unwrap())
+                .map(|g| deserialize_doc_record(g.value()).unwrap())
                 .ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
 
             let tree = serialized_to_rev_tree(&record.rev_tree);
@@ -1224,7 +1313,7 @@ fn process_doc_new_edits(
         let existing = db_err!(doc_table.get(doc_id.as_str()))?;
         existing
             .as_ref()
-            .and_then(|g| serde_json::from_slice(g.value()).ok())
+            .and_then(|g| deserialize_doc_record(g.value()).ok())
     };
 
     let existing_tree = existing_record
@@ -1237,16 +1326,16 @@ fn process_doc_new_edits(
         let tree = serialized_to_rev_tree(&record.rev_tree);
         let winner = winning_rev(&tree);
         match (&doc.rev, &winner) {
-            (Some(provided_rev), Some(current_winner)) => {
-                if provided_rev.to_string() != current_winner.to_string() {
-                    return Ok(DocResult {
-                        ok: false,
-                        id: doc_id,
-                        rev: None,
-                        error: Some("conflict".into()),
-                        reason: Some("Document update conflict".into()),
-                    });
-                }
+            (Some(provided_rev), Some(current_winner))
+                if provided_rev.to_string() != current_winner.to_string() =>
+            {
+                return Ok(DocResult {
+                    ok: false,
+                    id: doc_id,
+                    rev: None,
+                    error: Some("conflict".to_string()),
+                    reason: Some("Document update conflict.".to_string()),
+                });
             }
             // Creating a doc that already exists and is not deleted is a
             // conflict; a deleted winner falls through and may be re-created.
@@ -1351,7 +1440,7 @@ fn process_doc_new_edits_with_attachments(
         let existing = db_err!(doc_table.get(doc_id.as_str()))?;
         existing
             .as_ref()
-            .and_then(|g| serde_json::from_slice(g.value()).ok())
+            .and_then(|g| deserialize_doc_record(g.value()).ok())
     };
 
     let existing_tree = existing_record
@@ -1447,7 +1536,7 @@ fn process_doc_replication(
         let existing = db_err!(doc_table.get(doc_id.as_str()))?;
         existing
             .as_ref()
-            .and_then(|g| serde_json::from_slice(g.value()).ok())
+            .and_then(|g| deserialize_doc_record(g.value()).ok())
     };
 
     let existing_tree = existing_record
@@ -2063,6 +2152,62 @@ mod tests {
         assert_eq!(fetched.data["hello"], "world");
         // _revisions should be stripped from stored data
         assert!(fetched.data.get("_revisions").is_none());
+    }
+
+    /// Regression test for the recursion-limit bug: a document replicated
+    /// with a long, purely linear revision history (no conflicts — exactly
+    /// how a record updated hundreds of times over its life arrives via
+    /// `new_edits: false`) must still be readable. Verified against a real
+    /// production CouchDB (`kosmos-tauri`): a frequently-toggled record
+    /// reached revision 321 with zero branching, and every accessor that
+    /// deserialized its `DocRecord` (get, info, all_docs, attachments)
+    /// failed with "recursion limit exceeded" before `deserialize_doc_record`
+    /// (serde_stacker-backed) replaced the plain `serde_json::from_slice`
+    /// calls. 200 revisions comfortably exceeds serde_json's default
+    /// 128-level guard while staying well under any realistic Rust
+    /// call-stack ceiling, so this specifically exercises the guard rather
+    /// than a genuine stack limit.
+    #[tokio::test]
+    async fn deep_linear_history_from_replication_is_readable() {
+        let (_dir, db) = temp_db();
+
+        const DEPTH: usize = 200;
+        let mut ids: Vec<String> = (0..DEPTH).map(|i| format!("{i:03}rev")).collect();
+        ids.reverse(); // newest-first, matching CouchDB's `_revisions.ids` order
+
+        let doc = Document {
+            id: "hot-doc".into(),
+            rev: Some(Revision::new(DEPTH as u64, ids[0].clone())),
+            deleted: false,
+            data: serde_json::json!({
+                "status": "toggled-many-times",
+                "_revisions": {
+                    "start": DEPTH as u64,
+                    "ids": ids,
+                }
+            }),
+            attachments: HashMap::new(),
+        };
+        let results = db
+            .bulk_docs(vec![doc], BulkDocsOptions::replication())
+            .await
+            .unwrap();
+        assert!(
+            results[0].ok,
+            "replicating a {DEPTH}-revision-deep document should succeed"
+        );
+
+        // GET must not fail with a JSON recursion error.
+        let fetched = db.get("hot-doc", GetOptions::default()).await.unwrap();
+        assert_eq!(fetched.data["status"], "toggled-many-times");
+
+        // GET /{db} (info) must not fail either — it scans every DocRecord.
+        let info = db.info().await.unwrap();
+        assert_eq!(info.doc_count, 1);
+
+        // all_docs must also survive scanning the deep record.
+        let all = db.all_docs(AllDocsOptions::default()).await.unwrap();
+        assert_eq!(all.rows.len(), 1);
     }
 
     #[tokio::test]

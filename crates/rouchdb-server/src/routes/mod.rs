@@ -3,14 +3,17 @@ pub mod all_dbs;
 pub mod all_docs;
 pub mod attachment;
 pub mod bulk;
+pub mod bulk_get;
 pub mod changes;
 pub mod compact;
 pub mod database;
 pub mod design;
 pub mod document;
 pub mod fauxton;
+pub mod local;
 pub mod membership;
 pub mod query;
+pub mod revs_diff;
 pub mod root;
 pub mod security;
 pub mod session;
@@ -29,7 +32,7 @@ use crate::state::AppState;
 pub fn build_routes(state: AppState) -> Router {
     Router::new()
         // Server-level endpoints
-        .route("/", get(root::root_info))
+        .route("/", get(root::root_info).head(root::root_info))
         .route(
             "/_session",
             get(session::get_session)
@@ -50,6 +53,8 @@ pub fn build_routes(state: AppState) -> Router {
             get(all_docs::get_all_docs).post(all_docs::post_all_docs),
         )
         .route("/{db}/_bulk_docs", post(bulk::bulk_docs))
+        .route("/{db}/_bulk_get", post(bulk_get::post_bulk_get))
+        .route("/{db}/_revs_diff", post(revs_diff::post_revs_diff))
         .route(
             "/{db}/_changes",
             get(changes::get_changes).post(changes::post_changes),
@@ -90,9 +95,33 @@ pub fn build_routes(state: AppState) -> Router {
         .route(
             "/{db}",
             get(database::get_db_info)
+                .head(database::get_db_info)
                 .put(database::put_db)
                 .post(database::post_doc)
                 .delete(database::delete_db),
+        )
+        .route(
+            "/{db}/",
+            get(database::get_db_info)
+                .head(database::get_db_info)
+                .put(database::put_db)
+                .post(database::post_doc)
+                .delete(database::delete_db),
+        )
+        // Local documents / checkpoints (must come before 3-segment attachment route)
+        .route(
+            "/{db}/_local",
+            get(local::get_all_local),
+        )
+        .route(
+            "/{db}/_local/",
+            get(local::get_all_local),
+        )
+        .route(
+            "/{db}/_local/{*id}",
+            get(local::get_local)
+                .put(local::put_local)
+                .delete(local::delete_local),
         )
         // Attachments (before generic doc catch-all)
         .route(

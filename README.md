@@ -177,7 +177,7 @@ rouchdb-server mydb.redb --port 5984
 open http://localhost:5984/_utils/
 ```
 
-The server exposes 25+ CouchDB-compatible REST endpoints — documents, queries, changes feed, attachments, security, design docs, Mango indexes, and more — so any CouchDB client (Fauxton, PouchDB, curl) can connect to it.
+The server exposes full CouchDB 3.x REST endpoints — including database info (`/{db}/`), revision diffing (`/{db}/_revs_diff`), bulk retrieval (`/{db}/_bulk_get`), local document / replication checkpoints (`/{db}/_local/{id}`), live changes feeds (`normal`, `longpoll`, `continuous`), attachments, security, design docs, and Mango queries — enabling seamless PouchDB 9 live replication.
 
 Options:
 

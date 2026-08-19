@@ -74,9 +74,7 @@ impl AuthClient {
             )));
         }
 
-        resp.json::<Session>()
-            .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))
+        self.get_session().await
     }
 
     /// Log out (delete session cookie).
