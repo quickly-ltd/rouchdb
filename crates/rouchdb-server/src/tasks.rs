@@ -41,6 +41,18 @@ pub struct ActiveTaskInfo {
     pub last_error: Option<String>,
 }
 
+/// Legacy `/sync-status`-shaped summary derived from [`ActiveTasks`] — see
+/// [`ActiveTasks::sync_status_summary`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncStatusSummary {
+    pub state: &'static str,
+    pub remote_configured: bool,
+    pub last_error: Option<String>,
+    pub docs_pushed: u64,
+    pub docs_pulled: u64,
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -76,6 +88,74 @@ impl ActiveTasks {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// Summarizes replication tasks into the shape a legacy express-pouchdb
+    /// sidecar's bespoke `/sync-status` endpoint used to return, so an
+    /// embedder that needs to serve that contract (e.g. for clients that
+    /// haven't switched to reading `_active_tasks` directly) can derive it
+    /// here instead of re-implementing the mapping client-side.
+    ///
+    /// `remote_label` is the opaque source/target name marking the far side
+    /// of the sync pair — whatever label the caller passed as `source_name`/
+    /// `target_name` to [`ActiveTasks::start_live_replication`].
+    pub fn sync_status_summary(&self, remote_label: &str) -> SyncStatusSummary {
+        let tasks: Vec<ActiveTaskInfo> = self
+            .snapshot()
+            .into_iter()
+            .filter(|t| t.task_type == "replication")
+            .collect();
+
+        if tasks.is_empty() {
+            return SyncStatusSummary {
+                state: "offline",
+                remote_configured: false,
+                last_error: None,
+                docs_pushed: 0,
+                docs_pulled: 0,
+            };
+        }
+
+        let docs_pushed = tasks
+            .iter()
+            .find(|t| t.target == remote_label)
+            .map(|t| t.docs_written)
+            .unwrap_or(0);
+        let docs_pulled = tasks
+            .iter()
+            .find(|t| t.source == remote_label)
+            .map(|t| t.docs_written)
+            .unwrap_or(0);
+
+        // Worst-first: an error or an unconnected task anywhere in the pair
+        // outweighs another task quietly being idle.
+        fn priority(status: &str) -> u8 {
+            match status {
+                "error" => 0,
+                "connecting" => 1,
+                "syncing" => 2,
+                _ => 3, // "idle"
+            }
+        }
+
+        let mut state = "idle";
+        let mut last_error = None;
+        for t in &tasks {
+            if priority(t.status) < priority(state) {
+                state = t.status;
+            }
+            if let Some(ref e) = t.last_error {
+                last_error = Some(e.clone());
+            }
+        }
+
+        SyncStatusSummary {
+            state,
+            remote_configured: true,
+            last_error,
+            docs_pushed,
+            docs_pulled,
+        }
     }
 
     /// Starts a live (continuous) replication and keeps this registry
@@ -259,5 +339,78 @@ mod tests {
         })
         .await
         .expect("task should be removed from the registry after cancel");
+    }
+
+    fn insert_task(active_tasks: &ActiveTasks, id: u64, info: ActiveTaskInfo) {
+        active_tasks
+            .inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, info);
+    }
+
+    fn task(source: &str, target: &str, status: &'static str, docs_written: u64) -> ActiveTaskInfo {
+        ActiveTaskInfo {
+            task_type: "replication",
+            pid: "rouchdb-test".into(),
+            source: source.into(),
+            target: target.into(),
+            continuous: true,
+            docs_read: docs_written,
+            docs_written,
+            doc_write_failures: 0,
+            started_on: 0,
+            updated_on: 0,
+            status,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn sync_status_summary_offline_when_no_tasks() {
+        let active_tasks = ActiveTasks::new();
+        let summary = active_tasks.sync_status_summary("remote");
+        assert_eq!(
+            summary,
+            SyncStatusSummary {
+                state: "offline",
+                remote_configured: false,
+                last_error: None,
+                docs_pushed: 0,
+                docs_pulled: 0,
+            }
+        );
+    }
+
+    /// Mirrors `mapActiveTasksToSyncStatus` in the frontend's `http-upstream.ts`:
+    /// push is the task whose `target` is the remote label, pull is the task
+    /// whose `source` is the remote label, and the overall state is the
+    /// *worst* one across the pair (error > connecting > syncing > idle).
+    #[test]
+    fn sync_status_summary_maps_push_pull_and_worst_state() {
+        let active_tasks = ActiveTasks::new();
+        insert_task(&active_tasks, 1, task("alldata", "remote", "idle", 5));
+        insert_task(&active_tasks, 2, task("remote", "alldata", "syncing", 3));
+
+        let summary = active_tasks.sync_status_summary("remote");
+        assert_eq!(summary.state, "syncing");
+        assert!(summary.remote_configured);
+        assert_eq!(summary.docs_pushed, 5);
+        assert_eq!(summary.docs_pulled, 3);
+        assert_eq!(summary.last_error, None);
+    }
+
+    #[test]
+    fn sync_status_summary_surfaces_last_error() {
+        let active_tasks = ActiveTasks::new();
+        let mut errored = task("alldata", "remote", "error", 0);
+        errored.last_error = Some("bağlantı koptu".into());
+        insert_task(&active_tasks, 1, errored);
+        insert_task(&active_tasks, 2, task("remote", "alldata", "idle", 2));
+
+        let summary = active_tasks.sync_status_summary("remote");
+        assert_eq!(summary.state, "error");
+        assert_eq!(summary.last_error, Some("bağlantı koptu".to_string()));
+        assert_eq!(summary.docs_pulled, 2);
     }
 }

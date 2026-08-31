@@ -11,7 +11,7 @@ use rouchdb::Database;
 use tower_http::cors::CorsLayer;
 
 use crate::state::AppState;
-pub use crate::tasks::{ActiveTaskInfo, ActiveTasks};
+pub use crate::tasks::{ActiveTaskInfo, ActiveTasks, SyncStatusSummary};
 
 /// Configuration for the RouchDB HTTP server.
 #[derive(Debug, Clone)]
