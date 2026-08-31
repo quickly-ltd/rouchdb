@@ -9,3 +9,5 @@
 /node_modules
 /.infigraph
 /.claude
+.codegraph/
+.DS_Store
