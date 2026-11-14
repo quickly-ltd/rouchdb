@@ -109,3 +109,60 @@ async fn deleted_database_ends_waiting_changes_feeds() {
         }
     }
 }
+
+struct PausedDestroy {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl rouchdb::Plugin for PausedDestroy {
+    fn name(&self) -> &str {
+        "paused-destroy"
+    }
+    fn on_destroy<'a, 'f>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = rouchdb::Result<()>> + Send + 'f>>
+    where
+        'a: 'f,
+        Self: 'f,
+    {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn audit_regression_recreation_waits_until_destroy_finishes() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let db = Arc::new(Database::memory(DB).with_plugin(Arc::new(PausedDestroy {
+        entered: entered.clone(),
+        release: release.clone(),
+    })));
+    let app = app_with(db, &config());
+    let deletion = tokio::spawn({
+        let app = app.clone();
+        async move { delete(&app, "/db").await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let mut recreate = Box::pin(call(&app, Method::PUT, "/db", None));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut recreate)
+            .await
+            .is_err(),
+        "recreation must not acknowledge a new database while its storage is being destroyed"
+    );
+    release.notify_one();
+    assert_eq!(deletion.await.unwrap().status, StatusCode::OK);
+    assert_eq!(recreate.await.status, StatusCode::CREATED);
+    assert_eq!(
+        put(&app, "/db/survivor", json!({"v": 1})).await.status,
+        StatusCode::CREATED
+    );
+    assert_eq!(get(&app, "/db/survivor").await.json()["v"], 1);
+}

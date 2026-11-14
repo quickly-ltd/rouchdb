@@ -103,7 +103,10 @@ impl ActiveTasks {
         let tasks: Vec<ActiveTaskInfo> = self
             .snapshot()
             .into_iter()
-            .filter(|t| t.task_type == "replication")
+            .filter(|t| {
+                t.task_type == "replication"
+                    && (t.source == remote_label || t.target == remote_label)
+            })
             .collect();
 
         if tasks.is_empty() {
@@ -416,5 +419,29 @@ mod tests {
         assert_eq!(summary.state, "error");
         assert_eq!(summary.last_error, Some("bağlantı koptu".to_string()));
         assert_eq!(summary.docs_pulled, 2);
+    }
+    #[test]
+    fn audit_regression_summary_isolates_remote_connections() {
+        let tasks = ActiveTasks::new();
+        insert_task(&tasks, 1, task("local", "remote-a", "idle", 5));
+        let mut unrelated = task("remote-b", "local", "error", 9);
+        unrelated.last_error = Some("remote-b unavailable".into());
+        insert_task(&tasks, 2, unrelated);
+        insert_task(&tasks, 3, task("remote-a", "local", "idle", 3));
+        let summary = tasks.sync_status_summary("remote-a");
+        assert_eq!(summary.state, "idle");
+        assert_eq!(summary.last_error, None);
+        assert_eq!((summary.docs_pushed, summary.docs_pulled), (5, 3));
+        assert!(summary.remote_configured);
+        assert_eq!(
+            tasks.sync_status_summary("missing"),
+            SyncStatusSummary {
+                state: "offline",
+                remote_configured: false,
+                last_error: None,
+                docs_pushed: 0,
+                docs_pulled: 0,
+            }
+        );
     }
 }

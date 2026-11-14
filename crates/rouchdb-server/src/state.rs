@@ -23,6 +23,9 @@ pub struct AppState {
     /// Set by `DELETE /{db}` and cleared by `PUT /{db}`: while set, the
     /// database does not exist and every database route answers 404.
     pub deleted: Arc<AtomicBool>,
+    /// Serialize destruction and recreation: PUT must not publish a new
+    /// database until the preceding DELETE has finished clearing storage.
+    pub(crate) lifecycle: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -34,6 +37,7 @@ impl AppState {
             auth,
             writes: Arc::new(tokio::sync::watch::Sender::new(0)),
             deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 

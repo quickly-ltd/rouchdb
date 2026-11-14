@@ -57,6 +57,7 @@ pub async fn put_db(
             "Cannot create database {db}: single-db mode"
         ))));
     }
+    let _lifecycle = state.lifecycle.lock().await;
     if !state.set_deleted(false) {
         return Err(AppError(RouchError::DatabaseExists(
             "The database could not be created, the file already exists.".into(),
@@ -76,6 +77,7 @@ pub async fn delete_db(
     State(state): State<AppState>,
     Path(db): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let _lifecycle = state.lifecycle.lock().await;
     state.check_db(&db)?;
     // Mark it deleted first so no new request writes into it while it is
     // being destroyed; if destroying fails, nothing was removed.

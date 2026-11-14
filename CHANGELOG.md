@@ -6,6 +6,13 @@ This project follows [Semantic Versioning](https://semver.org/). Since we are pr
 
 ## [Unreleased]
 
+### Fixed
+
+- Serialize HTTP database deletion and recreation so `PUT /{db}` cannot acknowledge a new database before an in-flight deletion clears its storage.
+- Cancel live replication while adapter I/O or event delivery is pending; a full event queue no longer prevents the worker from stopping. Terminal completion on cancellation is best-effort when the queue is full.
+- Report unsuccessful HTTP session logout responses instead of returning success.
+- Restrict `sync_status_summary(remote_label)` to the requested connection so other replications cannot change its status or error.
+
 ### Added
 
 - **PouchDB 9 Replication Surface Compatibility (rouchdb-server):**
