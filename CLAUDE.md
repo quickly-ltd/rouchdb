@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-RouchDB is a local-first document database in Rust — the Rust equivalent of PouchDB. It stores JSON documents locally (in-memory or on disk via redb) and replicates bidirectionally with CouchDB using the standard replication protocol. Pure Rust, no C dependencies.
+RouchDB is a local-first document database in Rust — the Rust equivalent of PouchDB. It stores JSON documents locally (in-memory or on disk via redb) and replicates bidirectionally with CouchDB using the standard replication protocol. No system libraries required: pure-Rust storage (redb) and rustls for HTTPS by default (`native-tls` / `rustls-tls-native-roots` are opt-in features).
 
 ## Build & Test Commands
 
@@ -24,8 +24,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # Integration tests (require CouchDB at localhost:15984)
 docker compose up -d
-cargo test -p rouchdb --test '*' -- --ignored
+bash scripts/test-couchdb.sh              # every "requires CouchDB" test, in parallel
+bash scripts/test-blocked.sh              # xfail: the "blocked on Fxx" tests must still fail
 cargo test -p rouchdb --test replication replicate_memory_to_couchdb -- --ignored
+
+# Benchmarks (criterion, crates/rouchdb-bench)
+cargo bench -p rouchdb-bench
+cargo bench --workspace --no-run          # compile-only, as in CI
 
 # HTTP server
 cargo run -p rouchdb-server -- mydb.redb --port 5984
@@ -49,12 +54,14 @@ rouchdb                     <- umbrella: Database struct + re-exports + Plugin t
 ├── rouchdb-adapter-memory  -> core         (in-memory storage)
 ├── rouchdb-adapter-redb    -> core         (persistent storage via redb)
 ├── rouchdb-adapter-http    -> core         (CouchDB REST client via reqwest + cookie auth)
-├── rouchdb-changes         -> core         (changes feed + live streaming + events)
+├── rouchdb-changes         -> core, query  (changes feed + live streaming + events)
 ├── rouchdb-replication     -> core, query  (CouchDB replication protocol)
 ├── rouchdb-query           -> core         (Mango selectors + map/reduce)
-├── rouchdb-views           -> core         (design documents + view engine)
+├── rouchdb-views           -> core, query  (design documents + view engine)
 ├── rouchdb-server          -> rouchdb, core (Axum HTTP server + Fauxton UI)
-└── rouchdb-cli             -> rouchdb      (CLI tool for database inspection + CRUD)
+├── rouchdb-cli             -> rouchdb, core (CLI tool for database inspection + CRUD)
+├── rouchdb-bench           -> rouchdb, core (criterion benchmarks)
+└── rouchdb-compat-tests    -> core, adapter-redb + rouchdb 0.4.0 from crates.io (cross-version tests)
 ```
 
 ### The Adapter Trait (`rouchdb-core/src/adapter.rs`)
@@ -97,7 +104,7 @@ All documents are `serde_json::Value` (dynamic JSON). `Document` struct holds `i
 
 ### Server Architecture (`rouchdb-server/src/`)
 
-Axum 0.8 HTTP server. Single-db mode: one `.redb` file = one database. Route order matters — specific `_`-prefixed routes before `/{db}/{docid}` catch-all. State: `AppState { db: Arc<Database>, db_name: String }`. CORS configured to mirror request origin with credentials support (required for Fauxton). Error mapping: `RouchError` → CouchDB JSON `{"error": "...", "reason": "..."}`.
+Axum 0.8 HTTP server. Single-db mode: one `.redb` file = one database. Route order matters — specific `_`-prefixed routes before `/{db}/{docid}` catch-all. State: `AppState { db: Arc<Database>, db_name: String }`. CORS is off unless `ServerConfig::cors_origins` / `--cors-origin` lists origins; optional admin auth via `ServerConfig::admin` / `--admin`, required on a non-loopback `--host` unless `--allow-unauthenticated`. On a loopback `--host` (or with `--allowed-host`) the `Host` check (`host.rs`) answers 400, before auth, CORS and routing, to a `Host` that is not a loopback name, the bind address or an allowed host; every response gets `X-Content-Type-Options: nosniff`. Error mapping: `RouchError` → CouchDB JSON `{"error": "...", "reason": "..."}`.
 
 Reports CouchDB 3.3.3 at `GET /` so Fauxton enables all UI panels. `POST /_session` accepts both JSON and form-encoded data (Fauxton sends form data). Sets `AuthSession` cookie for browser-based auth flow.
 
@@ -109,11 +116,12 @@ Clap-based CLI. Read commands: `info`, `get`, `all-docs`, `find`, `changes`, `du
 
 ## Workspace Conventions
 
-- **Edition 2024**, resolver 3, stable Rust (no nightly features)
+- **Edition 2024**, resolver 3, stable Rust (no nightly features). MSRV 1.88 (`rust-version`); the dev/CI toolchain is pinned in `rust-toolchain.toml`
 - Workspace-level `version` in root `Cargo.toml` — all crate versions must stay in sync
-- Internal dependency versions must match workspace version (e.g., `rouchdb-core = { path = "../rouchdb-core", version = "0.2.1" }`)
+- Internal dependency versions must match workspace version (e.g., `rouchdb-core = { path = "../rouchdb-core", version = "0.5.1" }`)
 - All async via Tokio; tests use `#[tokio::test]`
-- Integration tests are `#[ignore]` — they need CouchDB at `http://admin:password@localhost:15984` (override with `COUCHDB_URL` env var)
+- CouchDB integration tests are `#[ignore = "requires CouchDB"]` — they need CouchDB at `http://admin:password@localhost:15984` (override with `COUCHDB_URL` env var). Create their databases with `common::fresh_remote_db` (an RAII guard that deletes it on drop, names start with `rouchdb_test_`) and take host/credentials from `common::couchdb()`; never log in as the admin with a wrong password (CouchDB locks the account)
+- A test that exposes a known unfixed bug is marked `#[ignore = "blocked on Fxx"]` and named `blocked_on_fxx_*` rather than weakened; `scripts/test-couchdb.sh` skips those by name and `scripts/test-blocked.sh` checks they still fail
 - `Database::memory("test")` is the go-to for fast unit testing
 - `tempfile::tempdir()` for RedbAdapter tests
 - Edition 2024 requires collapsible if-let chains (no nested `if let` inside `if`)
@@ -124,8 +132,53 @@ Clap-based CLI. Read commands: `info`, `get`, `all-docs`, `find`, `changes`, `du
 
 ## Publishing
 
-All 9 library crates must be published to crates.io in dependency order: core → adapter-memory, changes, adapter-redb, adapter-http → query, views, replication → rouchdb (umbrella). Server and CLI are `publish = false`.
+All 9 library crates must be published to crates.io in dependency order: core → adapter-memory, adapter-redb, adapter-http, query → changes, views, replication → rouchdb (umbrella). Server, CLI and bench are `publish = false`.
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`): `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`. Docs deploy via `docs.yml` (mdBook → GitHub Pages).
+GitHub Actions (`.github/workflows/ci.yml`), all on the toolchain pinned in `rust-toolchain.toml` unless noted, every job with a `timeout-minutes`: fmt + a check that every `#[ignore]` says `"requires CouchDB"` or `"blocked on Fxx"` + clippy `-D warnings` + TLS feature checks, `cargo test --workspace --no-fail-fast` (README examples are doctests of the `rouchdb` crate), the CouchDB suite against a pinned `couchdb:3.5.1` service (plus the non-blocking xfail check and a leftover-database check), `cargo bench --no-run` plus a one-iteration smoke run, an MSRV (1.88) check, and a non-blocking clippy run on stable/beta. `minimal-versions.yml` checks the declared dependency lower bounds with `-Z direct-minimal-versions` (manifest changes + weekly). Non-blocking quality workflows: `coverage.yml` (cargo-llvm-cov on push to main), `mutants.yml` (`cargo mutants --in-diff` on PRs, whole suite including the CouchDB tests; survivors go to the job summary without failing the job), `nightly.yml` (suites repeated 5x with `scripts/repeat-tests.sh`, Linux + macOS). `bench.yml` runs the benchmarks on demand (workflow_dispatch). Docs deploy via `docs.yml` (mdBook → GitHub Pages).
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **rouchdb** (2793 symbols, 9667 relationships, 241 execution flows).
+
+> Index stale? Run `node .gitnexus/run.cjs analyze --index-only` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? Bootstrap with `npx`, `bunx`, or `pnpm dlx` — e.g. `bunx gitnexus@latest analyze` (npm 11 npx crash; #1939).
+
+## Always Do
+
+- **MUST run impact before editing.** Use `impact({target: "symbolName", direction: "upstream"})` or `node .gitnexus/run.cjs impact "symbolName" --direction upstream --repo .`; report callers, processes, and risk. Never substitute grep for graph analysis.
+- **MUST analyze graph changes before committing.** Use `detect_changes({scope: "all"})` (MCP) or `node .gitnexus/run.cjs detect-changes --scope all --repo .` (CLI fallback). `partial: true` or `truncated: true` is not a clean check — a zero means unseen, not unaffected; re-run it. For regression review: `detect_changes({scope: "compare", base_ref: "main"})` or `node .gitnexus/run.cjs detect-changes --scope compare --base-ref "main" --repo .`.
+- MUST warn on HIGH/CRITICAL `risk` pre-edit; never use `riskSharedAxes` to waive a HIGH/CRITICAL `risk` warning. Compare File/symbol: MCP File omits axes; Graph-RAG expands File.
+- **MUST treat `risk: UNKNOWN` as unresolved, not as low.** An empty caller set is not evidence the symbol is unused — it can also mean the callers are not resolvable by the index (plain-object property access, dynamic dispatch, cross-language calls). `impact` pairs `UNKNOWN` with a `riskNote` saying so. Confirm with a text search before treating the symbol as safe to change or delete; do not proceed on the strength of a zero.
+- **MUST use `query({search_query: "concept"})` for concepts/flows, `context({name: "symbolName"})` for a named symbol, or `impact` for blast radius, on read-only callers, dependencies, imports, or execution flow.** Graph first; text search only for empty/`UNKNOWN`/literals.
+- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+
+## Never Do
+
+- NEVER edit a function, class, or method before MCP/CLI impact analysis.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis, and never read `UNKNOWN` as an all-clear — it means the walk could not answer, which is the one verdict that requires confirming by other means.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit before MCP/CLI graph change analysis.
+
+## Resources
+
+| Resource | Use for |
+| --- | --- |
+| `gitnexus://repo/rouchdb/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/rouchdb/clusters` | All functional areas |
+| `gitnexus://repo/rouchdb/processes` | All execution flows |
+| `gitnexus://repo/rouchdb/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+| --- | --- |
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->

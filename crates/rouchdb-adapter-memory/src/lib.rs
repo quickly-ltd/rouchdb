@@ -2,20 +2,26 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use md5::{Digest, Md5};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
-use rouchdb_core::adapter::Adapter;
+use rouchdb_core::adapter::{Adapter, ChangeNotice};
 use rouchdb_core::document::*;
 use rouchdb_core::error::{Result, RouchError};
-use rouchdb_core::merge::{collect_conflicts, is_deleted, latest_leaf, merge_tree, winning_rev};
+use rouchdb_core::merge::{
+    collect_conflicts, is_deleted, latest_leaf, remove_leaves, revs_diff_one, winning_rev,
+};
 use rouchdb_core::rev_tree::{
-    NodeOpts, RevPath, RevStatus, RevTree, build_path_from_revs, collect_leaves, find_rev_ancestry,
-    rev_exists,
+    RevStatus, RevTree, collect_leaves, find_rev_ancestry, revs_info, traverse_rev_tree,
+};
+use rouchdb_core::write::{
+    LocalWrite, PlannedWrite, ReplicatedWrite, edit_parent, error_result, local_doc_id,
+    local_document, ok_result, plan_local_write, plan_new_edit, plan_replicated_edit,
 };
 
-const DEFAULT_REV_LIMIT: u64 = 1000;
+/// Revisions kept per branch unless configured otherwise (CouchDB's
+/// default `_revs_limit`).
+pub const DEFAULT_REV_LIMIT: u64 = 1000;
 
 // ---------------------------------------------------------------------------
 // Internal storage types
@@ -37,6 +43,10 @@ struct StoredDoc {
 #[derive(Debug)]
 struct Inner {
     name: String,
+    /// This database's identity ([`Adapter::id`]): unique per instance and
+    /// renewed by `destroy()`, so same-named databases, or one database
+    /// before and after `destroy()`, never share replication checkpoints.
+    uuid: String,
     /// Documents keyed by ID.
     docs: HashMap<String, StoredDoc>,
     /// Sequence counter (monotonically increasing).
@@ -45,27 +55,66 @@ struct Inner {
     changes: BTreeMap<u64, (String, bool)>,
     /// Local (non-replicated) documents.
     local_docs: HashMap<String, serde_json::Value>,
+    /// The security document (kept apart from local documents, so that
+    /// `_local/_security` is an ordinary local document as in CouchDB).
+    security: SecurityDocument,
     /// Attachment data keyed by digest.
     attachments: HashMap<String, Vec<u8>>,
+    /// Number of purge requests applied.
+    purge_seq: u64,
 }
 
+/// Change notices buffered per subscriber before it lags (and re-reads the
+/// changes feed).
+const NOTICE_CAPACITY: usize = 1024;
+
 /// In-memory adapter for RouchDB. All data is held in RAM.
+///
+/// Clones share the data and the change notifications
+/// ([`Adapter::subscribe`]).
 #[derive(Debug, Clone)]
 pub struct MemoryAdapter {
     inner: Arc<RwLock<Inner>>,
+    rev_limit: u64,
+    notices: broadcast::Sender<ChangeNotice>,
 }
 
 impl MemoryAdapter {
     pub fn new(name: &str) -> Self {
         Self {
+            notices: broadcast::channel(NOTICE_CAPACITY).0,
             inner: Arc::new(RwLock::new(Inner {
                 name: name.to_string(),
+                uuid: Uuid::new_v4().to_string(),
                 docs: HashMap::new(),
                 update_seq: 0,
                 changes: BTreeMap::new(),
                 local_docs: HashMap::new(),
+                security: SecurityDocument::default(),
                 attachments: HashMap::new(),
+                purge_seq: 0,
             })),
+            rev_limit: DEFAULT_REV_LIMIT,
+        }
+    }
+
+    /// Keep at most `limit` revisions per branch of a document's history
+    /// (PouchDB's `revs_limit`, CouchDB's `_revs_limit`; 0 means no limit).
+    /// Older revisions are stemmed away and are no longer readable.
+    pub fn with_rev_limit(mut self, limit: u64) -> Self {
+        self.rev_limit = limit;
+        self
+    }
+
+    /// Announce the changes recorded after `since` to the subscribers. It
+    /// runs under the write lock, once the write is applied: a woken reader
+    /// waits for the lock and then sees the change.
+    fn announce(&self, inner: &Inner, since: u64) {
+        if self.notices.receiver_count() == 0 {
+            return;
+        }
+        for (seq, (doc_id, _)) in inner.changes.range(since + 1..) {
+            let _ = self.notices.send(ChangeNotice::new(*seq, doc_id.clone()));
         }
     }
 }
@@ -74,44 +123,36 @@ impl MemoryAdapter {
 // Helper functions
 // ---------------------------------------------------------------------------
 
-/// Generate a revision hash from the document content.
-fn generate_rev_hash(
-    doc_data: &serde_json::Value,
-    deleted: bool,
-    prev_rev: Option<&str>,
-) -> String {
-    let mut hasher = Md5::new();
-    // Include the previous revision in the hash for determinism
-    if let Some(prev) = prev_rev {
-        hasher.update(prev.as_bytes());
-    }
-    hasher.update(if deleted { b"1" } else { b"0" });
-    let serialized = serde_json::to_string(doc_data).unwrap_or_default();
-    hasher.update(serialized.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-fn rev_string(pos: u64, hash: &str) -> String {
-    format!("{}-{}", pos, hash)
-}
-
+/// Parse (and normalize) a revision string.
 fn parse_rev(rev_str: &str) -> Result<(u64, String)> {
-    let (pos_str, hash) = rev_str
-        .split_once('-')
-        .ok_or_else(|| RouchError::InvalidRev(rev_str.to_string()))?;
-    let pos: u64 = pos_str
-        .parse()
-        .map_err(|_| RouchError::InvalidRev(rev_str.to_string()))?;
-    Ok((pos, hash.to_string()))
+    let rev: Revision = rev_str.parse()?;
+    Ok((rev.pos, rev.hash))
 }
 
-fn compute_attachment_digest(data: &[u8]) -> String {
-    let mut hasher = Md5::new();
-    hasher.update(data);
-    let hash = hasher.finalize();
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(hash);
-    format!("md5-{}", b64)
+/// The canonical form of a revision string (`InvalidRev` if malformed).
+fn canonical_rev(rev_str: &str) -> Result<String> {
+    Ok(rev_str.parse::<Revision>()?.to_string())
+}
+
+/// The answer to a `changes` request with `limit: 0`: no change, and the
+/// position the feed stands at (like CouchDB: `since`, or the current
+/// sequence when descending).
+fn empty_changes(opts: &ChangesOptions, update_seq: u64) -> ChangesResponse {
+    let last_seq = if opts.descending {
+        Seq::Num(update_seq)
+    } else {
+        opts.since.clone()
+    };
+    ChangesResponse::new(Vec::new(), last_seq)
+}
+
+/// Map a failed attachment edit to the error the attachment APIs return.
+fn attachment_edit_error(result: DocResult) -> RouchError {
+    match result.error.as_deref() {
+        Some("conflict") => RouchError::Conflict,
+        Some("not_found") => RouchError::NotFound(result.reason.unwrap_or_default()),
+        _ => RouchError::BadRequest(result.reason.unwrap_or_default()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -132,24 +173,41 @@ impl Adapter for MemoryAdapter {
             }
         }
 
-        Ok(DbInfo {
-            db_name: inner.name.clone(),
+        Ok(DbInfo::new(
+            inner.name.clone(),
             doc_count,
             doc_del_count,
-            update_seq: Seq::Num(inner.update_seq),
-        })
+            inner.update_seq,
+        ))
+    }
+
+    async fn id(&self) -> Result<String> {
+        Ok(self.inner.read().await.uuid.clone())
     }
 
     async fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
+        if opts.open_revs.is_some() {
+            return Err(RouchError::BadRequest(
+                "open_revs is not supported by get(); use bulk_get".into(),
+            ));
+        }
+
+        let requested = opts.rev.as_deref().map(canonical_rev).transpose()?;
         let inner = self.inner.read().await;
+        if let Some(local) = local_doc_id(id) {
+            return match inner.local_docs.get(local) {
+                Some(stored) => Ok(local_document(local, stored.clone())),
+                None => Err(RouchError::NotFound("missing".into())),
+            };
+        }
         let stored = inner
             .docs
             .get(id)
             .ok_or_else(|| RouchError::NotFound(id.to_string()))?;
 
         // Determine which revision to return
-        let mut target_rev = if let Some(ref rev_str) = opts.rev {
-            rev_str.clone()
+        let mut target_rev = if let Some(rev_str) = requested {
+            rev_str
         } else {
             // Use the winning revision
             let winner = winning_rev(&stored.rev_tree)
@@ -167,12 +225,13 @@ impl Adapter for MemoryAdapter {
             target_rev = rev.to_string();
         }
 
-        // Get the data for this revision
+        // An unknown, stemmed, compacted or otherwise body-less revision is
+        // missing, never an empty document.
         let data = stored
             .rev_data
             .get(&target_rev)
             .cloned()
-            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            .ok_or_else(|| RouchError::NotFound("missing".into()))?;
 
         let deleted = stored
             .rev_deleted
@@ -186,11 +245,10 @@ impl Adapter for MemoryAdapter {
         }
 
         let (pos, hash) = parse_rev(&target_rev)?;
-        let rev = Revision::new(pos, hash);
 
         let mut doc = Document {
             id: id.to_string(),
-            rev: Some(rev),
+            rev: Some(Revision::new(pos, hash.clone())),
             deleted,
             data,
             attachments: HashMap::new(),
@@ -212,53 +270,37 @@ impl Adapter for MemoryAdapter {
             }
         }
 
-        // Add conflicts if requested
-        if opts.conflicts {
-            let conflicts = collect_conflicts(&stored.rev_tree);
-            if !conflicts.is_empty() {
-                let conflict_list: Vec<serde_json::Value> = conflicts
-                    .iter()
-                    .map(|c| serde_json::Value::String(c.to_string()))
-                    .collect();
-                if let serde_json::Value::Object(ref mut map) = doc.data {
+        if let serde_json::Value::Object(ref mut map) = doc.data {
+            // Add conflicts if requested
+            if opts.conflicts {
+                let conflicts = collect_conflicts(&stored.rev_tree);
+                if !conflicts.is_empty() {
+                    let conflict_list: Vec<serde_json::Value> = conflicts
+                        .iter()
+                        .map(|c| serde_json::Value::String(c.to_string()))
+                        .collect();
                     map.insert(
                         "_conflicts".to_string(),
                         serde_json::Value::Array(conflict_list),
                     );
                 }
             }
-        }
 
-        // Add revs_info if requested
-        if opts.revs_info {
-            use rouchdb_core::rev_tree::traverse_rev_tree;
-            let mut revs_info = Vec::new();
-            traverse_rev_tree(&stored.rev_tree, |node_pos, node, _root_pos| {
-                let rev_str = format!("{}-{}", node_pos, node.hash);
-                let status = if node.opts.deleted {
-                    "deleted"
-                } else {
-                    match node.status {
-                        rouchdb_core::rev_tree::RevStatus::Available => "available",
-                        rouchdb_core::rev_tree::RevStatus::Missing => "missing",
-                    }
-                };
-                revs_info.push(RevInfo {
-                    rev: rev_str,
-                    status: status.to_string(),
-                });
-            });
-            // Sort by pos descending (newest first)
-            revs_info.sort_by(|a, b| {
-                let a_pos: u64 = a.rev.split('-').next().unwrap_or("0").parse().unwrap_or(0);
-                let b_pos: u64 = b.rev.split('-').next().unwrap_or("0").parse().unwrap_or(0);
-                b_pos.cmp(&a_pos)
-            });
-            if let serde_json::Value::Object(ref mut map) = doc.data {
+            // The revision's ancestry, newest first.
+            if opts.revs
+                && let Some(ids) = find_rev_ancestry(&stored.rev_tree, pos, &hash)
+            {
                 map.insert(
-                    "_revs_info".to_string(),
-                    serde_json::to_value(&revs_info).unwrap(),
+                    "_revisions".to_string(),
+                    serde_json::json!({"start": pos, "ids": ids}),
                 );
+            }
+
+            // Add revs_info if requested: this revision's branch only.
+            if opts.revs_info
+                && let Some(info) = revs_info(&stored.rev_tree, pos, &hash)
+            {
+                map.insert("_revs_info".to_string(), serde_json::to_value(&info)?);
             }
         }
 
@@ -271,38 +313,42 @@ impl Adapter for MemoryAdapter {
         opts: BulkDocsOptions,
     ) -> Result<Vec<DocResult>> {
         let mut inner = self.inner.write().await;
+        let since = inner.update_seq;
         let mut results = Vec::with_capacity(docs.len());
 
         for doc in docs {
             let result = if opts.new_edits {
-                process_doc_new_edits(&mut inner, doc)
+                process_doc_new_edits(&mut inner, doc, true, self.rev_limit)
             } else {
-                process_doc_replication(&mut inner, doc)
+                process_doc_replication(&mut inner, doc, self.rev_limit)
             };
             results.push(result);
         }
 
+        self.announce(&inner, since);
         Ok(results)
     }
 
     async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
         let inner = self.inner.read().await;
 
-        // Collect all doc IDs sorted
-        let mut doc_ids: Vec<&String> = inner.docs.keys().collect();
-        doc_ids.sort();
-
-        if opts.descending {
-            doc_ids.reverse();
-        }
-
-        // If specific keys are requested, use those instead
+        // If specific keys are requested, use those (in request order,
+        // reversed for descending, like CouchDB); otherwise every id, sorted.
         let target_keys: Vec<String> = if let Some(ref keys) = opts.keys {
-            keys.clone()
+            let mut keys = keys.clone();
+            if opts.descending {
+                keys.reverse();
+            }
+            keys
         } else if let Some(ref key) = opts.key {
             vec![key.clone()]
         } else {
-            doc_ids.iter().map(|k| (*k).clone()).collect()
+            let mut doc_ids: Vec<String> = inner.docs.keys().cloned().collect();
+            doc_ids.sort();
+            if opts.descending {
+                doc_ids.reverse();
+            }
+            doc_ids
         };
 
         let mut rows = Vec::new();
@@ -331,11 +377,11 @@ impl Adapter for MemoryAdapter {
                 }
             }
 
-            if let Some(stored) = inner.docs.get(key.as_str()) {
-                let winner = match winning_rev(&stored.rev_tree) {
-                    Some(w) => w,
-                    None => continue,
-                };
+            let found = inner
+                .docs
+                .get(key.as_str())
+                .and_then(|stored| winning_rev(&stored.rev_tree).map(|w| (stored, w)));
+            if let Some((stored, winner)) = found {
                 let deleted = is_deleted(&stored.rev_tree);
 
                 // Skip deleted docs unless specific keys were requested
@@ -372,19 +418,16 @@ impl Adapter for MemoryAdapter {
                     None
                 };
 
-                rows.push(AllDocsRow {
-                    id: key.clone(),
-                    key: key.clone(),
-                    value: AllDocsRowValue {
-                        rev: winner.to_string(),
-                        deleted: if deleted { Some(true) } else { None },
-                    },
-                    doc: doc_json,
-                });
+                rows.push(
+                    AllDocsRow::document(
+                        key.clone(),
+                        AllDocsRowValue::new(winner.to_string(), deleted),
+                    )
+                    .with_doc(doc_json),
+                );
             } else if opts.keys.is_some() {
-                // For specific key lookups, include missing keys as errors
-                // (CouchDB returns {"key":"x","error":"not_found"})
-                // We skip these for now — they don't fit our row struct cleanly
+                // Every requested key gets a row (CouchDB).
+                rows.push(AllDocsRow::not_found(key.clone()));
             }
         }
 
@@ -414,16 +457,14 @@ impl Adapter for MemoryAdapter {
             None
         };
 
-        Ok(AllDocsResponse {
-            total_rows,
-            offset: opts.skip,
-            rows,
-            update_seq,
-        })
+        Ok(AllDocsResponse::new(total_rows, opts.skip, rows).with_update_seq(update_seq))
     }
 
     async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
         let inner = self.inner.read().await;
+        if opts.limit == Some(0) {
+            return Ok(empty_changes(&opts, inner.update_seq));
+        }
 
         let mut results = Vec::new();
         // Highest sequence actually inspected (even if filtered out), so the
@@ -490,15 +531,13 @@ impl Adapter for MemoryAdapter {
                     // array (deletion is signaled by the `deleted` field).
                     collect_leaves(&s.rev_tree)
                         .iter()
-                        .map(|l| ChangeRev {
-                            rev: l.rev_string(),
-                        })
+                        .map(|l| l.rev_string())
                         .collect()
                 } else {
-                    vec![ChangeRev { rev: rev_str }]
+                    vec![rev_str]
                 }
             } else {
-                vec![ChangeRev { rev: rev_str }]
+                vec![rev_str]
             };
 
             // Collect conflicts if requested
@@ -517,14 +556,12 @@ impl Adapter for MemoryAdapter {
                 None
             };
 
-            results.push(ChangeEvent {
-                seq: Seq::Num(*seq),
-                id: doc_id.clone(),
-                changes: changes_list,
-                deleted: *deleted,
-                doc,
-                conflicts,
-            });
+            results.push(
+                ChangeEvent::new(*seq, doc_id.clone(), changes_list)
+                    .with_deleted(*deleted)
+                    .with_doc(doc)
+                    .with_conflicts(conflicts),
+            );
 
             if let Some(limit) = opts.limit
                 && results.len() >= limit as usize
@@ -539,7 +576,7 @@ impl Adapter for MemoryAdapter {
             .or_else(|| max_scanned.map(Seq::Num))
             .unwrap_or(opts.since.clone());
 
-        Ok(ChangesResponse { results, last_seq })
+        Ok(ChangesResponse::new(results, last_seq))
     }
 
     async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
@@ -547,45 +584,13 @@ impl Adapter for MemoryAdapter {
         let mut results = HashMap::new();
 
         for (doc_id, rev_list) in revs {
-            let mut missing = Vec::new();
-            let mut possible_ancestors = Vec::new();
-
-            let stored = inner.docs.get(&doc_id);
-
-            for rev_str in &rev_list {
-                let (pos, hash) = parse_rev(rev_str)?;
-
-                let exists = stored
-                    .map(|s| rev_exists(&s.rev_tree, pos, &hash))
-                    .unwrap_or(false);
-
-                if !exists {
-                    missing.push(rev_str.clone());
-
-                    // Find possible ancestors (existing revisions with lower pos)
-                    if let Some(stored) = stored {
-                        let leaves = collect_leaves(&stored.rev_tree);
-                        for leaf in &leaves {
-                            if leaf.pos < pos {
-                                possible_ancestors.push(leaf.rev_string());
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !missing.is_empty() {
-                results.insert(
-                    doc_id,
-                    RevsDiffResult {
-                        missing,
-                        possible_ancestors,
-                    },
-                );
+            let tree = inner.docs.get(&doc_id).map(|s| &s.rev_tree);
+            if let Some(diff) = revs_diff_one(tree, &rev_list)? {
+                results.insert(doc_id, diff);
             }
         }
 
-        Ok(RevsDiffResponse { results })
+        Ok(RevsDiffResponse::new(results))
     }
 
     async fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
@@ -598,24 +603,18 @@ impl Adapter for MemoryAdapter {
             match inner.docs.get(&item.id) {
                 Some(stored) => {
                     let rev_str = if let Some(ref rev) = item.rev {
-                        rev.clone()
+                        canonical_rev(rev).unwrap_or_else(|_| rev.clone())
                     } else {
                         match winning_rev(&stored.rev_tree) {
                             Some(w) => w.to_string(),
                             None => {
-                                bulk_docs.push(BulkGetDoc {
-                                    ok: None,
-                                    error: Some(BulkGetError {
-                                        id: item.id.clone(),
-                                        rev: item.rev.unwrap_or_default(),
-                                        error: "not_found".into(),
-                                        reason: "missing".into(),
-                                    }),
-                                });
-                                results.push(BulkGetResult {
-                                    id: item.id,
-                                    docs: bulk_docs,
-                                });
+                                bulk_docs.push(BulkGetDoc::error(BulkGetError::new(
+                                    item.id.clone(),
+                                    item.rev.unwrap_or_default(),
+                                    "not_found",
+                                    "missing",
+                                )));
+                                results.push(BulkGetResult::new(item.id, bulk_docs));
                                 continue;
                             }
                         }
@@ -651,71 +650,40 @@ impl Adapter for MemoryAdapter {
                         if let Some(atts) = stored.rev_attachments.get(&rev_str)
                             && !atts.is_empty()
                         {
-                            use base64::Engine;
-                            let mut att_map = serde_json::Map::new();
-                            for (name, meta) in atts {
-                                let mut m = serde_json::Map::new();
-                                m.insert(
-                                    "content_type".into(),
-                                    serde_json::Value::String(meta.content_type.clone()),
-                                );
-                                m.insert(
-                                    "digest".into(),
-                                    serde_json::Value::String(meta.digest.clone()),
-                                );
-                                m.insert("length".into(), serde_json::json!(meta.length));
-                                if let Some(bytes) = inner.attachments.get(&meta.digest) {
-                                    m.insert(
-                                        "data".into(),
-                                        serde_json::Value::String(
-                                            base64::engine::general_purpose::STANDARD.encode(bytes),
-                                        ),
-                                    );
-                                    m.insert("stub".into(), serde_json::Value::Bool(false));
-                                } else {
-                                    m.insert("stub".into(), serde_json::Value::Bool(true));
-                                }
-                                att_map.insert(name.clone(), serde_json::Value::Object(m));
-                            }
+                            let att_map = atts
+                                .iter()
+                                .map(|(name, meta)| {
+                                    let bytes = inner.attachments.get(&meta.digest);
+                                    (name.clone(), meta.to_json(bytes.map(Vec::as_slice)))
+                                })
+                                .collect();
                             obj.insert("_attachments".into(), serde_json::Value::Object(att_map));
                         }
 
-                        bulk_docs.push(BulkGetDoc {
-                            ok: Some(serde_json::Value::Object(obj)),
-                            error: None,
-                        });
+                        bulk_docs.push(BulkGetDoc::ok(serde_json::Value::Object(obj)));
                     } else {
-                        bulk_docs.push(BulkGetDoc {
-                            ok: None,
-                            error: Some(BulkGetError {
-                                id: item.id.clone(),
-                                rev: rev_str,
-                                error: "not_found".into(),
-                                reason: "missing".into(),
-                            }),
-                        });
+                        bulk_docs.push(BulkGetDoc::error(BulkGetError::new(
+                            item.id.clone(),
+                            rev_str,
+                            "not_found",
+                            "missing",
+                        )));
                     }
                 }
                 None => {
-                    bulk_docs.push(BulkGetDoc {
-                        ok: None,
-                        error: Some(BulkGetError {
-                            id: item.id.clone(),
-                            rev: item.rev.unwrap_or_default(),
-                            error: "not_found".into(),
-                            reason: "missing".into(),
-                        }),
-                    });
+                    bulk_docs.push(BulkGetDoc::error(BulkGetError::new(
+                        item.id.clone(),
+                        item.rev.unwrap_or_default(),
+                        "not_found",
+                        "missing",
+                    )));
                 }
             }
 
-            results.push(BulkGetResult {
-                id: item.id,
-                docs: bulk_docs,
-            });
+            results.push(BulkGetResult::new(item.id, bulk_docs));
         }
 
-        Ok(BulkGetResponse { results })
+        Ok(BulkGetResponse::new(results))
     }
 
     async fn put_attachment(
@@ -726,57 +694,43 @@ impl Adapter for MemoryAdapter {
         data: Vec<u8>,
         content_type: &str,
     ) -> Result<DocResult> {
-        let digest = compute_attachment_digest(&data);
-        let length = data.len() as u64;
-
         let mut inner = self.inner.write().await;
 
-        // Store the attachment data
-        inner.attachments.insert(digest.clone(), data);
-
-        // Get or create the document
         let stored = inner
             .docs
             .get(doc_id)
             .ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
+        let parent: Revision = rev.parse()?;
+        let rev = parent.to_string();
 
-        // Verify the rev matches
-        let winner = winning_rev(&stored.rev_tree)
-            .ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
-        if winner.to_string() != rev {
-            return Err(RouchError::Conflict);
-        }
-
-        // Get current doc data and add attachment
+        // The new revision builds on `rev` (any leaf, not only the winner):
+        // its body plus the parent's attachments with this one added.
         let doc_data = stored
             .rev_data
-            .get(rev)
+            .get(&rev)
             .cloned()
-            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-
-        // Build updated document with attachment metadata
-        let att_meta = AttachmentMeta {
-            content_type: content_type.to_string(),
-            digest: digest.clone(),
-            length,
-            stub: true,
-            data: None,
-        };
+            .ok_or(RouchError::Conflict)?;
+        let parent_atts = stored
+            .rev_attachments
+            .get(&rev)
+            .cloned()
+            .unwrap_or_default();
+        let mut attachments = parent_atts.clone();
+        attachments.insert(att_id.to_string(), AttachmentMeta::new(content_type, data));
 
         let doc = Document {
             id: doc_id.to_string(),
-            rev: Some(winner.clone()),
+            rev: Some(parent),
             deleted: false,
-            data: doc_data.clone(),
-            attachments: {
-                let mut atts = HashMap::new();
-                atts.insert(att_id.to_string(), att_meta);
-                atts
-            },
+            data: doc_data,
+            attachments,
         };
-
-        // Process as a normal edit
-        let result = process_doc_new_edits(&mut inner, doc);
+        let tree = stored.rev_tree.clone();
+        let plan = plan_new_edit(Some(&tree), doc, Some(&parent_atts), false, self.rev_limit)
+            .map_err(attachment_edit_error)?;
+        let since = inner.update_seq;
+        let result = apply_write(&mut inner, plan);
+        self.announce(&inner, since);
         Ok(result)
     }
 
@@ -794,7 +748,7 @@ impl Adapter for MemoryAdapter {
             .ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
 
         let rev_str = if let Some(ref rev) = opts.rev {
-            rev.clone()
+            canonical_rev(rev)?
         } else {
             winning_rev(&stored.rev_tree)
                 .ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?
@@ -823,38 +777,43 @@ impl Adapter for MemoryAdapter {
             .docs
             .get(doc_id)
             .ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
-
-        let winner = winning_rev(&stored.rev_tree)
-            .ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
-        if winner.to_string() != rev {
-            return Err(RouchError::Conflict);
-        }
+        let parent: Revision = rev.parse()?;
+        let rev = parent.to_string();
 
         let doc_data = stored
             .rev_data
-            .get(rev)
+            .get(&rev)
             .cloned()
-            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            .ok_or(RouchError::Conflict)?;
+        let parent_atts = stored
+            .rev_attachments
+            .get(&rev)
+            .cloned()
+            .unwrap_or_default();
+        if !parent_atts.contains_key(att_id) {
+            return Err(RouchError::NotFound(format!(
+                "attachment {}/{}",
+                doc_id, att_id
+            )));
+        }
+        let mut attachments = parent_atts.clone();
+        attachments.remove(att_id);
 
         // Create a new revision (attachment removal is a document update)
+        // whose attachment set is exactly the remaining ones.
         let doc = Document {
             id: doc_id.to_string(),
-            rev: Some(winner.clone()),
+            rev: Some(parent),
             deleted: false,
             data: doc_data,
-            attachments: HashMap::new(),
+            attachments,
         };
-
-        let result = process_doc_new_edits(&mut inner, doc);
-
-        // The new revision carried the parent's attachments forward; drop the
-        // one being removed so it is no longer referenced.
-        if let Some(ref new_rev) = result.rev
-            && let Some(stored) = inner.docs.get_mut(doc_id)
-            && let Some(atts) = stored.rev_attachments.get_mut(new_rev)
-        {
-            atts.remove(att_id);
-        }
+        let tree = stored.rev_tree.clone();
+        let plan = plan_new_edit(Some(&tree), doc, Some(&parent_atts), false, self.rev_limit)
+            .map_err(attachment_edit_error)?;
+        let since = inner.update_seq;
+        let result = apply_write(&mut inner, plan);
+        self.announce(&inner, since);
         Ok(result)
     }
 
@@ -868,6 +827,7 @@ impl Adapter for MemoryAdapter {
     }
 
     async fn put_local(&self, id: &str, doc: serde_json::Value) -> Result<()> {
+        rouchdb_core::json::check_document_depth(&doc)?;
         let mut inner = self.inner.write().await;
         inner.local_docs.insert(id.to_string(), doc);
         Ok(())
@@ -894,7 +854,13 @@ impl Adapter for MemoryAdapter {
             stored.rev_data.retain(|k, _| leaf_revs.contains(k));
             stored.rev_deleted.retain(|k, _| leaf_revs.contains(k));
             stored.rev_attachments.retain(|k, _| leaf_revs.contains(k));
+
+            // ...and record in the tree that their bodies are gone.
+            mark_non_leaves_missing(&mut stored.rev_tree);
         }
+
+        // Drop attachment bytes no remaining revision references.
+        collect_unreferenced_attachments(&mut inner);
 
         Ok(())
     }
@@ -904,71 +870,86 @@ impl Adapter for MemoryAdapter {
         inner.docs.clear();
         inner.changes.clear();
         inner.local_docs.clear();
+        inner.security = SecurityDocument::default();
         inner.attachments.clear();
         inner.update_seq = 0;
+        inner.purge_seq = 0;
+        inner.uuid = Uuid::new_v4().to_string();
+        // Under the write lock, like `announce`: a woken reader sees the
+        // empty database and its new id.
+        let _ = self.notices.send(ChangeNotice::reset());
         Ok(())
+    }
+
+    fn subscribe(&self) -> Option<broadcast::Receiver<ChangeNotice>> {
+        Some(self.notices.subscribe())
     }
 
     async fn purge(&self, req: HashMap<String, Vec<String>>) -> Result<PurgeResponse> {
         let mut inner = self.inner.write().await;
+        let since = inner.update_seq;
         let mut purged = HashMap::new();
-        let mut docs_to_remove = Vec::new();
+        let mut bumped = false;
 
         for (doc_id, revs) in req {
-            let mut purged_revs = Vec::new();
-            if let Some(stored) = inner.docs.get_mut(&doc_id) {
-                for rev_str in &revs {
-                    if stored.rev_data.remove(rev_str).is_some() {
-                        stored.rev_deleted.remove(rev_str);
-                        stored.rev_attachments.remove(rev_str);
-                        purged_revs.push(rev_str.clone());
-
-                        // Also prune the revision from the rev_tree so that
-                        // winning_rev(), collect_conflicts(), and replication
-                        // don't reference purged revisions.
-                        if let Some((pos, hash)) = rev_str.split_once('-')
-                            && let Ok(pos) = pos.parse::<u64>()
-                        {
-                            prune_leaf_from_tree(&mut stored.rev_tree, pos, hash);
-                        }
-                    }
-                }
-                // Remove empty rev_tree paths after pruning
-                stored.rev_tree.retain(|p| !is_tree_empty(&p.tree));
-
-                if stored.rev_data.is_empty() {
-                    docs_to_remove.push((doc_id.clone(), stored.seq));
-                }
+            let revs = revs
+                .iter()
+                .map(|r| canonical_rev(r))
+                .collect::<Result<Vec<_>>>()?;
+            let Some(stored) = inner.docs.get(&doc_id) else {
+                continue;
+            };
+            // Only leaves can be purged; their ancestors go too unless another
+            // leaf still needs them. Nothing older is ever resurrected.
+            let (new_tree, removed) = remove_leaves(&stored.rev_tree, &revs);
+            if removed.is_empty() {
+                purged.insert(doc_id, removed);
+                continue;
             }
-            if !purged_revs.is_empty() {
-                purged.insert(doc_id, purged_revs);
+            let old_seq = stored.seq;
+            inner.changes.remove(&old_seq);
+
+            if new_tree.is_empty() {
+                inner.docs.remove(&doc_id);
+            } else {
+                // The winner may have changed: record the document again.
+                inner.update_seq += 1;
+                bumped = true;
+                let seq = inner.update_seq;
+                let deleted = is_deleted(&new_tree);
+                let stored = inner.docs.get_mut(&doc_id).expect("doc exists");
+                let mut kept = std::collections::HashSet::new();
+                traverse_rev_tree(&new_tree, |pos, node, _| {
+                    kept.insert(format!("{}-{}", pos, node.hash));
+                });
+                stored.rev_data.retain(|k, _| kept.contains(k));
+                stored.rev_deleted.retain(|k, _| kept.contains(k));
+                stored.rev_attachments.retain(|k, _| kept.contains(k));
+                stored.rev_tree = new_tree;
+                stored.seq = seq;
+                inner.changes.insert(seq, (doc_id.clone(), deleted));
             }
+            purged.insert(doc_id, removed);
         }
 
-        for (doc_id, seq) in docs_to_remove {
-            inner.changes.remove(&seq);
-            inner.docs.remove(&doc_id);
+        // A purge is a database update even when no document keeps a change
+        // entry (CouchDB bumps update_seq per purge request).
+        if !bumped {
+            inner.update_seq += 1;
         }
+        inner.purge_seq += 1;
+        collect_unreferenced_attachments(&mut inner);
+        self.announce(&inner, since);
 
-        Ok(PurgeResponse {
-            purge_seq: Some(inner.update_seq),
-            purged,
-        })
+        Ok(PurgeResponse::new(Some(inner.purge_seq), purged))
     }
 
     async fn get_security(&self) -> Result<SecurityDocument> {
-        let inner = self.inner.read().await;
-        match inner.local_docs.get("_security") {
-            Some(val) => serde_json::from_value(val.clone())
-                .map_err(|e| RouchError::DatabaseError(e.to_string())),
-            None => Ok(SecurityDocument::default()),
-        }
+        Ok(self.inner.read().await.security.clone())
     }
 
     async fn put_security(&self, doc: SecurityDocument) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        let val = serde_json::to_value(&doc)?;
-        inner.local_docs.insert("_security".to_string(), val);
+        self.inner.write().await.security = doc;
         Ok(())
     }
 }
@@ -977,140 +958,49 @@ impl Adapter for MemoryAdapter {
 // Document processing (new_edits = true)
 // ---------------------------------------------------------------------------
 
-fn process_doc_new_edits(inner: &mut Inner, doc: Document) -> DocResult {
-    let doc_id = if doc.id.is_empty() {
-        Uuid::new_v4().to_string()
-    } else {
-        doc.id.clone()
-    };
-
-    let existing = inner.docs.get(&doc_id);
-
-    // Check for conflicts: if the doc has a _rev, it must match the winning rev
-    if let Some(stored) = existing {
-        let winner = winning_rev(&stored.rev_tree);
-
-        match (&doc.rev, &winner) {
-            (Some(provided_rev), Some(current_winner))
-                if provided_rev.to_string() != current_winner.to_string() =>
-            {
-                return DocResult {
-                    ok: false,
-                    id: doc_id,
-                    rev: None,
-                    error: Some("conflict".to_string()),
-                    reason: Some("Document update conflict.".to_string()),
-                };
+/// Apply one `new_edits=true` write. The edit rules (conflicts, attachment
+/// inheritance, revision hashing) live in `rouchdb_core::write` so every
+/// adapter behaves the same; this only loads the inputs and stores the plan.
+fn process_doc_new_edits(
+    inner: &mut Inner,
+    mut doc: Document,
+    inherit: bool,
+    rev_limit: u64,
+) -> DocResult {
+    if let Err(e) = doc.prepare_for_write() {
+        // The bare reason, as CouchDB and replicated writes report it.
+        let reason = match e {
+            RouchError::BadRequest(reason) => reason,
+            other => other.to_string(),
+        };
+        return error_result(&doc.id, "bad_request", &reason);
+    }
+    if doc.id.is_empty() {
+        // 32 hex digits, like the ids CouchDB generates.
+        doc.id = Uuid::new_v4().simple().to_string();
+    }
+    if local_doc_id(&doc.id).is_some() {
+        return match plan_local_write(doc) {
+            Ok(LocalWrite::Put { id, body, result }) => {
+                inner.local_docs.insert(id, body);
+                result
             }
-            // Creating a doc that already exists and is not deleted is a
-            // conflict; if the current winner is deleted, fall through and
-            // allow re-creating it at the same id.
-            (None, Some(_)) if !is_deleted(&stored.rev_tree) => {
-                return DocResult {
-                    ok: false,
-                    id: doc_id,
-                    rev: None,
-                    error: Some("conflict".into()),
-                    reason: Some("Document update conflict".into()),
-                };
+            Ok(LocalWrite::Delete { id, result }) => {
+                inner.local_docs.remove(&id);
+                result
             }
-            _ => {}
-        }
-    } else if doc.rev.is_some() {
-        // Updating a doc that doesn't exist
-        return DocResult {
-            ok: false,
-            id: doc_id,
-            rev: None,
-            error: Some("not_found".into()),
-            reason: Some("missing".into()),
+            Err(result) => result,
         };
     }
 
-    // Generate new revision
-    let new_pos = doc.rev.as_ref().map(|r| r.pos + 1).unwrap_or(1);
-    let prev_rev_str = doc.rev.as_ref().map(|r| r.to_string());
-    let new_hash = generate_rev_hash(&doc.data, doc.deleted, prev_rev_str.as_deref());
-    let new_rev_str = rev_string(new_pos, &new_hash);
+    let existing = inner.docs.get(&doc.id);
+    let tree = existing.map(|s| &s.rev_tree);
+    let parent_atts = edit_parent(tree, &doc)
+        .and_then(|p| existing.and_then(|s| s.rev_attachments.get(&p.to_string()).cloned()));
 
-    // Build the revision path for merging
-    let mut rev_hashes = vec![new_hash.clone()];
-    if let Some(ref prev) = doc.rev {
-        rev_hashes.push(prev.hash.clone());
-    }
-
-    let new_path = build_path_from_revs(
-        new_pos,
-        &rev_hashes,
-        NodeOpts {
-            deleted: doc.deleted,
-        },
-        RevStatus::Available,
-    );
-
-    // Merge into existing tree or create new one
-    let existing_tree = existing.map(|s| s.rev_tree.clone()).unwrap_or_default();
-
-    // Carry forward the parent revision's attachments so a body-only edit
-    // does not silently drop them.
-    let parent_atts: HashMap<String, AttachmentMeta> = doc
-        .rev
-        .as_ref()
-        .and_then(|r| existing.and_then(|s| s.rev_attachments.get(&r.to_string()).cloned()))
-        .unwrap_or_default();
-
-    let (merged_tree, _merge_result) = merge_tree(&existing_tree, &new_path, DEFAULT_REV_LIMIT);
-
-    // Compute the new revision's attachment set: parent attachments plus any
-    // supplied with this edit (inline bytes are stored by digest).
-    let mut new_atts = parent_atts;
-    for (att_id, mut meta) in doc.attachments {
-        if let Some(bytes) = meta.data.take() {
-            let digest = compute_attachment_digest(&bytes);
-            meta.length = bytes.len() as u64;
-            meta.digest = digest.clone();
-            meta.stub = true;
-            inner.attachments.insert(digest, bytes);
-        }
-        new_atts.insert(att_id, meta);
-    }
-
-    // Update sequence
-    inner.update_seq += 1;
-    let seq = inner.update_seq;
-
-    // Remove old change entry for this doc (each doc has only one entry in changes)
-    if let Some(existing) = inner.docs.get(&doc_id) {
-        inner.changes.remove(&existing.seq);
-    }
-
-    // Store or update the document
-    let stored = inner
-        .docs
-        .entry(doc_id.clone())
-        .or_insert_with(|| StoredDoc {
-            rev_tree: Vec::new(),
-            rev_data: HashMap::new(),
-            rev_deleted: HashMap::new(),
-            rev_attachments: HashMap::new(),
-            seq: 0,
-        });
-
-    stored.rev_tree = merged_tree;
-    stored.rev_data.insert(new_rev_str.clone(), doc.data);
-    stored.rev_deleted.insert(new_rev_str.clone(), doc.deleted);
-    stored.rev_attachments.insert(new_rev_str.clone(), new_atts);
-    stored.seq = seq;
-
-    // Record in changes
-    inner.changes.insert(seq, (doc_id.clone(), doc.deleted));
-
-    DocResult {
-        ok: true,
-        id: doc_id,
-        rev: Some(new_rev_str),
-        error: None,
-        reason: None,
+    match plan_new_edit(tree, doc, parent_atts.as_ref(), inherit, rev_limit) {
+        Ok(plan) => apply_write(inner, plan),
+        Err(result) => result,
     }
 }
 
@@ -1118,100 +1008,62 @@ fn process_doc_new_edits(inner: &mut Inner, doc: Document) -> DocResult {
 // Document processing (new_edits = false, replication mode)
 // ---------------------------------------------------------------------------
 
-fn process_doc_replication(inner: &mut Inner, mut doc: Document) -> DocResult {
-    let doc_id = doc.id.clone();
-    let rev = match &doc.rev {
-        Some(r) => r.clone(),
-        None => {
-            return DocResult {
-                ok: false,
-                id: doc_id,
-                rev: None,
-                error: Some("bad_request".into()),
-                reason: Some("missing _rev".into()),
-            };
-        }
+fn process_doc_replication(inner: &mut Inner, doc: Document, rev_limit: u64) -> DocResult {
+    // CouchDB ignores `_local/` documents in replicated writes (they are
+    // never replicated): nothing is stored.
+    if local_doc_id(&doc.id).is_some() {
+        let mut result = DocResult::ok(doc.id, "");
+        result.rev = doc.rev.map(|r| r.to_string());
+        return result;
+    }
+    let existing = inner.docs.get(&doc.id);
+    let has_body = match (existing, &doc.rev) {
+        (Some(s), Some(r)) => s.rev_data.contains_key(&r.clone().normalized().to_string()),
+        _ => false,
     };
 
-    let rev_str = rev.to_string();
-
-    // Build the revision path — use _revisions ancestry if available
-    let new_path = if let Some(revisions) = doc.data.get("_revisions") {
-        let start = revisions["start"].as_u64().unwrap_or(rev.pos);
-        let ids: Vec<String> = revisions["ids"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_else(|| vec![rev.hash.clone()]);
-
-        build_path_from_revs(
-            start,
-            &ids,
-            NodeOpts {
-                deleted: doc.deleted,
-            },
-            RevStatus::Available,
-        )
-    } else {
-        // Fallback: single-node path (no ancestry available)
-        RevPath {
-            pos: rev.pos,
-            tree: rouchdb_core::rev_tree::RevNode {
-                hash: rev.hash.clone(),
-                status: RevStatus::Available,
-                opts: NodeOpts {
-                    deleted: doc.deleted,
-                },
-                children: vec![],
-            },
-        }
+    let plan = match plan_replicated_edit(existing.map(|s| &s.rev_tree), doc, has_body, rev_limit) {
+        Ok(ReplicatedWrite::Write(plan)) => *plan,
+        Ok(ReplicatedWrite::AlreadyStored(result)) => return result,
+        Err(result) => return result,
     };
 
-    // Strip _revisions from data before storing
-    if let serde_json::Value::Object(ref mut map) = doc.data {
-        map.remove("_revisions");
+    // Stubs must refer to bytes we already hold.
+    if let Some(digest) = plan
+        .required_blobs
+        .iter()
+        .find(|d| !inner.attachments.contains_key(*d))
+    {
+        return error_result(
+            &plan.id,
+            "missing_stub",
+            &format!("Invalid attachment stub in {} for {}", plan.id, digest),
+        );
     }
 
-    // Persist attachments carried by replication: inline bytes go to the
-    // attachment store, metadata to this revision's attachment map.
-    let mut new_atts: HashMap<String, AttachmentMeta> = HashMap::new();
-    for (att_id, mut meta) in std::mem::take(&mut doc.attachments) {
-        if let Some(bytes) = meta.data.take() {
-            let digest = compute_attachment_digest(&bytes);
-            meta.length = bytes.len() as u64;
-            meta.digest = digest.clone();
-            meta.stub = true;
-            inner.attachments.insert(digest, bytes);
-        }
-        new_atts.insert(att_id, meta);
+    apply_write(inner, plan)
+}
+
+/// Persist a planned write: attachment bytes, revision tree, the revision's
+/// body/attachments, and a new sequence entry.
+fn apply_write(inner: &mut Inner, plan: PlannedWrite) -> DocResult {
+    for (digest, bytes) in plan.new_blobs {
+        inner.attachments.insert(digest, bytes);
     }
-
-    // Merge into existing tree
-    let existing_tree = inner
-        .docs
-        .get(&doc_id)
-        .map(|s| s.rev_tree.clone())
-        .unwrap_or_default();
-
-    let (merged_tree, _merge_result) = merge_tree(&existing_tree, &new_path, DEFAULT_REV_LIMIT);
 
     // Update sequence
     inner.update_seq += 1;
     let seq = inner.update_seq;
 
-    // Remove old change entry
-    if let Some(existing) = inner.docs.get(&doc_id) {
+    // Remove old change entry for this doc (each doc has only one entry in changes)
+    if let Some(existing) = inner.docs.get(&plan.id) {
         inner.changes.remove(&existing.seq);
     }
 
-    let is_doc_deleted = is_deleted(&merged_tree);
-
+    let rev_str = plan.rev.to_string();
     let stored = inner
         .docs
-        .entry(doc_id.clone())
+        .entry(plan.id.clone())
         .or_insert_with(|| StoredDoc {
             rev_tree: Vec::new(),
             rev_data: HashMap::new(),
@@ -1220,56 +1072,58 @@ fn process_doc_replication(inner: &mut Inner, mut doc: Document) -> DocResult {
             seq: 0,
         });
 
-    stored.rev_tree = merged_tree;
-    stored.rev_data.insert(rev_str.clone(), doc.data);
-    stored.rev_deleted.insert(rev_str.clone(), doc.deleted);
-    stored.rev_attachments.insert(rev_str.clone(), new_atts);
+    // Stemmed revisions no longer exist: drop their bodies.
+    for rev in &plan.stemmed {
+        let rev = rev.to_string();
+        stored.rev_data.remove(&rev);
+        stored.rev_deleted.remove(&rev);
+        stored.rev_attachments.remove(&rev);
+    }
+    stored.rev_tree = plan.tree;
+    stored.rev_data.insert(rev_str.clone(), plan.data);
+    stored.rev_deleted.insert(rev_str.clone(), plan.deleted);
+    stored.rev_attachments.insert(rev_str, plan.attachments);
     stored.seq = seq;
 
-    inner.changes.insert(seq, (doc_id.clone(), is_doc_deleted));
+    // The feed reports whether the document (its winner) is deleted, not
+    // whether this particular edit was a deletion.
+    inner
+        .changes
+        .insert(seq, (plan.id.clone(), plan.doc_deleted));
 
-    DocResult {
-        ok: true,
-        id: doc_id,
-        rev: Some(rev_str),
-        error: None,
-        reason: None,
-    }
+    ok_result(&plan.id, &plan.rev)
 }
 
 // ---------------------------------------------------------------------------
-// Rev-tree pruning helpers for purge
+// Compaction helpers
 // ---------------------------------------------------------------------------
 
-use rouchdb_core::rev_tree::RevNode;
-
-/// Remove a specific leaf node from the rev tree. If the node at (pos, hash)
-/// is a leaf (no children), it's removed from its parent's children list.
-fn prune_leaf_from_tree(tree: &mut RevTree, target_pos: u64, target_hash: &str) {
+/// Mark every non-leaf node as `Missing` (its body has been discarded).
+fn mark_non_leaves_missing(tree: &mut RevTree) {
+    fn walk(node: &mut rouchdb_core::rev_tree::RevNode) {
+        if !node.children.is_empty() {
+            node.status = RevStatus::Missing;
+            for child in node.children.iter_mut() {
+                walk(child);
+            }
+        }
+    }
     for path in tree.iter_mut() {
-        prune_leaf_from_node(&mut path.tree, path.pos, target_pos, target_hash);
+        walk(&mut path.tree);
     }
 }
 
-/// Recursively remove a matching leaf node from the subtree.
-/// Returns true if the node at this level should be removed (it matched and was a leaf).
-fn prune_leaf_from_node(node: &mut RevNode, current_pos: u64, target_pos: u64, target_hash: &str) {
-    // Remove matching children that are leaves
-    node.children.retain(|child| {
-        let child_pos = current_pos + 1;
-        !(child_pos == target_pos && child.hash == target_hash && child.children.is_empty())
-    });
-
-    // Recurse into remaining children
-    for child in node.children.iter_mut() {
-        prune_leaf_from_node(child, current_pos + 1, target_pos, target_hash);
-    }
-}
-
-/// Check if a rev tree node is effectively empty (no children and no useful data).
-/// Used to clean up orphaned root paths after leaf pruning.
-fn is_tree_empty(node: &RevNode) -> bool {
-    node.children.is_empty() && node.hash.is_empty()
+/// Drop attachment bytes that no stored revision references any more.
+fn collect_unreferenced_attachments(inner: &mut Inner) {
+    let referenced: std::collections::HashSet<String> = inner
+        .docs
+        .values()
+        .flat_map(|d| d.rev_attachments.values())
+        .flat_map(|atts| atts.values().map(|m| m.digest.clone()))
+        .collect();
+    inner
+        .attachments
+        .retain(|digest, _| referenced.contains(digest));
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,101 +1149,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_and_get_document() {
-        let db = new_db().await;
-
-        let doc = Document {
-            id: "doc1".into(),
-            rev: None,
-            deleted: false,
-            data: serde_json::json!({"name": "Alice"}),
-            attachments: HashMap::new(),
-        };
-
-        let results = db
-            .bulk_docs(vec![doc], BulkDocsOptions::new())
-            .await
-            .unwrap();
-        assert!(results[0].ok);
-        assert_eq!(results[0].id, "doc1");
-        assert!(results[0].rev.is_some());
-
-        let fetched = db.get("doc1", GetOptions::default()).await.unwrap();
-        assert_eq!(fetched.id, "doc1");
-        assert_eq!(fetched.data["name"], "Alice");
-        assert!(fetched.rev.is_some());
-    }
-
-    #[tokio::test]
-    async fn update_document() {
-        let db = new_db().await;
-
-        // Create
-        let doc = Document {
-            id: "doc1".into(),
-            rev: None,
-            deleted: false,
-            data: serde_json::json!({"name": "Alice"}),
-            attachments: HashMap::new(),
-        };
-        let results = db
-            .bulk_docs(vec![doc], BulkDocsOptions::new())
-            .await
-            .unwrap();
-        let rev1 = results[0].rev.clone().unwrap();
-
-        // Update
-        let rev_parsed: Revision = rev1.parse().unwrap();
-        let doc2 = Document {
-            id: "doc1".into(),
-            rev: Some(rev_parsed),
-            deleted: false,
-            data: serde_json::json!({"name": "Bob"}),
-            attachments: HashMap::new(),
-        };
-        let results = db
-            .bulk_docs(vec![doc2], BulkDocsOptions::new())
-            .await
-            .unwrap();
-        assert!(results[0].ok);
-
-        let fetched = db.get("doc1", GetOptions::default()).await.unwrap();
-        assert_eq!(fetched.data["name"], "Bob");
-    }
-
-    #[tokio::test]
-    async fn conflict_on_wrong_rev() {
-        let db = new_db().await;
-
-        let doc = Document {
-            id: "doc1".into(),
-            rev: None,
-            deleted: false,
-            data: serde_json::json!({"v": 1}),
-            attachments: HashMap::new(),
-        };
-        db.bulk_docs(vec![doc], BulkDocsOptions::new())
-            .await
-            .unwrap();
-
-        // Try updating with wrong rev
-        let doc2 = Document {
-            id: "doc1".into(),
-            rev: Some(Revision::new(1, "wronghash".into())),
-            deleted: false,
-            data: serde_json::json!({"v": 2}),
-            attachments: HashMap::new(),
-        };
-        let results = db
-            .bulk_docs(vec![doc2], BulkDocsOptions::new())
-            .await
-            .unwrap();
-        assert!(!results[0].ok);
-        assert_eq!(results[0].error.as_deref(), Some("conflict"));
-    }
-
-    #[tokio::test]
-    async fn delete_document() {
+    async fn recreate_deleted_doc_with_same_content() {
         let db = new_db().await;
 
         let doc = Document {
@@ -1405,7 +1165,6 @@ mod tests {
             .unwrap();
         let rev1: Revision = results[0].rev.clone().unwrap().parse().unwrap();
 
-        // Delete
         let del = Document {
             id: "doc1".into(),
             rev: Some(rev1),
@@ -1419,38 +1178,29 @@ mod tests {
             .unwrap();
         assert!(results[0].ok);
 
-        // Get should fail
-        let err = db.get("doc1", GetOptions::default()).await;
-        assert!(err.is_err());
+        // Re-create with the identical content and no rev. The deterministic
+        // rev hash would reproduce rev 1 exactly, so the new edit must extend
+        // the tombstone instead of starting a fresh pos-1 branch.
+        let recreated = Document {
+            id: "doc1".into(),
+            rev: None,
+            deleted: false,
+            data: serde_json::json!({"name": "Alice"}),
+            attachments: HashMap::new(),
+        };
+        let results = db
+            .bulk_docs(vec![recreated], BulkDocsOptions::new())
+            .await
+            .unwrap();
+        assert!(results[0].ok);
+        let rev3 = results[0].rev.clone().unwrap();
+        assert!(rev3.starts_with("3-"), "expected pos 3, got {rev3}");
 
-        // Info should show 0 docs
+        let fetched = db.get("doc1", GetOptions::default()).await.unwrap();
+        assert_eq!(fetched.data["name"], "Alice");
+
         let info = db.info().await.unwrap();
-        assert_eq!(info.doc_count, 0);
-    }
-
-    #[tokio::test]
-    async fn all_docs() {
-        let db = new_db().await;
-
-        for name in ["charlie", "alice", "bob"] {
-            let doc = Document {
-                id: name.into(),
-                rev: None,
-                deleted: false,
-                data: serde_json::json!({"name": name}),
-                attachments: HashMap::new(),
-            };
-            db.bulk_docs(vec![doc], BulkDocsOptions::new())
-                .await
-                .unwrap();
-        }
-
-        let result = db.all_docs(AllDocsOptions::new()).await.unwrap();
-        assert_eq!(result.total_rows, 3);
-        // Should be sorted alphabetically
-        assert_eq!(result.rows[0].id, "alice");
-        assert_eq!(result.rows[1].id, "bob");
-        assert_eq!(result.rows[2].id, "charlie");
+        assert_eq!(info.doc_count, 1);
     }
 
     #[tokio::test]
@@ -1464,50 +1214,23 @@ mod tests {
             data: serde_json::json!({"name": "Alice"}),
             attachments: HashMap::new(),
         };
-        db.bulk_docs(vec![doc], BulkDocsOptions::new())
+        let rev = db
+            .bulk_docs(vec![doc], BulkDocsOptions::new())
             .await
+            .unwrap()[0]
+            .rev
+            .clone()
             .unwrap();
 
         let mut opts = AllDocsOptions::new();
         opts.include_docs = true;
         let result = db.all_docs(opts).await.unwrap();
-        assert!(result.rows[0].doc.is_some());
-        let doc = result.rows[0].doc.as_ref().unwrap();
-        assert_eq!(doc["name"], "Alice");
-        assert_eq!(doc["_id"], "doc1");
-    }
-
-    #[tokio::test]
-    async fn changes_feed() {
-        let db = new_db().await;
-
-        for i in 0..3 {
-            let doc = Document {
-                id: format!("doc{}", i),
-                rev: None,
-                deleted: false,
-                data: serde_json::json!({"i": i}),
-                attachments: HashMap::new(),
-            };
-            db.bulk_docs(vec![doc], BulkDocsOptions::new())
-                .await
-                .unwrap();
-        }
-
-        let changes = db.changes(ChangesOptions::default()).await.unwrap();
-        assert_eq!(changes.results.len(), 3);
-        assert_eq!(changes.last_seq, Seq::Num(3));
-
-        // Changes since seq 2
-        let changes = db
-            .changes(ChangesOptions {
-                since: Seq::Num(2),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(changes.results.len(), 1);
-        assert_eq!(changes.results[0].id, "doc2");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].rev().unwrap(), rev);
+        assert_eq!(
+            result.rows[0].doc,
+            Some(serde_json::json!({"_id": "doc1", "_rev": rev, "name": "Alice"}))
+        );
     }
 
     #[tokio::test]
@@ -1535,73 +1258,70 @@ mod tests {
         revs.insert("doc2".into(), vec!["1-abc".into()]);
 
         let diff = db.revs_diff(revs).await.unwrap();
+        assert_eq!(diff.results.len(), 2);
 
-        // doc1: existing_rev should not be missing, 2-doesnotexist should be
+        // doc1: only the unknown rev is missing; the stored leaf (a lower
+        // generation) may be its ancestor.
         let doc1_diff = diff.results.get("doc1").unwrap();
-        assert!(!doc1_diff.missing.contains(&existing_rev));
-        assert!(doc1_diff.missing.contains(&"2-doesnotexist".to_string()));
+        assert_eq!(doc1_diff.missing, ["2-doesnotexist"]);
+        assert_eq!(doc1_diff.possible_ancestors, [existing_rev]);
 
-        // doc2: completely missing
+        // doc2: completely missing, nothing to descend from.
         let doc2_diff = diff.results.get("doc2").unwrap();
-        assert!(doc2_diff.missing.contains(&"1-abc".to_string()));
+        assert_eq!(doc2_diff.missing, ["1-abc"]);
+        assert!(doc2_diff.possible_ancestors.is_empty());
     }
 
     #[tokio::test]
-    async fn local_docs() {
-        let db = new_db().await;
-
-        let doc = serde_json::json!({"checkpoint": 42});
-        db.put_local("repl-123", doc.clone()).await.unwrap();
-
-        let fetched = db.get_local("repl-123").await.unwrap();
-        assert_eq!(fetched["checkpoint"], 42);
-
-        db.remove_local("repl-123").await.unwrap();
-        assert!(db.get_local("repl-123").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn replication_mode_bulk_docs() {
-        let db = new_db().await;
-
-        // Insert with explicit revision (replication mode)
-        let doc = Document {
-            id: "doc1".into(),
-            rev: Some(Revision::new(1, "abc123".into())),
-            deleted: false,
-            data: serde_json::json!({"name": "replicated"}),
-            attachments: HashMap::new(),
-        };
-
+    async fn subscribers_are_notified_after_each_committed_change() {
+        use rouchdb_core::adapter::ChangeNotice;
+        let db = MemoryAdapter::new("test");
+        let mut rx = db
+            .subscribe()
+            .expect("the memory adapter announces changes");
+        let doc = |id: &str| Document::from_json(serde_json::json!({"_id": id})).unwrap();
         let results = db
-            .bulk_docs(vec![doc], BulkDocsOptions::replication())
+            .bulk_docs(vec![doc("a"), doc("b")], BulkDocsOptions::new())
             .await
             .unwrap();
-        assert!(results[0].ok);
-
-        let fetched = db.get("doc1", GetOptions::default()).await.unwrap();
-        assert_eq!(fetched.data["name"], "replicated");
-        assert_eq!(fetched.rev.unwrap().to_string(), "1-abc123");
+        let notice = |seq: u64, id: &str| ChangeNotice::new(seq, id);
+        assert_eq!(rx.try_recv().unwrap(), notice(1, "a"));
+        assert_eq!(rx.try_recv().unwrap(), notice(2, "b"));
+        // Nothing for a failed write or a local document.
+        db.bulk_docs(vec![doc("a")], BulkDocsOptions::new())
+            .await
+            .unwrap();
+        db.put_local("cp", serde_json::json!({})).await.unwrap();
+        assert!(rx.try_recv().is_err());
+        let rev = results[0].rev.clone().unwrap();
+        let r2 = db
+            .put_attachment("a", "x", &rev, b"x".to_vec(), "text/plain")
+            .await
+            .unwrap()
+            .rev
+            .unwrap();
+        assert_eq!(rx.try_recv().unwrap(), notice(3, "a"));
+        db.remove_attachment("a", "x", &r2).await.unwrap();
+        assert_eq!(rx.try_recv().unwrap(), notice(4, "a"));
+        // A clone of the adapter shares the notifications.
+        let mut other = db.clone().subscribe().unwrap();
+        db.bulk_docs(vec![doc("c")], BulkDocsOptions::new())
+            .await
+            .unwrap();
+        assert_eq!(rx.try_recv().unwrap(), notice(5, "c"));
+        assert_eq!(other.try_recv().unwrap(), notice(5, "c"));
     }
 
     #[tokio::test]
-    async fn auto_generate_id() {
-        let db = new_db().await;
-
-        let doc = Document {
-            id: String::new(),
-            rev: None,
-            deleted: false,
-            data: serde_json::json!({"name": "no-id"}),
-            attachments: HashMap::new(),
-        };
-
-        let results = db
-            .bulk_docs(vec![doc], BulkDocsOptions::new())
-            .await
-            .unwrap();
-        assert!(results[0].ok);
-        assert!(!results[0].id.is_empty());
+    async fn destroy_announces_a_reset() {
+        use rouchdb_core::adapter::ChangeNotice;
+        let db = MemoryAdapter::new("test");
+        let before = db.id().await.unwrap();
+        let mut rx = db.subscribe().unwrap();
+        db.destroy().await.unwrap();
+        assert_eq!(rx.try_recv().unwrap(), ChangeNotice::reset());
+        assert!(rx.try_recv().is_err());
+        assert_ne!(db.id().await.unwrap(), before);
     }
 
     #[tokio::test]
@@ -1615,16 +1335,173 @@ mod tests {
             data: serde_json::json!({}),
             attachments: HashMap::new(),
         };
-        db.bulk_docs(vec![doc], BulkDocsOptions::new())
+        let rev = db
+            .bulk_docs(vec![doc], BulkDocsOptions::new())
+            .await
+            .unwrap()[0]
+            .rev
+            .clone()
+            .unwrap();
+        db.put_attachment("doc1", "a", &rev, b"bytes".to_vec(), "text/plain")
             .await
             .unwrap();
         db.put_local("x", serde_json::json!({})).await.unwrap();
+        db.put_security(SecurityDocument {
+            admins: rouchdb_core::document::SecurityGroup {
+                names: vec!["bob".into()],
+                roles: vec![],
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
 
         db.destroy().await.unwrap();
 
         let info = db.info().await.unwrap();
-        assert_eq!(info.doc_count, 0);
+        assert_eq!((info.doc_count, info.doc_del_count), (0, 0));
         assert_eq!(info.update_seq, Seq::Num(0));
+        assert!(matches!(
+            db.get("doc1", GetOptions::default()).await,
+            Err(RouchError::NotFound(_))
+        ));
+        assert!(matches!(
+            db.get_local("x").await,
+            Err(RouchError::NotFound(_))
+        ));
+        let changes = db.changes(ChangesOptions::default()).await.unwrap();
+        assert!(changes.results.is_empty());
+        assert_eq!(changes.last_seq, Seq::Num(0));
+        assert!(db.get_security().await.unwrap().admins.names.is_empty());
+        let inner = db.inner.read().await;
+        assert!(inner.attachments.is_empty());
+        assert_eq!(inner.purge_seq, 0);
+    }
+
+    /// The security document round-trips, is kept apart from local
+    /// documents (`_local/_security` is an ordinary one, as in CouchDB) and
+    /// is reset by `destroy`.
+    #[tokio::test]
+    async fn security_document_round_trip() {
+        let db = new_db().await;
+        let stored = |sec: SecurityDocument| serde_json::to_value(sec).unwrap();
+        let empty = stored(SecurityDocument::default());
+        assert_eq!(stored(db.get_security().await.unwrap()), empty);
+
+        let sec = SecurityDocument {
+            admins: SecurityGroup {
+                names: vec!["bob".into()],
+                roles: vec![],
+            },
+            members: SecurityGroup {
+                names: vec![],
+                roles: vec!["team".into()],
+            },
+            extra: serde_json::Map::from_iter([("x".into(), serde_json::json!(1))]),
+        };
+        let expected = stored(sec.clone());
+        db.put_security(sec).await.unwrap();
+        assert_eq!(stored(db.get_security().await.unwrap()), expected);
+
+        assert!(matches!(
+            db.get_local("_security").await,
+            Err(RouchError::NotFound(_))
+        ));
+        db.put_local(
+            "_security",
+            serde_json::json!({"admins": {"names": ["eve"]}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored(db.get_security().await.unwrap()), expected);
+
+        db.destroy().await.unwrap();
+        assert_eq!(stored(db.get_security().await.unwrap()), empty);
+    }
+
+    /// Re-sending a revision already stored with its body in replication
+    /// mode is a no-op, as in CouchDB: the stored body stays, and there is
+    /// no new sequence or change.
+    #[tokio::test]
+    async fn replicated_known_revision_is_a_noop() {
+        let db = new_db().await;
+        let rev: Revision = format!("1-{}", "a".repeat(32)).parse().unwrap();
+        for v in [1, 2] {
+            let doc = Document {
+                id: "d".into(),
+                rev: Some(rev.clone()),
+                deleted: false,
+                data: serde_json::json!({"v": v}),
+                attachments: HashMap::new(),
+            };
+            let results = db
+                .bulk_docs(vec![doc], BulkDocsOptions::replication())
+                .await
+                .unwrap();
+            assert!(results[0].ok, "{:?}", results[0]);
+        }
+
+        let doc = db.get("d", GetOptions::default()).await.unwrap();
+        assert_eq!(doc.data["v"], 1);
+        assert_eq!(db.info().await.unwrap().update_seq, Seq::Num(1));
+        let changes = db.changes(ChangesOptions::default()).await.unwrap();
+        assert_eq!(changes.results.len(), 1);
+        assert_eq!(changes.results[0].seq, Seq::Num(1));
+    }
+
+    /// A replicated attachment stub must name bytes already stored: a known
+    /// digest is accepted, an unknown one is CouchDB's `missing_stub`.
+    #[tokio::test]
+    async fn replicated_stubs_need_stored_bytes() {
+        let db = new_db().await;
+        let r1 = db
+            .bulk_docs(
+                vec![Document::from_json(serde_json::json!({"_id": "src"})).unwrap()],
+                BulkDocsOptions::new(),
+            )
+            .await
+            .unwrap()[0]
+            .rev
+            .clone()
+            .unwrap();
+        db.put_attachment("src", "a.txt", &r1, b"hi".to_vec(), "text/plain")
+            .await
+            .unwrap();
+        let src = db.get("src", GetOptions::default()).await.unwrap();
+        let digest = src.attachments["a.txt"].digest.clone();
+
+        let replicated = |id: &str, digest: &str| {
+            Document::from_json(serde_json::json!({
+                "_id": id,
+                "_rev": format!("1-{}", "b".repeat(32)),
+                "_attachments": {"a.txt": {
+                    "stub": true, "content_type": "text/plain",
+                    "digest": digest, "length": 2, "revpos": 1,
+                }},
+            }))
+            .unwrap()
+        };
+        let results = db
+            .bulk_docs(
+                vec![
+                    replicated("known", &digest),
+                    replicated("unknown", "md5-AAAAAAAAAAAAAAAAAAAAAA=="),
+                ],
+                BulkDocsOptions::replication(),
+            )
+            .await
+            .unwrap();
+        assert!(results[0].ok, "{:?}", results[0]);
+        assert_eq!(results[1].error.as_deref(), Some("missing_stub"));
+        let bytes = db
+            .get_attachment("known", "a.txt", GetAttachmentOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"hi");
+        assert!(matches!(
+            db.get("unknown", GetOptions::default()).await,
+            Err(RouchError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
@@ -1649,8 +1526,8 @@ mod tests {
             .put_attachment("doc1", "hi.txt", &rev1, b"hi!".to_vec(), "text/plain")
             .await
             .unwrap();
-        assert!(r2.ok);
         let rev2 = r2.rev.clone().unwrap();
+        assert!(rev2.starts_with("2-"), "{}", rev2);
 
         let bytes = db
             .get_attachment("doc1", "hi.txt", GetAttachmentOptions::default())
@@ -1677,11 +1554,23 @@ mod tests {
 
         // Removing the attachment makes it unretrievable on the new rev.
         let r3 = db.remove_attachment("doc1", "hi.txt", &rev2).await.unwrap();
-        assert!(r3.ok);
+        assert!(r3.rev.as_deref().unwrap().starts_with("3-"), "{:?}", r3);
         let err = db
             .get_attachment("doc1", "hi.txt", GetAttachmentOptions::default())
             .await;
-        assert!(err.is_err());
+        assert!(matches!(err, Err(RouchError::NotFound(_))), "{:?}", err);
+        // The previous revision still serves its bytes.
+        let old = db
+            .get_attachment(
+                "doc1",
+                "hi.txt",
+                GetAttachmentOptions {
+                    rev: Some(rev2.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(old, b"hi!");
     }
 
     #[tokio::test]
@@ -1707,7 +1596,8 @@ mod tests {
             ..AllDocsOptions::new()
         };
         let result = db.all_docs(opts).await.unwrap();
-        assert_eq!(result.rows.len(), 1);
+        let ids: Vec<&str> = result.rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(ids, ["b"]);
         assert_eq!(result.total_rows, 4);
     }
 
@@ -1757,18 +1647,22 @@ mod tests {
             .await
             .unwrap();
         let rev1: Revision = r[0].rev.clone().unwrap().parse().unwrap();
-        db.bulk_docs(
-            vec![Document {
-                id: "doc1".into(),
-                rev: Some(rev1),
-                deleted: true,
-                data: serde_json::json!({}),
-                attachments: HashMap::new(),
-            }],
-            BulkDocsOptions::new(),
-        )
-        .await
-        .unwrap();
+        let tomb = db
+            .bulk_docs(
+                vec![Document {
+                    id: "doc1".into(),
+                    rev: Some(rev1),
+                    deleted: true,
+                    data: serde_json::json!({}),
+                    attachments: HashMap::new(),
+                }],
+                BulkDocsOptions::new(),
+            )
+            .await
+            .unwrap()[0]
+            .rev
+            .clone()
+            .unwrap();
 
         let changes = db
             .changes(ChangesOptions {
@@ -1777,12 +1671,13 @@ mod tests {
             })
             .await
             .unwrap();
-        let ev = changes.results.iter().find(|e| e.id == "doc1").unwrap();
+        assert_eq!(changes.results.len(), 1);
+        let ev = &changes.results[0];
+        assert_eq!(ev.id, "doc1");
         assert!(ev.deleted);
-        assert!(
-            !ev.changes.is_empty(),
-            "deleted doc must still list its leaf rev"
-        );
+        // A deleted doc still lists its (tombstone) leaf rev.
+        let revs: Vec<&str> = ev.changes.iter().map(|c| c.rev.as_str()).collect();
+        assert_eq!(revs, [tomb.as_str()]);
     }
 
     #[tokio::test]
@@ -1833,36 +1728,115 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bulk_get_documents() {
+    async fn attachment_store_is_garbage_collected() {
         let db = new_db().await;
-
         let doc = Document {
-            id: "doc1".into(),
+            id: "d".into(),
             rev: None,
             deleted: false,
-            data: serde_json::json!({"name": "test"}),
+            data: serde_json::json!({}),
             attachments: HashMap::new(),
         };
-        db.bulk_docs(vec![doc], BulkDocsOptions::new())
+        let r1 = db
+            .bulk_docs(vec![doc], BulkDocsOptions::new())
+            .await
+            .unwrap()[0]
+            .rev
+            .clone()
+            .unwrap();
+        let r2 = db
+            .put_attachment("d", "a", &r1, vec![1; 64], "application/octet-stream")
+            .await
+            .unwrap()
+            .rev
+            .unwrap();
+        // A rejected write must not leave its bytes behind.
+        assert!(matches!(
+            db.put_attachment("d", "a", &r1, vec![9; 64], "application/octet-stream")
+                .await,
+            Err(RouchError::Conflict)
+        ));
+        assert_eq!(db.inner.read().await.attachments.len(), 1);
+        // Replacing the attachment and compacting frees the old bytes.
+        db.put_attachment("d", "a", &r2, vec![2; 64], "application/octet-stream")
             .await
             .unwrap();
+        db.compact().await.unwrap();
+        let inner = db.inner.read().await;
+        assert_eq!(inner.attachments.len(), 1);
+        assert!(inner.attachments.values().all(|b| b == &vec![2; 64]));
+    }
 
-        let result = db
-            .bulk_get(vec![
-                BulkGetItem {
-                    id: "doc1".into(),
-                    rev: None,
-                },
-                BulkGetItem {
-                    id: "missing".into(),
-                    rev: None,
-                },
-            ])
+    async fn edit(db: &MemoryAdapter, rev: Option<&str>, v: u64) -> String {
+        let doc = Document {
+            id: "d".into(),
+            rev: rev.map(|r| r.parse().unwrap()),
+            deleted: false,
+            data: serde_json::json!({ "v": v }),
+            attachments: HashMap::new(),
+        };
+        let res = db
+            .bulk_docs(vec![doc], BulkDocsOptions::new())
             .await
             .unwrap();
+        assert!(res[0].ok, "{:?}", res[0]);
+        res[0].rev.clone().unwrap()
+    }
 
-        assert_eq!(result.results.len(), 2);
-        assert!(result.results[0].docs[0].ok.is_some());
-        assert!(result.results[1].docs[0].error.is_some());
+    /// Q-CORE-1: revisions stemmed by the revision limit lose their bodies.
+    #[tokio::test]
+    async fn stemming_drops_stored_bodies() {
+        let db = MemoryAdapter::new("s").with_rev_limit(3);
+        let mut rev = edit(&db, None, 0).await;
+        for v in 1..6 {
+            rev = edit(&db, Some(&rev), v).await;
+        }
+        let inner = db.inner.read().await;
+        let stored = &inner.docs["d"];
+        assert_eq!(stored.rev_data.len(), 3);
+        assert_eq!(stored.rev_deleted.len(), 3);
+        assert_eq!(stored.rev_attachments.len(), 3);
+    }
+
+    /// CouchDB's default `_revs_limit` (1000) applies without configuration.
+    #[tokio::test]
+    async fn default_rev_limit_is_1000() {
+        let db = new_db().await;
+        let first = edit(&db, None, 0).await;
+        let mut rev = first.clone();
+        for v in 1..=1000 {
+            rev = edit(&db, Some(&rev), v).await;
+        }
+        assert!(rev.starts_with("1001-"));
+        let old = GetOptions {
+            rev: Some(first),
+            ..Default::default()
+        };
+        assert!(matches!(
+            db.get("d", old).await,
+            Err(RouchError::NotFound(_))
+        ));
+        let got = db
+            .get(
+                "d",
+                GetOptions {
+                    revs: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            got.data["_revisions"]["ids"].as_array().unwrap().len(),
+            1000
+        );
+        assert_eq!(db.inner.read().await.docs["d"].rev_data.len(), 1000);
+        // 0 means no limit.
+        let unlimited = MemoryAdapter::new("u").with_rev_limit(0);
+        let mut rev = edit(&unlimited, None, 0).await;
+        for v in 1..=1000 {
+            rev = edit(&unlimited, Some(&rev), v).await;
+        }
+        assert_eq!(unlimited.inner.read().await.docs["d"].rev_data.len(), 1001);
     }
 }

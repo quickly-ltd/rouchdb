@@ -3,6 +3,7 @@ name = "rouchdb-adapter-redb"
 description = "Persistent local storage adapter for RouchDB using redb"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -11,17 +12,16 @@ categories.workspace = true
 readme.workspace = true
 
 [dependencies]
-rouchdb-core = { path = "../rouchdb-core", version = "0.4.0" }
-async-trait = "0.1"
-base64 = "0.22"
+rouchdb-core = { path = "../rouchdb-core", version = "0.5.1" }
+async-trait = "0.1.68"
+base64 = "0.22.1"
 md-5 = "0.10"
-redb = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["unbounded_depth"] }
-serde_stacker = "0.1"
-tokio = { version = "1", features = ["sync"] }
+redb = "2.3"
+serde = { version = "1.0.185", features = ["derive"] }
+serde_json = { version = "1.0.106", features = ["unbounded_depth"] }
+tokio = { version = "1.37", features = ["rt", "sync"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tempfile = "3.1.0"
+tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "sync"] }

@@ -127,7 +127,7 @@ let opts = ReplicationOptions {
 | `checkpoint` | `true` | Set to `false` to disable checkpoint saving. Each replication will start from the beginning (or `since`). |
 | `live` | `false` | Enable continuous replication that keeps running and picks up new changes. |
 | `retry` | `false` | Automatically retry on network or transient errors (live mode). |
-| `poll_interval` | 500ms | How frequently to poll for new changes in live mode. |
+| `poll_interval` | 500ms | How frequently to poll for new changes in live mode, for a source that cannot announce them (a remote CouchDB), and to check the identity of such a target. A local source (memory, redb) wakes the replication up on each change instead. |
 | `back_off_function` | `None` | Custom backoff function for retries. Receives retry count, returns delay. |
 
 ## Filtered Replication
@@ -231,6 +231,7 @@ println!("Last sequence:     {}", result.last_seq);
 | `docs_written` | `u64` | Number of documents written to the target. |
 | `errors` | `Vec<String>` | Descriptions of any errors during replication. |
 | `last_seq` | `Seq` | The source sequence up to which replication completed. |
+| `warnings` | `Vec<String>` | Conditions that did not stop the replication (such as both databases reporting the same identity, which disables checkpoints). They do not affect `ok`. |
 
 Note that `docs_read` may be greater than `docs_written` when the target already has some of the documents (incremental replication).
 
@@ -251,6 +252,8 @@ let r2 = local.replicate_to(&remote).await?;
 println!("Incremental: {} docs written", r2.docs_written); // 1
 ```
 
+Checkpoints are keyed on both databases' identities (`Adapter::id()`), not their names. A redb file's identity includes its path: a copy of the file is a different database (syncing a file with its copy works both ways), and a file that is moved or copied is rescanned once with each peer. Two databases that report the same identity (a custom adapter that keeps the default `id()`, the database name) are replicated without checkpoints, and `ReplicationResult::warnings` says so.
+
 ## Replication Events
 
 Use `replicate_to_with_events()` to receive progress events during replication:
@@ -267,7 +270,7 @@ let (result, mut rx) = local.replicate_to_with_events(
 while let Ok(event) = rx.try_recv() {
     match event {
         ReplicationEvent::Active => println!("Replication started"),
-        ReplicationEvent::Change { docs_read } => {
+        ReplicationEvent::Change { docs_read, .. } => {
             println!("Progress: {} docs read", docs_read);
         }
         ReplicationEvent::Complete(result) => {
@@ -275,6 +278,8 @@ while let Ok(event) = rx.try_recv() {
         }
         ReplicationEvent::Error(msg) => println!("Error: {}", msg),
         ReplicationEvent::Paused => println!("Waiting for changes..."),
+        // `ReplicationEvent` is `#[non_exhaustive]`: new events may be added.
+        _ => {}
     }
 }
 ```
@@ -288,10 +293,15 @@ while let Ok(event) = rx.try_recv() {
 | `Paused` | Waiting for more changes (live mode). |
 | `Complete(ReplicationResult)` | Replication finished (one-shot or one cycle in live mode). |
 | `Error(String)` | An error occurred during replication. |
+| `Warning(String)` | A condition that did not stop the replication, also listed in `ReplicationResult::warnings` (sent once per live session). |
+
+`ReplicationEvent` is `#[non_exhaustive]` (a `match` needs a `_` arm) and so is its `Change` variant (match it as `Change { docs_read, .. }`), so that events and fields can be added without a breaking release. See [API Stability](../reference/api-stability.md).
 
 ## Live (Continuous) Replication
 
-Live replication keeps running in the background, continuously polling for new changes and replicating them. This is the equivalent of PouchDB's `{ live: true }` option.
+Live replication keeps running in the background, replicating new changes as they happen: a local source (memory, redb) announces each committed change, a remote one is polled every `poll_interval`. This is the equivalent of PouchDB's `{ live: true }` option.
+
+If a **local** database (memory, redb) at either end is destroyed (and maybe reused) while the replication runs, the replication notices it and starts over, copying every document of the source again, even when the source is idle. This automatic recovery does **not** cover a **remote** database: see [Re-creating a remote database](#re-creating-a-remote-database).
 
 ```rust
 use rouchdb::{ReplicationOptions, ReplicationEvent};
@@ -348,6 +358,32 @@ let (rx, handle) = local.replicate_to_live(&remote, ReplicationOptions {
     ..Default::default()
 });
 ```
+
+### Re-creating a remote database
+
+The HTTP adapter identifies a remote database by the server's uuid and the database name. A remote database that is deleted and re-created under the same name therefore looks like the same database: a running live replication keeps its position, and a new replication resumes from the existing checkpoints. Neither copies the documents the re-created database lost, and simply retrying does not help.
+
+(`rouchdb-server` derives its uuid from the served database's identity, which `DELETE /{db}` renews, so a replication set up with a new `Database::http` after the database is re-created there starts over by itself. A running replication, or a `Database::http` that already replicated before the re-creation (it keeps the uuid it read), still needs the steps below.)
+
+When you delete and re-create a remote database that takes part in a replication:
+
+1. Cancel every live replication to or from it (`handle.cancel()`).
+2. Re-create the database.
+3. Copy everything again with a one-shot replication that ignores the checkpoints:
+
+   ```rust
+   use rouchdb::{ReplicationOptions, Seq};
+
+   local.replicate_to_with_opts(&remote, ReplicationOptions {
+       since: Some(Seq::zero()),
+       checkpoint: false,
+       ..Default::default()
+   }).await?;
+   ```
+
+4. Start the live replication again.
+
+Destroying a **local** database (memory, redb) needs none of this: it gets a new identity, and replications from or to it start over on their own.
 
 ## Complete Example: Local-to-CouchDB Sync
 

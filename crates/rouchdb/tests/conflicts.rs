@@ -2,11 +2,11 @@
 
 mod common;
 
-use common::{delete_remote_db, fresh_remote_db};
+use common::fresh_remote_db;
 use rouchdb::{Database, GetOptions};
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
 async fn conflict_both_sides_modify_same_doc() {
     let url = fresh_remote_db("conflict_both").await;
     let local = Database::memory("local");
@@ -22,22 +22,28 @@ async fn conflict_both_sides_modify_same_doc() {
     let remote_doc = remote.get("doc1").await.unwrap();
     assert_eq!(remote_doc.rev.unwrap().to_string(), original_rev);
 
-    local
-        .update(
-            "doc1",
-            &original_rev,
-            serde_json::json!({"v": "local_edit"}),
-        )
-        .await
-        .unwrap();
-    remote
-        .update(
-            "doc1",
-            &original_rev,
-            serde_json::json!({"v": "remote_edit"}),
-        )
-        .await
-        .unwrap();
+    assert!(
+        local
+            .update(
+                "doc1",
+                &original_rev,
+                serde_json::json!({"v": "local_edit"}),
+            )
+            .await
+            .unwrap()
+            .ok
+    );
+    assert!(
+        remote
+            .update(
+                "doc1",
+                &original_rev,
+                serde_json::json!({"v": "remote_edit"}),
+            )
+            .await
+            .unwrap()
+            .ok
+    );
 
     let (push, pull) = local.sync(&remote).await.unwrap();
     assert!(push.ok);
@@ -79,12 +85,10 @@ async fn conflict_both_sides_modify_same_doc() {
         remote_doc.data.get("_conflicts").is_some(),
         "Remote should have _conflicts"
     );
-
-    delete_remote_db(&url).await;
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
 async fn conflict_local_delete_remote_update() {
     let url = fresh_remote_db("conflict_delupd").await;
     let local = Database::memory("local");
@@ -97,11 +101,14 @@ async fn conflict_local_delete_remote_update() {
     let rev = r1.rev.unwrap();
     local.replicate_to(&remote).await.unwrap();
 
-    local.remove("doc1", &rev).await.unwrap();
-    remote
-        .update("doc1", &rev, serde_json::json!({"v": 2}))
-        .await
-        .unwrap();
+    assert!(local.remove("doc1", &rev).await.unwrap().ok);
+    assert!(
+        remote
+            .update("doc1", &rev, serde_json::json!({"v": 2}))
+            .await
+            .unwrap()
+            .ok
+    );
 
     local.sync(&remote).await.unwrap();
 
@@ -114,12 +121,10 @@ async fn conflict_local_delete_remote_update() {
         local_doc.data["v"], 2,
         "Local should agree with remote winner"
     );
-
-    delete_remote_db(&url).await;
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
 async fn conflict_remote_delete_local_update() {
     let url = fresh_remote_db("conflict_updel").await;
     let local = Database::memory("local");
@@ -132,11 +137,14 @@ async fn conflict_remote_delete_local_update() {
     let rev = r1.rev.unwrap();
     local.replicate_to(&remote).await.unwrap();
 
-    remote.remove("doc1", &rev).await.unwrap();
-    local
-        .update("doc1", &rev, serde_json::json!({"v": 2}))
-        .await
-        .unwrap();
+    assert!(remote.remove("doc1", &rev).await.unwrap().ok);
+    assert!(
+        local
+            .update("doc1", &rev, serde_json::json!({"v": 2}))
+            .await
+            .unwrap()
+            .ok
+    );
 
     local.sync(&remote).await.unwrap();
 
@@ -145,12 +153,10 @@ async fn conflict_remote_delete_local_update() {
 
     let remote_doc = remote.get("doc1").await.unwrap();
     assert_eq!(remote_doc.data["v"], 2);
-
-    delete_remote_db(&url).await;
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
 async fn conflict_three_way() {
     let url = fresh_remote_db("conflict_3way").await;
     let local1 = Database::memory("local1");
@@ -165,18 +171,27 @@ async fn conflict_three_way() {
     local1.replicate_to(&remote).await.unwrap();
     local2.replicate_from(&remote).await.unwrap();
 
-    local1
-        .update("doc1", &rev, serde_json::json!({"v": "local1_edit"}))
-        .await
-        .unwrap();
-    local2
-        .update("doc1", &rev, serde_json::json!({"v": "local2_edit"}))
-        .await
-        .unwrap();
-    remote
-        .update("doc1", &rev, serde_json::json!({"v": "remote_edit"}))
-        .await
-        .unwrap();
+    assert!(
+        local1
+            .update("doc1", &rev, serde_json::json!({"v": "local1_edit"}))
+            .await
+            .unwrap()
+            .ok
+    );
+    assert!(
+        local2
+            .update("doc1", &rev, serde_json::json!({"v": "local2_edit"}))
+            .await
+            .unwrap()
+            .ok
+    );
+    assert!(
+        remote
+            .update("doc1", &rev, serde_json::json!({"v": "remote_edit"}))
+            .await
+            .unwrap()
+            .ok
+    );
 
     local1.sync(&remote).await.unwrap();
     local2.sync(&remote).await.unwrap();
@@ -195,12 +210,10 @@ async fn conflict_three_way() {
 
     assert_eq!(d1.data["v"], d2.data["v"]);
     assert_eq!(d2.data["v"], dr.data["v"]);
-
-    delete_remote_db(&url).await;
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
 async fn conflict_resolve_by_update() {
     let url = fresh_remote_db("conflict_resolve").await;
     let local = Database::memory("local");
@@ -213,14 +226,20 @@ async fn conflict_resolve_by_update() {
     let rev = r1.rev.unwrap();
     local.replicate_to(&remote).await.unwrap();
 
-    local
-        .update("doc1", &rev, serde_json::json!({"v": "local"}))
-        .await
-        .unwrap();
-    remote
-        .update("doc1", &rev, serde_json::json!({"v": "remote"}))
-        .await
-        .unwrap();
+    assert!(
+        local
+            .update("doc1", &rev, serde_json::json!({"v": "local"}))
+            .await
+            .unwrap()
+            .ok
+    );
+    assert!(
+        remote
+            .update("doc1", &rev, serde_json::json!({"v": "remote"}))
+            .await
+            .unwrap()
+            .ok
+    );
 
     local.sync(&remote).await.unwrap();
 
@@ -242,10 +261,13 @@ async fn conflict_resolve_by_update() {
     assert!(!conflicts.is_empty());
 
     let winner_rev = doc.rev.unwrap().to_string();
-    local
-        .update("doc1", &winner_rev, serde_json::json!({"v": "resolved"}))
-        .await
-        .unwrap();
+    assert!(
+        local
+            .update("doc1", &winner_rev, serde_json::json!({"v": "resolved"}))
+            .await
+            .unwrap()
+            .ok
+    );
 
     local.sync(&remote).await.unwrap();
 
@@ -253,6 +275,4 @@ async fn conflict_resolve_by_update() {
     let remote_doc = remote.get("doc1").await.unwrap();
     assert_eq!(local_doc.data["v"], "resolved");
     assert_eq!(remote_doc.data["v"], "resolved");
-
-    delete_remote_db(&url).await;
 }

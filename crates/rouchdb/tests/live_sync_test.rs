@@ -1,58 +1,82 @@
-use rouchdb::{Database, AuthClient, ReplicationOptions, ReplicationEvent, FindOptions};
-use serde_json::json;
+//! Live replication integration test against a remote CouchDB instance.
+//!
+//! Requires a running CouchDB instance (uses `COUCHDB_URL` or defaults to
+//! `http://admin:password@localhost:15984` via `common`):
+//!   docker compose up -d
+//!   cargo test -p rouchdb --test live_sync_test -- --ignored
+
+mod common;
+
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use common::{couchdb, fresh_remote_db};
+use rouchdb::{AuthClient, Database, ReplicationEvent, ReplicationOptions};
+use serde_json::json;
 use tokio::time::sleep;
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
 async fn test_live_sync_remote() {
-    let db_url = "https://couchdb.quickly.host/rouchdb-stress-test".to_string();
-    let host_url = "https://couchdb.quickly.host";
-    
-    let auth = AuthClient::new(host_url);
-    auth.login("admin", "123321Co").await.expect("Failed to login");
-
-    let remote = Arc::new(Database::http_with_auth(&db_url, &auth));
+    let remote_db = fresh_remote_db("live_sync").await;
+    let config = couchdb();
+    let auth = AuthClient::new(&config.anonymous_url);
+    auth.login(&config.user, &config.password)
+        .await
+        .expect("Failed to login");
+    let remote = Arc::new(Database::http_with_auth(&remote_db.anonymous_url(), &auth));
     let local = Arc::new(Database::memory("live_sync_local"));
 
-    // Ensure remote has a doc to start with, or we just write a fresh one later.
-    let doc_id = format!("live_sync_test_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis());
+    let doc_id = format!(
+        "live_sync_test_{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
 
     // Start live replication from remote to local
-    let mut options = ReplicationOptions::default();
-    options.live = true;
-    options.retry = true;
-    options.poll_interval = Duration::from_secs(1);
+    let options = ReplicationOptions {
+        live: true,
+        retry: true,
+        poll_interval: Duration::from_millis(200),
+        ..Default::default()
+    };
 
-    let (mut rx, mut handle) = remote.replicate_to_live(&local, options);
+    let (mut rx, handle) = remote.replicate_to_live(&local, options);
 
     // Monitor events in background
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
-                ReplicationEvent::Change { docs_read, .. } => println!("Live Sync: read {} docs", docs_read),
+                ReplicationEvent::Change { docs_read, .. } => {
+                    println!("Live Sync: read {docs_read} docs");
+                }
                 ReplicationEvent::Paused => println!("Live Sync: Paused (Up to date)"),
-                ReplicationEvent::Error(err) => println!("Live Sync Error: {}", err),
+                ReplicationEvent::Error(err) => println!("Live Sync Error: {err}"),
                 _ => {}
             }
         }
     });
 
-    // Wait a bit for live sync to initialize and go into Paused state
-    sleep(Duration::from_secs(3)).await;
+    // Wait briefly for live sync to initialize
+    sleep(Duration::from_millis(500)).await;
 
-    // Now, write a document to the REMOTE database
-    println!("Writing document to remote: {}", doc_id);
-    remote.put(&doc_id, json!({"live": true, "message": "hello from remote"})).await.expect("Failed to put on remote");
+    // Write a document to the remote database
+    remote
+        .put(
+            &doc_id,
+            json!({"live": true, "message": "hello from remote"}),
+        )
+        .await
+        .expect("Failed to put on remote");
 
-    // Wait for the live sync to pick it up and write to LOCAL
-    println!("Waiting for live sync to pull the document...");
+    // Wait for live sync to pull the document into the local database
     let mut found = false;
-    for _ in 0..10 {
-        sleep(Duration::from_secs(1)).await;
+    for _ in 0..25 {
+        sleep(Duration::from_millis(200)).await;
         if let Ok(doc) = local.get(&doc_id).await {
-            println!("Success! Found document in local DB: {:?}", doc.data);
+            assert_eq!(doc.data["live"], true);
             found = true;
             break;
         }
@@ -61,5 +85,4 @@ async fn test_live_sync_remote() {
     handle.cancel();
 
     assert!(found, "Live sync failed to replicate the document in time");
-    println!("Live sync test completed successfully.");
 }

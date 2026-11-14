@@ -19,7 +19,7 @@ rustc --version
 cargo --version
 ```
 
-The workspace uses edition 2024 and resolver version 3, so you need Rust 1.85 or later.
+The minimum supported Rust version (MSRV) is 1.88, declared as `rust-version` in the root `Cargo.toml`. The toolchain used for development and CI is pinned in `rust-toolchain.toml`; rustup installs it automatically the first time you run `cargo` inside the repository.
 
 ### Docker (for integration tests)
 
@@ -38,7 +38,7 @@ cd rouchdb
 cargo build
 ```
 
-The workspace compiles all 8 crates:
+The workspace contains these crates:
 
 | Crate | Purpose |
 |---|---|
@@ -49,7 +49,12 @@ The workspace compiles all 8 crates:
 | `rouchdb-changes` | Streaming changes feed |
 | `rouchdb-replication` | CouchDB replication protocol |
 | `rouchdb-query` | Mango selectors and map/reduce views |
+| `rouchdb-views` | Design documents and persistent view engine |
 | `rouchdb` | Umbrella crate that re-exports everything |
+| `rouchdb-server` | CouchDB-compatible HTTP server (not published) |
+| `rouchdb-cli` | Command-line tool (published; installs the `rouchdb` binary) |
+| `rouchdb-bench` | Criterion benchmarks (not published) |
+| `rouchdb-compat-tests` | Cross-version tests against rouchdb 0.4.0 from crates.io (not published) |
 
 ## Running Unit Tests
 
@@ -68,23 +73,7 @@ cargo test -p rouchdb-adapter-memory
 
 ## Docker Compose Setup for CouchDB
 
-The project includes a `docker-compose.yml` at the repository root that starts a CouchDB 3 instance:
-
-```yaml
-services:
-  couchdb:
-    image: couchdb:3
-    ports:
-      - "15984:5984"
-    environment:
-      COUCHDB_USER: admin
-      COUCHDB_PASSWORD: password
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5984/_up"]
-      interval: 3s
-      timeout: 5s
-      retries: 10
-```
+The project includes a `docker-compose.yml` at the repository root that starts a CouchDB 3.5.1 instance (the version CI tests against) on port 15984, with the admin `admin:password`. A one-shot `couchdb-setup` service then turns off CouchDB's account lockout, which would otherwise lock the admin out after a few failed logins and fail the rest of the suite with 403.
 
 Start CouchDB:
 
@@ -108,11 +97,11 @@ docker compose down
 
 ## Running Integration Tests
 
-Integration tests verify RouchDB against a real CouchDB server. They are marked `#[ignore]` so they do not run during normal `cargo test`. Run them explicitly:
+Integration tests verify RouchDB against a real CouchDB server. They are marked `#[ignore = "requires CouchDB"]` so they do not run during normal `cargo test`. Run them explicitly (see [Testing](testing.md)):
 
 ```bash
 docker compose up -d
-cargo test -p rouchdb --test couchdb_integration -- --ignored
+bash scripts/test-couchdb.sh
 ```
 
 ## Environment Variables
@@ -129,7 +118,7 @@ To use a different CouchDB instance:
 
 ```bash
 export COUCHDB_URL="http://myuser:mypass@couchdb.example.com:5984"
-cargo test -p rouchdb --test couchdb_integration -- --ignored
+bash scripts/test-couchdb.sh
 ```
 
 ## Editor Setup

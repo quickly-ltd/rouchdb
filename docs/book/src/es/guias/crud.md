@@ -80,23 +80,10 @@ assert!(err.is_err());
 
 ```rust
 use rouchdb::{Document, BulkDocsOptions};
-use std::collections::HashMap;
 
 let docs = vec![
-    Document {
-        id: "user:1".into(),
-        rev: None,
-        deleted: false,
-        data: serde_json::json!({"name": "Alice"}),
-        attachments: HashMap::new(),
-    },
-    Document {
-        id: "user:2".into(),
-        rev: None,
-        deleted: false,
-        data: serde_json::json!({"name": "Bob"}),
-        attachments: HashMap::new(),
-    },
+    Document::new("user:1", serde_json::json!({"name": "Alice"})),
+    Document::new("user:2", serde_json::json!({"name": "Bob"})),
 ];
 
 let results = db.bulk_docs(docs, BulkDocsOptions::new()).await?;
@@ -122,7 +109,8 @@ let response = db.all_docs(AllDocsOptions {
 println!("Total: {} documentos", response.total_rows);
 
 for row in &response.rows {
-    println!("{}: rev {}", row.id, row.value.rev);
+    // `key` es el ID del documento; `rev()`, su revision ganadora.
+    println!("{}: rev {}", row.key, row.rev().unwrap_or_default());
     if let Some(ref doc) = row.doc {
         println!("  datos: {}", doc);
     }
@@ -147,7 +135,9 @@ let users = db.all_docs(AllDocsOptions {
     ..AllDocsOptions::new()
 }).await?;
 
-// Documentos especificos por ID
+// Documentos especificos por ID: una fila por clave, en orden. Una clave
+// sin documento da una fila de error (`row.is_error()`, sin `id` ni `value`)
+// y un documento borrado, una fila con `row.is_deleted()` y sin `doc`.
 let specific = db.all_docs(AllDocsOptions {
     keys: Some(vec!["user:1".into(), "user:2".into()]),
     include_docs: true,

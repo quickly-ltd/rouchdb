@@ -1,6 +1,6 @@
 # Testing
 
-RouchDB has two categories of tests: **unit tests** that run without external dependencies, and **integration tests** that require a running CouchDB instance.
+RouchDB has **unit tests** inside each crate, **integration tests** of the `Database` API that run on the local backends (memory and redb), and **CouchDB tests** that need a running CouchDB instance.
 
 ## Unit Tests
 
@@ -12,7 +12,7 @@ Unit tests are defined as `#[cfg(test)]` modules inside each crate's source file
 cargo test
 ```
 
-This runs every unit test across all 9 workspace crates.
+This runs every test that does not need CouchDB: the unit tests of the 12 workspace crates and the integration tests in `crates/rouchdb/tests/` that use the memory and redb backends.
 
 ### Running Tests for a Single Crate
 
@@ -30,7 +30,12 @@ cargo test -p rouchdb-core winning_rev_simple
 
 ## Integration Tests
 
-Integration tests live in `crates/rouchdb/tests/` across multiple test files (`http_crud.rs`, `replication.rs`, `changes_feed.rs`, `mango_queries.rs`, etc.). They verify RouchDB against a real CouchDB server to ensure protocol compliance and end-to-end correctness.
+Integration tests live in `crates/rouchdb/tests/`. Most of them exercise the `Database` API on the local backends and run with plain `cargo test`:
+
+- `adapter_conformance.rs` runs every scenario on both the memory and the redb adapter (the `conformance!` macro);
+- contract suites such as `plugin_contract.rs`, `partition.rs` and `error_conditions.rs` loop over both backends with the `backends()` helper of `crates/rouchdb/tests/backends/mod.rs`.
+
+The tests that verify RouchDB against a real CouchDB server (protocol compliance, replication, parity of results) are spread over the same files (`http_crud.rs`, `replication.rs`, `couchdb_query_parity.rs`, `data_diversity.rs`, etc.) and are marked `#[ignore = "requires CouchDB"]`.
 
 ### Prerequisites
 
@@ -50,11 +55,13 @@ The default connection URL is `http://admin:password@localhost:15984`.
 
 ### Running Integration Tests
 
-All integration tests are marked `#[ignore]` so they are skipped during `cargo test`. Run them with:
+The CouchDB tests are marked `#[ignore = "requires CouchDB"]` so they are skipped during `cargo test`. Run them (every crate, in parallel) with:
 
 ```bash
-cargo test -p rouchdb --test '*' -- --ignored
+bash scripts/test-couchdb.sh
 ```
+
+The script runs `cargo test --workspace --tests --no-fail-fast -- --ignored --skip blocked_on_`, which leaves out the tests blocked on a known bug (see below). Extra arguments go to `cargo test`, e.g. `bash scripts/test-couchdb.sh -p rouchdb`. It fails if a test leaves one of its databases behind; `bash scripts/test-couchdb.sh --sweep` deletes every `rouchdb_test_*` database (leftovers of a killed run; do not run it while another suite uses the same server).
 
 To run a single integration test by name:
 
@@ -67,9 +74,25 @@ cargo test -p rouchdb --test http_crud http_put_and_get -- --ignored
 To point tests at a different CouchDB instance, set the `COUCHDB_URL` environment variable:
 
 ```bash
-COUCHDB_URL="http://user:pass@myhost:5984" \
-  cargo test -p rouchdb --test '*' -- --ignored
+COUCHDB_URL="http://user:pass@myhost:5984" bash scripts/test-couchdb.sh
 ```
+
+### Tests Blocked on a Known Bug
+
+A test that pins down a known, not yet fixed library bug keeps its assertions. It is ignored with the finding it is waiting for, and its name contains `blocked_on_` (a `blocked_on_fxx_` prefix, or a `mod blocked_on_fxx`):
+
+```rust
+#[tokio::test]
+#[ignore = "blocked on F03"]
+async fn blocked_on_f03_inline_base64_attachment_decoding() { /* ... */ }
+```
+
+The name is what the scripts filter on, so no script has to parse the source:
+
+- `scripts/test-couchdb.sh` (and therefore CI) skips them with `--skip blocked_on_`.
+- `scripts/test-blocked.sh` runs only them and fails if any of them passes. CI runs it as a non-blocking step, so a fix that forgets to unblock its test shows up.
+
+Run one explicitly with `cargo test -p rouchdb --test parity_core blocked_on_f03 -- --ignored`, and remove both the marker and the name prefix in the PR that fixes the bug. `#[ignore]` takes one of these two reasons only; CI rejects a bare `#[ignore]` or any other reason.
 
 ## Writing New Unit Tests
 
@@ -114,13 +137,7 @@ mod tests {
     async fn put_and_get_document() {
         let db = new_db().await;
 
-        let doc = Document {
-            id: "doc1".into(),
-            rev: None,
-            deleted: false,
-            data: serde_json::json!({"name": "Alice"}),
-            attachments: HashMap::new(),
-        };
+        let doc = Document::new("doc1", serde_json::json!({"name": "Alice"}));
 
         let results = db
             .bulk_docs(vec![doc], BulkDocsOptions::new())
@@ -143,18 +160,45 @@ mod tests {
 
 ## Writing New Integration Tests
 
-Integration tests go in `crates/rouchdb/tests/` as separate test files. They test the high-level `Database` API against a real CouchDB instance.
+Integration tests go in `crates/rouchdb/tests/` as separate test files. They test the high-level `Database` API.
 
-### Structure of an Integration Test
+### Tests on the Local Backends
 
-Every integration test follows this pattern:
+Run a `Database` test on both local backends unless it is about one of them:
 
 ```rust
+mod backends;
+
+use backends::backends;
+
 #[tokio::test]
-#[ignore]
+async fn my_local_test() {
+    for b in backends("test") {
+        let r = b.db.put("doc1", serde_json::json!({"v": 1})).await.unwrap();
+        let doc = b.db.get("doc1").await.unwrap();
+        assert_eq!(doc.rev.unwrap().to_string(), r.rev.unwrap(), "{}", b.name);
+        assert_eq!(doc.data, serde_json::json!({"v": 1}), "{}", b.name);
+    }
+}
+```
+
+A scenario that every adapter must pass belongs in `adapter_conformance.rs`.
+
+### Structure of a CouchDB Test
+
+Every CouchDB integration test follows this pattern:
+
+```rust
+mod common;
+
+use common::fresh_remote_db;
+
+#[tokio::test]
+#[ignore = "requires CouchDB"]
 async fn my_couchdb_test() {
-    // 1. Create a fresh database with a unique name
-    let url = fresh_remote_db("my_test_prefix").await;
+    // 1. Create a fresh database with a unique name. `url` is a guard that
+    //    deletes the database when it is dropped, even if the test fails.
+    let url = fresh_remote_db("my_test_label").await;
     let db = Database::http(&url);
 
     // 2. Perform operations
@@ -164,18 +208,16 @@ async fn my_couchdb_test() {
     // 3. Verify results
     let doc = db.get("doc1").await.unwrap();
     assert_eq!(doc.data["key"], "value");
-
-    // 4. Clean up the database
-    delete_remote_db(&url).await;
 }
 ```
 
 Key points:
 
-- **Always add `#[ignore]`** so the test does not run in `cargo test`.
-- **Always use `fresh_remote_db()`** to get a uniquely-named database. This prevents test interference.
-- **Always call `delete_remote_db()`** at the end to clean up.
-- The `fresh_remote_db()` helper creates the database via the CouchDB REST API and returns its full URL.
+- **Always add `#[ignore = "requires CouchDB"]`** so the test does not run in `cargo test`, and so the CouchDB suite picks it up.
+- **Always use `fresh_remote_db()`** (or `unique_remote_db()` when the code under test creates the database itself) to get a uniquely named database. This prevents test interference, so the suite can run in parallel.
+- **No manual cleanup.** The returned `RemoteDb` guard deletes the database on drop, also when an assert fails. Set `ROUCHDB_KEEP_TEST_DBS=1` to keep the databases for debugging.
+- **Do not hardcode the server or credentials.** Take them from `common::couchdb()` (`url`, `anonymous_url`, `user`, `password`), which parses `COUCHDB_URL` once.
+- **Never log in as the admin with a wrong password.** CouchDB 3.4+ locks the account after a few failures and the rest of the suite then fails with 403. Use a random, nonexistent user name to test a failed login.
 
 ### When to Write an Integration Test
 
@@ -190,7 +232,7 @@ Add an integration test when you need to verify:
 
 ### Memory Adapter for Fast Tests
 
-The `MemoryAdapter` is the primary tool for fast, isolated unit tests. It implements the full `Adapter` trait in memory with no I/O, making tests instant and deterministic.
+The `MemoryAdapter` is the primary tool for fast, isolated unit tests. It implements the full `Adapter` trait in memory with no I/O, making tests instant and deterministic. The redb adapter is almost as fast on a `tempfile` directory, so `Database` tests should run on both (see above).
 
 Use `MemoryAdapter` when testing:
 
@@ -224,24 +266,74 @@ Integration tests with a real CouchDB instance catch issues that in-memory tests
 
 ### Helper Functions in Integration Tests
 
-The integration test files share three common helpers:
+The integration tests share these helpers in `crates/rouchdb/tests/common/mod.rs` (the CLI tests include the same file):
 
-- `couchdb_url()` -- Returns the CouchDB base URL, respecting the `COUCHDB_URL` environment variable.
-- `fresh_remote_db(prefix)` -- Creates a new CouchDB database with a UUID-based name and returns its URL.
-- `delete_remote_db(url)` -- Deletes a CouchDB database by URL.
+- `couchdb()` -- The server under test, parsed once from the `COUCHDB_URL` environment variable: URL with and without credentials, user and password.
+- `fresh_remote_db(label)` -- Creates a CouchDB database named `rouchdb_test_<label>_<uuid>` and returns a `RemoteDb` guard that derefs to its URL and deletes it when dropped.
+- `unique_remote_db(label)` -- The same guard for a database that is not created up front.
+
+Every test database starts with `rouchdb_test_`. If a run is killed before the guards run, remove the leftovers with `bash scripts/test-couchdb.sh --sweep`.
+
+## Assertions
+
+A test must be able to fail. In particular:
+
+- `put`, `update`, `remove` and `post` return a failed write as an error (`Err(RouchError::Conflict)`, `Err(RouchError::NotFound(_))`, `Err(RouchError::Forbidden(_))`, ...), never as `Ok` with `ok: false`. `bulk_docs` reports failures per document (`ok: false` and `error: Some("conflict")`), so check each result's `ok` or `error`.
+- Check the exact error with `matches!(result, Err(RouchError::Conflict))`, not `is_err()`: an unrelated failure passes `is_err()` too.
+- Compare exact values: the list of ids in order, the whole body, the revision. A count passes with the wrong documents, and `for row in &rows { assert!(..) }` passes when there are no rows.
+- Check the preconditions a test relies on (for example, which revision of a conflict wins) and that a rejected write left the database unchanged (same `update_seq`, same revision).
+- Do not accept every outcome (`assert!(r.is_ok() || r.is_err())`, `match` arms that all do nothing). Assert the behavior CouchDB has, and verify it against a real CouchDB when in doubt.
+
+## On-Disk Compatibility Tests
+
+`crates/rouchdb-compat-tests` (never published) links the rouchdb 0.4.0 release from crates.io next to this version. Its tests write realistic data with 0.4, then check that 0.5 refuses the file without changing it, that the upgrade keeps every document, revision body, attachment and local document, that the backup is identical to the original, and that 0.4 refuses upgraded and newly created files without writing to them. They run with the unit tests (`cargo test --workspace`). Any change to the redb on-disk format must keep them passing, and should add a scenario there.
+
+## Benchmarks
+
+Criterion benchmarks live in the `rouchdb-bench` crate:
+
+- `benches/core_ops.rs`: `bulk_docs`, `get`, `all_docs`, `changes`, Mango `find` with and without an index, and replication, on the memory and redb backends.
+- `benches/revtree.rs`: `merge_tree`, `stem`, `winning_rev` and `collect_conflicts` on deep and wide revision trees.
+
+```bash
+cargo bench -p rouchdb-bench                   # everything
+cargo bench -p rouchdb-bench -- find/redb      # filter by benchmark name
+ROUCHDB_BENCH_N=100000 cargo bench -p rouchdb-bench --bench core_ops
+cargo bench -p rouchdb-bench -- --save-baseline main   # then compare with --baseline main
+```
+
+Results depend heavily on the machine; compare runs on the same machine only.
 
 ## Continuous Integration
 
-When running tests in CI, use two stages:
+GitHub Actions (`.github/workflows/ci.yml`) runs these jobs on every pull request, each with a `timeout-minutes`:
+
+| Job | What it runs |
+|-----|--------------|
+| Check & Lint | `cargo fmt --check`, every `#[ignore]` has a known reason, `cargo clippy --all-targets -D warnings`, and the TLS feature combinations |
+| Tests | `cargo test --workspace --no-fail-fast` (including the README examples as doctests) |
+| CouchDB integration tests | `scripts/test-couchdb.sh` against a `couchdb:3.5.1` service container (account lockout off), the non-blocking `scripts/test-blocked.sh` xfail check, and a check that no database was left behind |
+| Benchmarks (build + smoke run) | `cargo bench --no-run`, then every benchmark once in criterion's `--test` mode on 1000 documents |
+| MSRV (1.88) | `cargo check --all-targets --all-features` on Rust 1.88 |
+| Clippy on stable/beta | Non-blocking early warning about lints from newer toolchains |
+
+`minimal-versions.yml` resolves every direct dependency to the lowest version its `Cargo.toml` requirement allows (`cargo +nightly update -Z direct-minimal-versions`) and builds, when a manifest changes and weekly. When it fails, raise the requirement to the version the code actually needs, in every crate that declares it.
+
+Three more workflows measure test quality. They never block a merge:
+
+| Workflow | When | What |
+|----------|------|------|
+| `coverage.yml` | push to `main` | Line coverage (cargo-llvm-cov) of the unit tests, doctests and CouchDB suite: job summary plus an lcov artifact |
+| `mutants.yml` | pull requests that change `crates/*/src` | `cargo mutants --in-diff` on the changed code; every mutant runs the whole workspace suite, CouchDB tests included, against the same `couchdb:3.5.1` service as the CI job (`--timeout 300` per test run, 75 minutes in all). Mutants no test catches (missed or timed out) are listed in the job summary and the `mutants-out` artifact, and the job still passes; it fails only if cargo-mutants does, e.g. when the unmutated code fails its tests |
+| `nightly.yml` | daily, or by hand | Flaky-test detection: `scripts/repeat-tests.sh` runs the unit suite (Linux and macOS) and the CouchDB suite 5 times and lists every test that failed in any run |
+
+`bash scripts/repeat-tests.sh 5 bash scripts/test-couchdb.sh` does the same locally.
+
+To run the mutants of one file locally the way `mutants.yml` does, with CouchDB running (arguments after the first `--` go to `cargo test`, after the second to the test binaries):
 
 ```bash
-# Stage 1: Unit tests (no services needed)
-cargo test
-
-# Stage 2: Integration tests (CouchDB required)
-docker compose up -d --wait
-cargo test -p rouchdb --test '*' -- --ignored
-docker compose down
+cargo mutants -f crates/rouchdb-adapter-http/src/lib.rs --test-workspace=true --timeout 300 \
+  -- --tests -- --include-ignored --skip blocked_on_
 ```
 
-The `--wait` flag tells Docker Compose to block until the health check passes before proceeding.
+The blocking jobs use the toolchain pinned in `rust-toolchain.toml`. To move to a newer Rust, bump it there and fix any new lints in the same PR. The benchmarks can be run on a GitHub runner from the Actions tab (the manual "Benchmarks" workflow); shared runners are noisy, so use those numbers for trends only.

@@ -2,11 +2,11 @@
 
 mod common;
 
-use common::{delete_remote_db, fresh_remote_db};
+use common::fresh_remote_db;
 use rouchdb::{ChangesOptions, ChangesStreamOptions, Database};
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
 async fn changes_since_sequence() {
     let url = fresh_remote_db("ch_since").await;
     let db = Database::http(&url);
@@ -27,13 +27,35 @@ async fn changes_since_sequence() {
         .await
         .unwrap();
 
-    assert!(partial.results.len() < 3);
-
-    delete_remote_db(&url).await;
+    // CouchDB (q=2) orders the feed by shard, not by write time: the exact
+    // expectation is whatever followed results[1] in the full feed.
+    let ids =
+        |r: &[rouchdb::ChangeEvent]| -> Vec<String> { r.iter().map(|c| c.id.clone()).collect() };
+    assert_eq!(ids(&partial.results), ids(&all.results[2..]));
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
+async fn changes_with_doc_ids_lists_only_those_docs() {
+    let url = fresh_remote_db("ch_docids").await;
+    let db = Database::http(&url);
+    for id in ["doc1", "doc2", "doc3"] {
+        db.put(id, serde_json::json!({})).await.unwrap();
+    }
+
+    let filtered = db
+        .changes(ChangesOptions {
+            doc_ids: Some(vec!["doc2".into()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = filtered.results.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, vec!["doc2"]);
+}
+
+#[tokio::test]
+#[ignore = "requires CouchDB"]
 async fn changes_with_limit() {
     let url = fresh_remote_db("ch_limit").await;
     let db = Database::http(&url);
@@ -53,12 +75,10 @@ async fn changes_with_limit() {
         .unwrap();
 
     assert_eq!(changes.results.len(), 3);
-
-    delete_remote_db(&url).await;
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
 async fn changes_include_docs() {
     let url = fresh_remote_db("ch_docs").await;
     let db = Database::http(&url);
@@ -78,12 +98,10 @@ async fn changes_include_docs() {
     assert_eq!(changes.results.len(), 1);
     let doc = changes.results[0].doc.as_ref().unwrap();
     assert_eq!(doc["name"], "Alice");
-
-    delete_remote_db(&url).await;
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
 async fn changes_after_updates_and_deletes() {
     let url = fresh_remote_db("ch_upddel").await;
     let db = Database::http(&url);
@@ -92,10 +110,13 @@ async fn changes_after_updates_and_deletes() {
     db.put("doc2", serde_json::json!({"v": 1})).await.unwrap();
     let r3 = db.put("doc3", serde_json::json!({"v": 1})).await.unwrap();
 
-    db.update("doc1", &r1.rev.unwrap(), serde_json::json!({"v": 2}))
-        .await
-        .unwrap();
-    db.remove("doc3", &r3.rev.unwrap()).await.unwrap();
+    assert!(
+        db.update("doc1", &r1.rev.unwrap(), serde_json::json!({"v": 2}))
+            .await
+            .unwrap()
+            .ok
+    );
+    assert!(db.remove("doc3", &r3.rev.unwrap()).await.unwrap().ok);
 
     let changes = db.changes(ChangesOptions::default()).await.unwrap();
 
@@ -106,8 +127,6 @@ async fn changes_after_updates_and_deletes() {
 
     let doc3_change = changes.results.iter().find(|r| r.id == "doc3").unwrap();
     assert!(doc3_change.deleted);
-
-    delete_remote_db(&url).await;
 }
 
 // =========================================================================
@@ -115,7 +134,7 @@ async fn changes_after_updates_and_deletes() {
 // =========================================================================
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
 async fn changes_with_selector_filter() {
     let url = fresh_remote_db("ch_sel").await;
     let db = Database::http(&url);
@@ -145,13 +164,19 @@ async fn changes_with_selector_filter() {
         .await
         .unwrap();
 
-    assert_eq!(changes.results.len(), 2);
-    for event in &changes.results {
-        let doc = event.doc.as_ref().unwrap();
-        assert_eq!(doc["type"], "user");
-    }
-
-    delete_remote_db(&url).await;
+    let mut got: Vec<(String, serde_json::Value)> = changes
+        .results
+        .iter()
+        .map(|e| (e.id.clone(), e.doc.as_ref().unwrap()["name"].clone()))
+        .collect();
+    got.sort_by(|a, b| a.0.cmp(&b.0)); // shard order
+    assert_eq!(
+        got,
+        vec![
+            ("user1".to_string(), serde_json::json!("Alice")),
+            ("user2".to_string(), serde_json::json!("Bob")),
+        ]
+    );
 }
 
 // =========================================================================
@@ -159,7 +184,7 @@ async fn changes_with_selector_filter() {
 // =========================================================================
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
 async fn live_changes_picks_up_new_docs() {
     let url = fresh_remote_db("ch_live").await;
     let db = Database::http(&url);
@@ -190,5 +215,4 @@ async fn live_changes_picks_up_new_docs() {
     assert_eq!(event.id, "new1");
 
     handle.cancel();
-    delete_remote_db(&url).await;
 }

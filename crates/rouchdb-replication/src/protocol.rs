@@ -2,15 +2,22 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rouchdb_core::adapter::Adapter;
+use rouchdb_core::adapter::{Adapter, ChangeNotice};
 use rouchdb_core::document::*;
 use rouchdb_core::error::Result;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+
+use rouchdb_query::CompiledSelector;
 
 use crate::checkpoint::Checkpointer;
 
 /// Filter for selective replication.
+///
+/// `#[non_exhaustive]`: new kinds of filters (such as CouchDB design
+/// document filters) may be added in minor releases, so a `match` on it
+/// needs a catch-all arm.
+#[non_exhaustive]
 pub enum ReplicationFilter {
     /// Replicate only these document IDs.
     DocIds(Vec<String>),
@@ -20,6 +27,12 @@ pub enum ReplicationFilter {
 
     /// Replicate documents passing a custom predicate.
     /// Receives the ChangeEvent (id, deleted, seq).
+    ///
+    /// A closure cannot be fingerprinted, so two different predicates would
+    /// share one checkpoint and the second would silently skip everything
+    /// the first had already scanned. Checkpoints are therefore neither read
+    /// nor written for custom filters: each run scans from `since` (or the
+    /// start); documents the target already has are not transferred again.
     Custom(Arc<dyn Fn(&ChangeEvent) -> bool + Send + Sync>),
 }
 
@@ -34,25 +47,45 @@ impl Clone for ReplicationFilter {
 }
 
 /// Replication configuration.
+///
+/// Set the options you need and fill the rest with `..Default::default()`:
+/// fields may be added in minor releases, and a literal that lists every
+/// field would then stop compiling.
+///
+/// ```
+/// use rouchdb_replication::ReplicationOptions;
+///
+/// let opts = ReplicationOptions {
+///     batch_size: 50,
+///     ..Default::default()
+/// };
+/// # let _ = opts;
+/// ```
 pub struct ReplicationOptions {
     /// Number of documents to process per batch.
     pub batch_size: u64,
-    /// Maximum number of batches to buffer.
+    /// Maximum number of batches to buffer (PouchDB option). Currently has
+    /// no effect: batches are fetched and written one at a time.
     pub batches_limit: u64,
     /// Optional filter for selective replication.
     pub filter: Option<ReplicationFilter>,
-    /// Enable continuous/live replication.
+    /// Enable continuous/live replication. Only honored by
+    /// [`replicate_live`]; [`replicate`] always runs a single pass.
     pub live: bool,
-    /// Automatically retry on transient errors.
+    /// Automatically retry on transient errors (live replication only).
     pub retry: bool,
-    /// Polling interval for live replication (default: 500ms).
+    /// Polling interval for live replication (default: 500ms), used when
+    /// the source cannot announce its changes ([`Adapter::subscribe`]
+    /// returns `None`, as for a remote CouchDB).
     pub poll_interval: Duration,
     /// Backoff function for retry: takes attempt number, returns delay.
     pub back_off_function: Option<Box<dyn Fn(u32) -> Duration + Send + Sync>>,
     /// Override the starting sequence (skip checkpoint lookup).
     pub since: Option<Seq>,
     /// Whether to save/read checkpoints (default: true).
-    /// Set to false to always replicate from scratch.
+    /// Set to false to always replicate from scratch. Checkpoints are
+    /// never used between two peers that report the same
+    /// [`Adapter::id`] (see [`ReplicationResult::warnings`]).
     pub checkpoint: bool,
 }
 
@@ -73,21 +106,40 @@ impl Default for ReplicationOptions {
 }
 
 /// Result of a completed replication.
+///
+/// `#[non_exhaustive]`: fields may be added in minor releases.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ReplicationResult {
     pub ok: bool,
     pub docs_read: u64,
     pub docs_written: u64,
     pub errors: Vec<String>,
     pub last_seq: Seq,
+    /// Conditions that did not stop the replication but that the caller
+    /// should know about. Currently: the source and the target report the
+    /// same [`Adapter::id`] (a custom adapter that keeps the default id,
+    /// the database name, replicating with a same-named database; or one
+    /// database replicating with itself). The replication id could not
+    /// tell the two directions or pairs apart, so checkpoints were neither
+    /// read nor written and the whole changes feed was scanned: the
+    /// replication is complete, but every run rescans. Does not affect
+    /// [`ok`](ReplicationResult::ok).
+    pub warnings: Vec<String>,
 }
 
 /// Events emitted during replication for progress tracking.
+///
+/// `#[non_exhaustive]`: new events may be added in minor releases, so a
+/// `match` on it needs a catch-all arm, and `Change` may gain fields (match
+/// it as `Change { docs_read, .. }`).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ReplicationEvent {
-    /// One batch was processed. Counts are deltas for *this batch only*
-    /// (not running totals) — a listener that wants a lifetime total, as
-    /// CouchDB's `_active_tasks` reports, should accumulate them itself.
+    #[non_exhaustive]
+    /// Cumulative counts for the current replication pass. Each `Active`
+    /// starts a new pass; live listeners accumulate differences between
+    /// successive `Change` events to obtain lifetime totals.
     Change {
         docs_read: u64,
         docs_written: u64,
@@ -97,23 +149,87 @@ pub enum ReplicationEvent {
     Active,
     Complete(ReplicationResult),
     Error(String),
+    /// A condition that does not stop the replication, also listed in
+    /// [`ReplicationResult::warnings`]. A live replication sends it once
+    /// per session, not on every pass.
+    Warning(String),
 }
 
 /// Build a stable fingerprint of the active filter for the replication ID,
 /// so filtered and unfiltered replications use distinct checkpoints.
+///
+/// `DocIds` is encoded as the JSON array of its sorted, deduplicated ids, so
+/// distinct selections never share a fingerprint (`["a", "b"]` and
+/// `["a\u{0}b"]` did when the ids were joined with NUL). The `v2` tag keeps
+/// checkpoints written with that ambiguous encoding from being reused.
 fn filter_fingerprint(filter: &Option<ReplicationFilter>) -> String {
     match filter {
         None => "nofilter".to_string(),
         Some(ReplicationFilter::DocIds(ids)) => {
-            let mut sorted = ids.clone();
-            sorted.sort();
-            format!("docids:{}", sorted.join("\u{0}"))
+            let mut sorted: Vec<&str> = ids.iter().map(String::as_str).collect();
+            sorted.sort_unstable();
+            sorted.dedup();
+            let json = serde_json::to_string(&sorted).expect("strings serialize");
+            format!("docids-v2:{json}")
         }
         Some(ReplicationFilter::Selector(sel)) => format!("selector:{}", sel),
-        // A custom closure cannot be fingerprinted deterministically; distinct
-        // custom filters between the same pair therefore share a checkpoint.
+        // Never used for a checkpoint: see `ReplicationFilter::Custom`.
         Some(ReplicationFilter::Custom(_)) => "custom".to_string(),
     }
+}
+
+/// The JSON a replication selector is evaluated against: the body plus
+/// `_id`, `_rev` and `_deleted` (attachments are left out).
+fn selector_view(doc: &Document) -> serde_json::Value {
+    let mut obj = match &doc.data {
+        serde_json::Value::Object(m) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    obj.insert("_id".into(), serde_json::Value::String(doc.id.clone()));
+    if let Some(rev) = &doc.rev {
+        obj.insert("_rev".into(), serde_json::Value::String(rev.to_string()));
+    }
+    if doc.deleted {
+        obj.insert("_deleted".into(), serde_json::Value::Bool(true));
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Compile the replication's selector filter, if any. An invalid selector
+/// is a `BadRequest`, returned before anything is read or written (a
+/// selector that failed to compile used to match nothing, so the
+/// replication "succeeded" without copying a document and could advance its
+/// checkpoint past them).
+fn compile_filter(filter: &Option<ReplicationFilter>) -> Result<Option<CompiledSelector>> {
+    match filter {
+        Some(ReplicationFilter::Selector(selector)) => Ok(Some(CompiledSelector::new(selector)?)),
+        _ => Ok(None),
+    }
+}
+
+/// Whether `new` is strictly later than `old`. Opaque CouchDB sequences are
+/// only comparable by their numeric prefix.
+fn seq_after(new: &Seq, old: &Seq) -> bool {
+    match (new, old) {
+        (Seq::Num(n), Seq::Num(o)) => n > o,
+        _ => new != old && new.as_num() >= old.as_num(),
+    }
+}
+
+/// Whether `rev` is still a leaf of document `id` on `adapter`.
+async fn is_leaf(adapter: &dyn Adapter, id: &str, rev: &str) -> Result<bool> {
+    let changes = adapter
+        .changes(ChangesOptions {
+            doc_ids: Some(vec![id.to_string()]),
+            style: ChangesStyle::AllDocs,
+            ..Default::default()
+        })
+        .await?;
+    Ok(changes
+        .results
+        .iter()
+        .filter(|c| c.id == id)
+        .any(|c| c.changes.iter().any(|r| r.rev == rev)))
 }
 
 /// Run a one-shot replication from source to target.
@@ -125,30 +241,177 @@ fn filter_fingerprint(filter: &Option<ReplicationFilter>) -> String {
 /// 4. Fetch missing docs from source
 /// 5. Write to target
 /// 6. Save checkpoint
+///
+/// This is a single pass: `live`, `retry`, `back_off_function` and
+/// `poll_interval` only apply to [`replicate_live`].
+///
+/// An invalid [`ReplicationFilter::Selector`] is `Err(BadRequest)`, returned
+/// before anything is read or written.
 pub async fn replicate(
     source: &dyn Adapter,
     target: &dyn Adapter,
     opts: ReplicationOptions,
 ) -> Result<ReplicationResult> {
-    let source_info = source.info().await?;
-    let target_info = target.info().await?;
+    let selector = compile_filter(&opts.filter)?;
+    let session = new_session(source, target, &opts.filter).await?;
+    let since = opts.since.clone();
+    let outcome = run_replication(
+        source,
+        target,
+        &opts,
+        selector.as_ref(),
+        &session,
+        since,
+        None,
+    )
+    .await?;
+    Ok(outcome.result)
+}
 
-    let checkpointer = Checkpointer::new(
-        &source_info.db_name,
-        &target_info.db_name,
-        &filter_fingerprint(&opts.filter),
-    );
+/// Run a one-shot replication with event streaming.
+///
+/// Same as `replicate()` but emits `ReplicationEvent` through the provided
+/// channel as replication progresses. The replication waits for room in the
+/// channel, so the receiver must be drained concurrently (or the channel must
+/// be large enough to hold every event).
+pub async fn replicate_with_events(
+    source: &dyn Adapter,
+    target: &dyn Adapter,
+    opts: ReplicationOptions,
+    events_tx: mpsc::Sender<ReplicationEvent>,
+) -> Result<ReplicationResult> {
+    let selector = compile_filter(&opts.filter)?;
+    let session = new_session(source, target, &opts.filter).await?;
+    for warning in &session.warnings {
+        let _ = events_tx
+            .send(ReplicationEvent::Warning(warning.clone()))
+            .await;
+    }
+    let since = opts.since.clone();
+    let outcome = run_replication(
+        source,
+        target,
+        &opts,
+        selector.as_ref(),
+        &session,
+        since,
+        Some(&events_tx),
+    )
+    .await?;
+    let _ = events_tx
+        .send(ReplicationEvent::Complete(outcome.result.clone()))
+        .await;
+    Ok(outcome.result)
+}
 
-    // Step 1: Read checkpoint (or use override)
-    let since = if let Some(ref override_since) = opts.since {
-        override_since.clone()
-    } else if opts.checkpoint {
+/// Result of one pass of the replication loop.
+struct RunOutcome {
+    result: ReplicationResult,
+    /// Set when the pass stopped at a batch it could not fully replicate
+    /// (the checkpoint was not advanced past it), so it must be retried.
+    failure: Option<String>,
+}
+
+/// Per-doc write errors that will never succeed on retry.
+fn is_denied(error: &str) -> bool {
+    error.eq_ignore_ascii_case("forbidden") || error.eq_ignore_ascii_case("unauthorized")
+}
+
+/// Send an event if there is a listener.
+async fn emit(events: Option<&mpsc::Sender<ReplicationEvent>>, event: ReplicationEvent) {
+    if let Some(tx) = events {
+        let _ = tx.send(event).await;
+    }
+}
+
+/// How a replication session stores its progress.
+struct Session {
+    /// `None` when the source and the target report the same id: their
+    /// replication id could not tell the two directions (or two such pairs)
+    /// apart, so a checkpoint could be one written by another replication,
+    /// and resuming from it would skip documents.
+    checkpointer: Option<Checkpointer>,
+    /// Reported in the result of every pass.
+    warnings: Vec<String>,
+}
+
+/// The session for a source/target pair and filter.
+async fn new_session(
+    source: &dyn Adapter,
+    target: &dyn Adapter,
+    filter: &Option<ReplicationFilter>,
+) -> Result<Session> {
+    let ids = peer_ids(source, target).await?;
+    Ok(session_for(&ids, filter))
+}
+
+fn session_for(ids: &(String, String), filter: &Option<ReplicationFilter>) -> Session {
+    if ids.0 == ids.1 {
+        return Session {
+            checkpointer: None,
+            warnings: vec![format!(
+                "the source and the target report the same database id ({:?}), so their \
+                 replication checkpoints cannot be told apart: replicating without \
+                 checkpoints (every run scans the whole changes feed); give each \
+                 database a distinct Adapter::id",
+                ids.0
+            )],
+        };
+    }
+    Session {
+        checkpointer: Some(checkpointer_for(ids, filter)),
+        warnings: Vec::new(),
+    }
+}
+
+/// Build the checkpointer (and so the replication id) for a source/target
+/// pair and filter.
+#[cfg(test)]
+async fn new_checkpointer(
+    source: &dyn Adapter,
+    target: &dyn Adapter,
+    filter: &Option<ReplicationFilter>,
+) -> Result<Checkpointer> {
+    let ids = peer_ids(source, target).await?;
+    Ok(checkpointer_for(&ids, filter))
+}
+
+/// The identities ([`Adapter::id`]) of the source and the target.
+async fn peer_ids(source: &dyn Adapter, target: &dyn Adapter) -> Result<(String, String)> {
+    Ok((source.id().await?, target.id().await?))
+}
+
+fn checkpointer_for(ids: &(String, String), filter: &Option<ReplicationFilter>) -> Checkpointer {
+    Checkpointer::new(&ids.0, &ids.1, &filter_fingerprint(filter))
+}
+
+/// One replication pass shared by the one-shot and live paths. `since`
+/// overrides the checkpoint as the starting sequence. Does not emit
+/// `Complete`; callers decide when the replication as a whole is done.
+/// `selector` is the compiled `ReplicationFilter::Selector` of `opts`.
+async fn run_replication(
+    source: &dyn Adapter,
+    target: &dyn Adapter,
+    opts: &ReplicationOptions,
+    selector: Option<&CompiledSelector>,
+    session: &Session,
+    since: Option<Seq>,
+    events: Option<&mpsc::Sender<ReplicationEvent>>,
+) -> Result<RunOutcome> {
+    // Checkpoints are used when enabled, meaningful for the filter, and
+    // distinct for this pair of peers.
+    let checkpointer = session
+        .checkpointer
+        .as_ref()
+        .filter(|_| opts.checkpoint && !matches!(opts.filter, Some(ReplicationFilter::Custom(_))));
+    let since = if let Some(override_since) = since {
+        override_since
+    } else if let Some(checkpointer) = checkpointer {
         checkpointer.read_checkpoint(source, target).await?
     } else {
         Seq::default()
     };
 
-    // Extract doc_ids from filter (for ChangesOptions)
     let filter_doc_ids = match &opts.filter {
         Some(ReplicationFilter::DocIds(ids)) => Some(ids.clone()),
         _ => None,
@@ -156,23 +419,37 @@ pub async fn replicate(
 
     let mut total_docs_read = 0u64;
     let mut total_docs_written = 0u64;
+    let mut total_write_failures = 0u64;
     let mut errors = Vec::new();
     let mut current_seq = since;
+    // Last sequence stored in (or read from) the checkpoint.
+    let mut checkpointed_seq = current_seq.clone();
+    let mut failed = false;
+    let mut checkpoint_failed = false;
+
+    emit(events, ReplicationEvent::Active).await;
 
     loop {
-        // Step 2: Fetch changes from source
+        // Step 2: Fetch changes from source. `all_docs` style lists every
+        // leaf, so conflicting branches are replicated, not just the winner.
         let changes = source
             .changes(ChangesOptions {
                 since: current_seq.clone(),
                 limit: Some(opts.batch_size),
                 include_docs: false,
                 doc_ids: filter_doc_ids.clone(),
+                style: ChangesStyle::AllDocs,
                 ..Default::default()
             })
             .await?;
 
         if changes.results.is_empty() {
-            break; // No more changes
+            // No more changes, though the feed may have moved past changes
+            // excluded by a doc_ids filter.
+            if seq_after(&changes.last_seq, &current_seq) {
+                current_seq = changes.last_seq;
+            }
+            break;
         }
 
         let batch_last_seq = changes.last_seq;
@@ -217,10 +494,7 @@ pub async fn replicate(
         let mut bulk_get_items: Vec<BulkGetItem> = Vec::new();
         for (doc_id, diff_result) in &diff.results {
             for missing_rev in &diff_result.missing {
-                bulk_get_items.push(BulkGetItem {
-                    id: doc_id.clone(),
-                    rev: Some(missing_rev.clone()),
-                });
+                bulk_get_items.push(BulkGetItem::new(doc_id).with_rev(missing_rev));
             }
         }
 
@@ -237,50 +511,95 @@ pub async fn replicate(
                         Err(e) => {
                             errors.push(format!("parse error for {}: {}", result.id, e));
                             batch_failed = true;
+                            total_write_failures += 1;
                         }
                     }
-                }
-            }
-        }
-
-        // Step 4.5: Apply Selector filter to fetched documents
-        if let Some(ReplicationFilter::Selector(ref selector)) = opts.filter {
-            docs_to_write.retain(|doc| rouchdb_query::matches_selector(&doc.data, selector));
-        }
-
-        if !docs_to_write.is_empty() {
-            let write_results = target
-                .bulk_docs(docs_to_write, BulkDocsOptions::replication())
-                .await?;
-
-            for wr in &write_results {
-                if !wr.ok {
+                } else if let Some(ref err) = doc.error {
+                    // A rev that vanished after the feed listed it (edited
+                    // then compacted, or purged) is not needed: its successor
+                    // has a later seq. Any other failure must be retried.
+                    if err.error == "not_found" && !is_leaf(source, &result.id, &err.rev).await? {
+                        continue;
+                    }
                     errors.push(format!(
-                        "write error for {}: {}",
-                        wr.id,
-                        wr.reason.as_deref().unwrap_or("unknown")
+                        "fetch error for {} {}: {}: {}",
+                        result.id, err.rev, err.error, err.reason
                     ));
                     batch_failed = true;
                 }
             }
-
-            // Count only docs that were actually persisted.
-            total_docs_written += write_results.iter().filter(|wr| wr.ok).count() as u64;
         }
 
-        // Do not advance the checkpoint past a batch that had any parse or
-        // write failure; stop so the next run retries from the un-advanced
-        // sequence rather than silently losing those docs.
+        // Step 4.5: Apply Selector filter to fetched documents, including
+        // the reserved fields a selector may test (`_id`, `_rev`, `_deleted`).
+        if let Some(selector) = selector {
+            docs_to_write.retain(|doc| selector.matches(&selector_view(doc)));
+        }
+
+        if !docs_to_write.is_empty() {
+            let attempted = docs_to_write.len() as u64;
+            let write_results = target
+                .bulk_docs(docs_to_write, BulkDocsOptions::replication())
+                .await?;
+
+            for wr in write_results.iter().filter(|wr| !wr.ok) {
+                let error = wr.error.as_deref().unwrap_or("unknown");
+                let message = format!(
+                    "write error for {}: {}: {}",
+                    wr.id,
+                    error,
+                    wr.reason.as_deref().unwrap_or("unknown")
+                );
+                if is_denied(error) {
+                    // Rejected for good (validation or permissions). Like
+                    // PouchDB's `denied`, report it and move on so a single
+                    // doc cannot stall the replication forever.
+                    emit(events, ReplicationEvent::Error(message.clone())).await;
+                } else {
+                    batch_failed = true;
+                }
+                errors.push(message);
+            }
+
+            // With new_edits=false CouchDB replies only with the docs that
+            // failed (an empty array means every doc was stored), so count
+            // what was sent minus the reported failures.
+            let failed = write_results.iter().filter(|wr| !wr.ok).count() as u64;
+            total_docs_written += attempted - failed;
+            total_write_failures += failed;
+        }
+
+        emit(
+            events,
+            ReplicationEvent::Change {
+                docs_read: total_docs_read,
+                docs_written: total_docs_written,
+                doc_write_failures: total_write_failures,
+            },
+        )
+        .await;
+
+        // Do not advance the checkpoint past a batch that had any fetch,
+        // parse or (non-denied) write failure; stop so the next run retries
+        // from the un-advanced sequence rather than silently losing docs.
         if batch_failed {
+            failed = true;
             break;
         }
 
         // Step 6: Save checkpoint (if enabled)
         current_seq = batch_last_seq;
-        if opts.checkpoint {
-            let _ = checkpointer
+        if let Some(checkpointer) = checkpointer {
+            if let Err(e) = checkpointer
                 .write_checkpoint(source, target, current_seq.clone())
-                .await;
+                .await
+            {
+                errors.push(format!("checkpoint write failed: {}", e));
+                failed = true;
+                checkpoint_failed = true;
+                break;
+            }
+            checkpointed_seq = current_seq.clone();
         }
 
         // Check if we got fewer results than batch_size (last batch)
@@ -289,302 +608,275 @@ pub async fn replicate(
         }
     }
 
-    Ok(ReplicationResult {
-        ok: errors.is_empty(),
-        docs_read: total_docs_read,
-        docs_written: total_docs_written,
-        errors,
-        last_seq: current_seq,
+    // Batches that needed no writes (filtered out, or already on the
+    // target) are progress too: save it once so the next run does not
+    // rescan them. After a failure `current_seq` still stops before the
+    // failed batch, so this never skips anything.
+    if let Some(checkpointer) = checkpointer
+        && !checkpoint_failed
+        && current_seq != checkpointed_seq
+        && let Err(e) = checkpointer
+            .write_checkpoint(source, target, current_seq.clone())
+            .await
+    {
+        errors.push(format!("checkpoint write failed: {}", e));
+        failed = true;
+    }
+
+    let failure = failed.then(|| errors.join("; "));
+    Ok(RunOutcome {
+        result: ReplicationResult {
+            ok: errors.is_empty(),
+            docs_read: total_docs_read,
+            docs_written: total_docs_written,
+            errors,
+            last_seq: current_seq,
+            warnings: session.warnings.clone(),
+        },
+        failure,
     })
-}
-
-/// Run a one-shot replication with event streaming.
-///
-/// Same as `replicate()` but emits `ReplicationEvent` through the provided
-/// channel as replication progresses.
-pub async fn replicate_with_events(
-    source: &dyn Adapter,
-    target: &dyn Adapter,
-    opts: ReplicationOptions,
-    events_tx: mpsc::Sender<ReplicationEvent>,
-) -> Result<ReplicationResult> {
-    replicate_with_events_inner(source, target, opts, events_tx, false).await
-}
-
-/// Inner driver shared by the one-shot and live paths. `suppress_complete`
-/// lets the live loop withhold the per-run `Complete` so only one terminal
-/// `Complete` is emitted when the whole live replication ends.
-async fn replicate_with_events_inner(
-    source: &dyn Adapter,
-    target: &dyn Adapter,
-    opts: ReplicationOptions,
-    events_tx: mpsc::Sender<ReplicationEvent>,
-    suppress_complete: bool,
-) -> Result<ReplicationResult> {
-    let source_info = source.info().await?;
-    let target_info = target.info().await?;
-
-    let checkpointer = Checkpointer::new(
-        &source_info.db_name,
-        &target_info.db_name,
-        &filter_fingerprint(&opts.filter),
-    );
-
-    let since = if let Some(ref override_since) = opts.since {
-        override_since.clone()
-    } else if opts.checkpoint {
-        checkpointer.read_checkpoint(source, target).await?
-    } else {
-        Seq::default()
-    };
-
-    let filter_doc_ids = match &opts.filter {
-        Some(ReplicationFilter::DocIds(ids)) => Some(ids.clone()),
-        _ => None,
-    };
-
-    let mut total_docs_read = 0u64;
-    let mut total_docs_written = 0u64;
-    let mut errors = Vec::new();
-    let mut current_seq = since;
-
-    let _ = events_tx.send(ReplicationEvent::Active).await;
-
-    loop {
-        let changes = source
-            .changes(ChangesOptions {
-                since: current_seq.clone(),
-                limit: Some(opts.batch_size),
-                include_docs: false,
-                doc_ids: filter_doc_ids.clone(),
-                ..Default::default()
-            })
-            .await?;
-
-        if changes.results.is_empty() {
-            break;
-        }
-
-        let batch_last_seq = changes.last_seq;
-
-        let filtered_changes: Vec<&ChangeEvent> = match &opts.filter {
-            Some(ReplicationFilter::Custom(predicate)) => {
-                changes.results.iter().filter(|c| predicate(c)).collect()
-            }
-            _ => changes.results.iter().collect(),
-        };
-
-        let batch_docs_read = filtered_changes.len() as u64;
-        total_docs_read += batch_docs_read;
-
-        if filtered_changes.is_empty() {
-            current_seq = batch_last_seq;
-            if (changes.results.len() as u64) < opts.batch_size {
-                break;
-            }
-            continue;
-        }
-
-        let mut rev_map: HashMap<String, Vec<String>> = HashMap::new();
-        for change in &filtered_changes {
-            let revs: Vec<String> = change.changes.iter().map(|c| c.rev.clone()).collect();
-            rev_map.insert(change.id.clone(), revs);
-        }
-
-        let diff = target.revs_diff(rev_map).await?;
-
-        if diff.results.is_empty() {
-            current_seq = batch_last_seq;
-            if (changes.results.len() as u64) < opts.batch_size {
-                break;
-            }
-            continue;
-        }
-
-        let mut bulk_get_items: Vec<BulkGetItem> = Vec::new();
-        for (doc_id, diff_result) in &diff.results {
-            for missing_rev in &diff_result.missing {
-                bulk_get_items.push(BulkGetItem {
-                    id: doc_id.clone(),
-                    rev: Some(missing_rev.clone()),
-                });
-            }
-        }
-
-        let bulk_get_response = source.bulk_get(bulk_get_items).await?;
-
-        let mut docs_to_write: Vec<Document> = Vec::new();
-        let mut batch_failed = false;
-        let mut batch_write_failures = 0u64;
-        for result in &bulk_get_response.results {
-            for doc in &result.docs {
-                if let Some(ref json) = doc.ok {
-                    match Document::from_json(json.clone()) {
-                        Ok(document) => docs_to_write.push(document),
-                        Err(e) => {
-                            errors.push(format!("parse error for {}: {}", result.id, e));
-                            batch_failed = true;
-                            batch_write_failures += 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(ReplicationFilter::Selector(ref selector)) = opts.filter {
-            docs_to_write.retain(|doc| rouchdb_query::matches_selector(&doc.data, selector));
-        }
-
-        let mut batch_docs_written = 0u64;
-        if !docs_to_write.is_empty() {
-            let write_results = target
-                .bulk_docs(docs_to_write, BulkDocsOptions::replication())
-                .await?;
-
-            for wr in &write_results {
-                if !wr.ok {
-                    errors.push(format!(
-                        "write error for {}: {}",
-                        wr.id,
-                        wr.reason.as_deref().unwrap_or("unknown")
-                    ));
-                    batch_failed = true;
-                    batch_write_failures += 1;
-                }
-            }
-
-            batch_docs_written = write_results.iter().filter(|wr| wr.ok).count() as u64;
-            total_docs_written += batch_docs_written;
-        }
-
-        // Emit change event (batch-local deltas — see ReplicationEvent::Change doc comment).
-        let _ = events_tx
-            .send(ReplicationEvent::Change {
-                docs_read: batch_docs_read,
-                docs_written: batch_docs_written,
-                doc_write_failures: batch_write_failures,
-            })
-            .await;
-
-        // Do not advance past a batch with parse/write failures.
-        if batch_failed {
-            break;
-        }
-
-        current_seq = batch_last_seq;
-        if opts.checkpoint {
-            let _ = checkpointer
-                .write_checkpoint(source, target, current_seq.clone())
-                .await;
-        }
-
-        if (changes.results.len() as u64) < opts.batch_size {
-            break;
-        }
-    }
-
-    let result = ReplicationResult {
-        ok: errors.is_empty(),
-        docs_read: total_docs_read,
-        docs_written: total_docs_written,
-        errors,
-        last_seq: current_seq,
-    };
-
-    if !suppress_complete {
-        let _ = events_tx
-            .send(ReplicationEvent::Complete(result.clone()))
-            .await;
-    }
-
-    Ok(result)
 }
 
 /// Run continuous (live) replication from source to target.
 ///
-/// Performs an initial one-shot replication, then polls for new changes
-/// at the configured `poll_interval`. Runs until the returned
+/// Performs an initial one-shot replication, then replicates again each
+/// time the source announces a change ([`Adapter::subscribe`]), or, for a
+/// source that cannot, every `poll_interval`. Runs until the returned
 /// `ReplicationHandle` is cancelled/dropped.
 ///
 /// Events are emitted through the returned channel receiver.
+///
+/// Each pass checks the identity ([`Adapter::id`]) of both databases. When
+/// one changed (a memory or redb database that was destroyed, and maybe
+/// reused, gets a new one), the replication starts over from the new pair's
+/// checkpoint (none after a `destroy`, so from the start of the changes
+/// feed) instead of resuming from a sequence of the old database. While the
+/// source is idle, a destroyed target is noticed too: the replication
+/// listens for the reset notice ([`ChangeNotice::reset`]) that the memory
+/// and redb adapters announce on `destroy`, and compares the ids of a
+/// target that cannot announce it (such as a remote CouchDB) every
+/// `poll_interval`, then runs a pass that copies everything to the new
+/// target. (The HTTP adapter caches the server's uuid, so a remote database
+/// that is deleted and re-created keeps its id.)
+///
+/// When both peers report the same id, the replication runs without
+/// checkpoints and sends one [`ReplicationEvent::Warning`] (see
+/// [`ReplicationResult::warnings`]).
+///
+/// An invalid [`ReplicationFilter::Selector`] sends one `Error` event and
+/// ends the replication (even with `retry`) before anything is read or
+/// written.
 pub fn replicate_live(
     source: Arc<dyn Adapter>,
     target: Arc<dyn Adapter>,
     opts: ReplicationOptions,
 ) -> (mpsc::Receiver<ReplicationEvent>, ReplicationHandle) {
     let (tx, rx) = mpsc::channel(64);
+    let mut opts = opts;
     let poll_interval = opts.poll_interval;
     let retry = opts.retry;
-    let back_off = opts.back_off_function;
+    let back_off = opts.back_off_function.take();
 
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
 
     tokio::spawn(async move {
+        // An invalid selector can never succeed: report it and stop, even
+        // with `retry`, before anything is read or written.
+        let selector = match compile_filter(&opts.filter) {
+            Ok(selector) => selector,
+            Err(e) => {
+                let _ = tx.send(ReplicationEvent::Error(e.to_string())).await;
+                return;
+            }
+        };
+        // Subscribed before the first pass, so a change made during a pass
+        // wakes the next one up. The target is followed only for resets (it
+        // is destroyed, and maybe reused, while the source is idle); a
+        // target that cannot announce them has its id compared every
+        // `poll_interval` instead.
+        let mut notices = source.subscribe();
+        let mut target_notices = target.subscribe();
         let mut attempt: u32 = 0;
         // Track the last successful result so a single terminal Complete can
         // be emitted when the live loop finally exits.
         let mut last_result: Option<ReplicationResult> = None;
+        // Starts at the caller's `since` (or the checkpoint when unset), then
+        // follows each pass's last_seq so polls never rescan the feed. One
+        // session (one checkpointer) spans the live replication until a pass
+        // fails with an error or a peer is reset.
+        let mut since = opts.since.clone();
+        let mut session: Option<Session> = None;
+        // The identities the cursor and the session belong to.
+        let mut session_ids: Option<(String, String)> = None;
+        // A peer announced a reset (`ChangeNotice::reset`) since the last
+        // pass.
+        let mut reset = false;
 
         'live: loop {
-            // Clone the filter for each iteration so Selector and Custom
-            // filters remain active across the entire live replication.
-            let one_shot_opts = ReplicationOptions {
-                batch_size: opts.batch_size,
-                batches_limit: opts.batches_limit,
-                filter: opts.filter.clone(),
-                live: false,
-                retry: false,
-                poll_interval,
-                back_off_function: None,
-                since: None,
-                checkpoint: opts.checkpoint,
-            };
-
-            // Suppress the per-run Complete; the live loop emits one at the end.
-            let result = replicate_with_events_inner(
-                source.as_ref(),
-                target.as_ref(),
-                one_shot_opts,
-                tx.clone(),
-                true,
-            )
+            let result = async {
+                // A peer that was destroyed (and possibly reused) since the
+                // last pass reports a new identity, and announces a reset if
+                // it can; its sequences start over, so the cursor would skip
+                // its changes. Start again from the checkpoint of the new
+                // pair (none after a destroy: from the start).
+                let ids = peer_ids(source.as_ref(), target.as_ref()).await?;
+                if std::mem::take(&mut reset) || session_ids.as_ref().is_some_and(|old| *old != ids)
+                {
+                    since = None;
+                    session = None;
+                }
+                if session.is_none() {
+                    let new = session_for(&ids, &opts.filter);
+                    for warning in &new.warnings {
+                        let _ = tx.send(ReplicationEvent::Warning(warning.clone())).await;
+                    }
+                    session = Some(new);
+                }
+                session_ids = Some(ids);
+                let session = session.as_ref().expect("initialized above");
+                run_replication(
+                    source.as_ref(),
+                    target.as_ref(),
+                    &opts,
+                    selector.as_ref(),
+                    session,
+                    since.clone(),
+                    Some(&tx),
+                )
+                .await
+            }
             .await;
 
-            match result {
-                Ok(r) => {
-                    attempt = 0; // Reset retry counter on success
-                    if r.docs_read == 0 {
-                        // No changes — emit Paused and wait
-                        let _ = tx.send(ReplicationEvent::Paused).await;
+            // Whether the pass caught up with the source without reporting
+            // Paused yet.
+            let mut caught_up = false;
+            let failure = match result {
+                Ok(outcome) => {
+                    // Resume the next pass where this one stopped.
+                    since = Some(outcome.result.last_seq.clone());
+                    if outcome.failure.is_none() {
+                        attempt = 0; // Reset retry counter on success
+                        if outcome.result.docs_read == 0 {
+                            // No changes — emit Paused and wait
+                            let _ = tx.send(ReplicationEvent::Paused).await;
+                        } else {
+                            caught_up = true;
+                        }
                     }
-                    last_result = Some(r);
+                    last_result = Some(outcome.result);
+                    outcome.failure
                 }
                 Err(e) => {
-                    let _ = tx.send(ReplicationEvent::Error(e.to_string())).await;
-                    if retry {
-                        attempt += 1;
-                        let delay = if let Some(ref f) = back_off {
-                            f(attempt)
-                        } else {
-                            // Default exponential backoff: min(1s * 2^attempt, 60s)
-                            let secs = (1u64 << attempt.min(6)).min(60);
-                            Duration::from_secs(secs)
-                        };
-                        tokio::select! {
-                            _ = tokio::time::sleep(delay) => continue 'live,
-                            _ = cancel_clone.cancelled() => break 'live,
-                        }
+                    // The peer may have been unreachable when the id was
+                    // derived (an HTTP adapter then falls back to its URL):
+                    // derive it again on the next attempt.
+                    session = None;
+                    Some(e.to_string())
+                }
+            };
+
+            if let Some(message) = failure {
+                let _ = tx.send(ReplicationEvent::Error(message)).await;
+                if retry {
+                    attempt += 1;
+                    let delay = if let Some(ref f) = back_off {
+                        f(attempt)
                     } else {
-                        break 'live;
+                        // Default exponential backoff: min(1s * 2^attempt, 60s)
+                        let secs = (1u64 << attempt.min(6)).min(60);
+                        Duration::from_secs(secs)
+                    };
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => continue 'live,
+                        _ = cancel_clone.cancelled() => break 'live,
                     }
+                } else {
+                    break 'live;
                 }
             }
 
-            // Wait for poll_interval or cancellation
-            tokio::select! {
-                _ = tokio::time::sleep(poll_interval) => {},
-                _ = cancel_clone.cancelled() => break 'live,
+            // Whether a peer may have been reset without announcing it to
+            // us: its id changed since the pass started.
+            let ids_changed = || async {
+                peer_ids(source.as_ref(), target.as_ref())
+                    .await
+                    .is_ok_and(|ids| session_ids.as_ref() != Some(&ids))
+            };
+
+            // Changes (and resets) announced during the pass are handled
+            // right away. The target's other notices are the pass's own
+            // writes, or writes of others that the source does not need.
+            let mut wake = false;
+            if let Some(rx) = notices.as_mut() {
+                let drained = drain_notices(rx);
+                wake |= drained.any;
+                reset |= drained.reset;
+            }
+            if let Some(rx) = target_notices.as_mut() {
+                let drained = drain_notices(rx);
+                reset |= drained.reset;
+                // A lagging receiver may have missed a reset.
+                if drained.lagged && ids_changed().await {
+                    wake = true;
+                }
+            }
+            if wake || reset {
+                continue 'live;
+            }
+
+            // Wait for a change on the source (its notifications, or
+            // poll_interval without them), a reset of the target (its
+            // notifications, or its id checked every poll_interval without
+            // them) or cancellation.
+            if caught_up && notices.is_some() {
+                let _ = tx.send(ReplicationEvent::Paused).await;
+            }
+            let mut deadline = tokio::time::Instant::now() + poll_interval;
+            loop {
+                tokio::select! {
+                    notice = next_notice(&mut notices), if notices.is_some() => {
+                        match notice {
+                            Err(broadcast::error::RecvError::Closed) => {
+                                notices = None; // poll from now on
+                            }
+                            Ok(notice) => reset |= notice.reset,
+                            Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        }
+                        if let Some(rx) = notices.as_mut() {
+                            reset |= drain_notices(rx).reset;
+                        }
+                        break;
+                    }
+                    _ = tokio::time::sleep_until(deadline), if notices.is_none() => break,
+                    notice = next_notice(&mut target_notices), if target_notices.is_some() => {
+                        match notice {
+                            Ok(notice) if notice.reset => {
+                                reset = true;
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(broadcast::error::RecvError::Closed) => {
+                                target_notices = None; // check its id from now on
+                                deadline = tokio::time::Instant::now() + poll_interval;
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => {
+                                if ids_changed().await {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    _ = tokio::time::sleep_until(deadline),
+                        if notices.is_some() && target_notices.is_none() =>
+                    {
+                        if ids_changed().await {
+                            break;
+                        }
+                        deadline = tokio::time::Instant::now() + poll_interval;
+                    }
+                    _ = cancel_clone.cancelled() => break 'live,
+                }
             }
         }
 
@@ -595,6 +887,45 @@ pub fn replicate_live(
     });
 
     (rx, ReplicationHandle { cancel })
+}
+
+/// What [`drain_notices`] consumed.
+#[derive(Default)]
+struct Drained {
+    /// There were notices (a lagging receiver had some too).
+    any: bool,
+    /// One of them was a reset.
+    reset: bool,
+    /// The receiver lagged: notices, maybe a reset, were lost.
+    lagged: bool,
+}
+
+/// Consume the change notices already queued.
+fn drain_notices(rx: &mut broadcast::Receiver<ChangeNotice>) -> Drained {
+    let mut drained = Drained::default();
+    loop {
+        match rx.try_recv() {
+            Ok(notice) => {
+                drained.any = true;
+                drained.reset |= notice.reset;
+            }
+            Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                drained.any = true;
+                drained.lagged = true;
+            }
+            Err(_) => return drained,
+        }
+    }
+}
+
+/// The next notice of an optional subscription (never, without one).
+async fn next_notice(
+    rx: &mut Option<broadcast::Receiver<ChangeNotice>>,
+) -> std::result::Result<ChangeNotice, broadcast::error::RecvError> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Handle for a live replication task. Dropping this cancels the replication.
@@ -623,6 +954,7 @@ impl Drop for ReplicationHandle {
 mod tests {
     use super::*;
     use rouchdb_adapter_memory::MemoryAdapter;
+    use rouchdb_core::error::RouchError;
 
     async fn put_doc(adapter: &dyn Adapter, id: &str, data: serde_json::Value) {
         let doc = Document {
@@ -636,6 +968,390 @@ mod tests {
             .bulk_docs(vec![doc], BulkDocsOptions::new())
             .await
             .unwrap();
+    }
+
+    /// Write one revision with its full ancestry, as replication does.
+    async fn put_rev(adapter: &dyn Adapter, id: &str, ids: &[&str], data: serde_json::Value) {
+        let start = ids.len() as u64;
+        let mut json = data;
+        json["_id"] = serde_json::json!(id);
+        json["_rev"] = serde_json::json!(format!("{}-{}", start, ids[0]));
+        json["_revisions"] = serde_json::json!({"start": start, "ids": ids});
+        let doc = Document::from_json(json).unwrap();
+        let res = adapter
+            .bulk_docs(vec![doc], BulkDocsOptions::replication())
+            .await
+            .unwrap();
+        assert!(res.iter().all(|r| r.ok), "{res:?}");
+    }
+
+    async fn conflicts_of(adapter: &dyn Adapter, id: &str) -> Vec<String> {
+        let doc = adapter
+            .get(
+                id,
+                GetOptions {
+                    conflicts: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        doc.data["_conflicts"]
+            .as_array()
+            .map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn docids_fingerprint_is_unambiguous_and_order_free() {
+        let fp = |ids: &[&str]| {
+            filter_fingerprint(&Some(ReplicationFilter::DocIds(
+                ids.iter().map(|s| s.to_string()).collect(),
+            )))
+        };
+        assert_ne!(fp(&["a", "b"]), fp(&["a\u{0}b"]));
+        assert_ne!(fp(&["a,b"]), fp(&["a", "b"]));
+        assert_ne!(fp(&["a\"", "b"]), fp(&["a\",\"b"]));
+        assert_eq!(fp(&["b", "a"]), fp(&["a", "b"]));
+        assert_eq!(fp(&["a", "b", "a"]), fp(&["a", "b"]));
+        // Not the pre-fix encoding, whose checkpoints may be ambiguous.
+        assert_eq!(fp(&["a", "b"]), r#"docids-v2:["a","b"]"#);
+    }
+
+    #[tokio::test]
+    async fn replicate_propagates_conflict_branches() {
+        let source = MemoryAdapter::new("source");
+        let target = MemoryAdapter::new("target");
+
+        // Two leaves under 1-aaa: 2-ccc wins, 2-bbb is the conflict.
+        put_rev(&source, "d", &["bbb", "aaa"], serde_json::json!({"v": "b"})).await;
+        put_rev(&source, "d", &["ccc", "aaa"], serde_json::json!({"v": "c"})).await;
+        assert_eq!(conflicts_of(&source, "d").await, vec!["2-bbb"]);
+
+        let result = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(result.ok);
+
+        assert_eq!(conflicts_of(&target, "d").await, vec!["2-bbb"]);
+    }
+
+    #[tokio::test]
+    async fn push_then_pull_converges_on_conflicts() {
+        let a = MemoryAdapter::new("a");
+        let b = MemoryAdapter::new("b");
+
+        // A edits to 2-bbb (the winner), B to 2-aaa (the loser).
+        put_rev(&a, "d", &["bbb", "111"], serde_json::json!({"side": "a"})).await;
+        put_rev(&b, "d", &["aaa", "111"], serde_json::json!({"side": "b"})).await;
+
+        replicate(&a, &b, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(conflicts_of(&b, "d").await, vec!["2-aaa"]);
+
+        // Pulling back must bring B's losing branch to A as well.
+        replicate(&b, &a, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(conflicts_of(&a, "d").await, vec!["2-aaa"]);
+    }
+
+    /// A memory adapter reporting a custom `id()`, like two remote
+    /// databases that share a name on different servers.
+    struct NamedAt(MemoryAdapter, &'static str);
+
+    #[async_trait::async_trait]
+    impl Adapter for NamedAt {
+        async fn info(&self) -> Result<DbInfo> {
+            self.0.info().await
+        }
+        async fn id(&self) -> Result<String> {
+            Ok(self.1.to_string())
+        }
+        async fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
+            self.0.get(id, opts).await
+        }
+        async fn bulk_docs(
+            &self,
+            docs: Vec<Document>,
+            opts: BulkDocsOptions,
+        ) -> Result<Vec<DocResult>> {
+            self.0.bulk_docs(docs, opts).await
+        }
+        async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
+            self.0.all_docs(opts).await
+        }
+        async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
+            self.0.changes(opts).await
+        }
+        async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
+            self.0.revs_diff(revs).await
+        }
+        async fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
+            self.0.bulk_get(docs).await
+        }
+        async fn put_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+            data: Vec<u8>,
+            content_type: &str,
+        ) -> Result<DocResult> {
+            self.0
+                .put_attachment(doc_id, att_id, rev, data, content_type)
+                .await
+        }
+        async fn get_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            opts: GetAttachmentOptions,
+        ) -> Result<Vec<u8>> {
+            self.0.get_attachment(doc_id, att_id, opts).await
+        }
+        async fn remove_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+        ) -> Result<DocResult> {
+            self.0.remove_attachment(doc_id, att_id, rev).await
+        }
+        async fn get_local(&self, id: &str) -> Result<serde_json::Value> {
+            self.0.get_local(id).await
+        }
+        async fn put_local(&self, id: &str, doc: serde_json::Value) -> Result<()> {
+            self.0.put_local(id, doc).await
+        }
+        async fn remove_local(&self, id: &str) -> Result<()> {
+            self.0.remove_local(id).await
+        }
+        async fn compact(&self) -> Result<()> {
+            self.0.compact().await
+        }
+        async fn destroy(&self) -> Result<()> {
+            self.0.destroy().await
+        }
+    }
+
+    /// A memory adapter that does not announce its changes (nor its
+    /// resets), like a remote CouchDB, but whose id `destroy` renews.
+    struct Quiet(MemoryAdapter);
+
+    #[async_trait::async_trait]
+    impl Adapter for Quiet {
+        async fn info(&self) -> Result<DbInfo> {
+            self.0.info().await
+        }
+        async fn id(&self) -> Result<String> {
+            self.0.id().await
+        }
+        async fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
+            self.0.get(id, opts).await
+        }
+        async fn bulk_docs(
+            &self,
+            docs: Vec<Document>,
+            opts: BulkDocsOptions,
+        ) -> Result<Vec<DocResult>> {
+            self.0.bulk_docs(docs, opts).await
+        }
+        async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
+            self.0.all_docs(opts).await
+        }
+        async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
+            self.0.changes(opts).await
+        }
+        async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
+            self.0.revs_diff(revs).await
+        }
+        async fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
+            self.0.bulk_get(docs).await
+        }
+        async fn put_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+            data: Vec<u8>,
+            content_type: &str,
+        ) -> Result<DocResult> {
+            self.0
+                .put_attachment(doc_id, att_id, rev, data, content_type)
+                .await
+        }
+        async fn get_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            opts: GetAttachmentOptions,
+        ) -> Result<Vec<u8>> {
+            self.0.get_attachment(doc_id, att_id, opts).await
+        }
+        async fn remove_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+        ) -> Result<DocResult> {
+            self.0.remove_attachment(doc_id, att_id, rev).await
+        }
+        async fn get_local(&self, id: &str) -> Result<serde_json::Value> {
+            self.0.get_local(id).await
+        }
+        async fn put_local(&self, id: &str, doc: serde_json::Value) -> Result<()> {
+            self.0.put_local(id, doc).await
+        }
+        async fn remove_local(&self, id: &str) -> Result<()> {
+            self.0.remove_local(id).await
+        }
+        async fn compact(&self) -> Result<()> {
+            self.0.compact().await
+        }
+        async fn destroy(&self) -> Result<()> {
+            self.0.destroy().await
+        }
+    }
+
+    #[tokio::test]
+    async fn peers_with_the_same_id_replicate_without_checkpoints() {
+        // Like a redb file and its copy before identities included the
+        // path, or two same-named databases of an adapter that keeps the
+        // default id: A->B and B->A would share one checkpoint, and B->A
+        // would resume from A->B's sequence, skipping B's documents.
+        let a = NamedAt(MemoryAdapter::new("db"), "same");
+        let b = NamedAt(MemoryAdapter::new("db"), "same");
+        put_doc(&a, "seed", serde_json::json!({})).await;
+        replicate(&a, &b, ReplicationOptions::default())
+            .await
+            .unwrap();
+        put_doc(&a, "a", serde_json::json!({})).await;
+        put_doc(&b, "b", serde_json::json!({})).await;
+
+        let push = replicate(&a, &b, ReplicationOptions::default())
+            .await
+            .unwrap();
+        let pull = replicate(&b, &a, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(push.ok && pull.ok, "{push:?} {pull:?}");
+        assert_eq!(push.docs_written, 1, "{push:?}");
+        assert_eq!(pull.docs_written, 1, "pull skipped b: {pull:?}");
+        for result in [&push, &pull] {
+            assert_eq!(result.warnings.len(), 1, "{result:?}");
+            assert!(result.warnings[0].contains("same database id"));
+        }
+        for db in [&a, &b] {
+            let ids: Vec<String> = db
+                .all_docs(AllDocsOptions::new())
+                .await
+                .unwrap()
+                .rows
+                .into_iter()
+                .map(|r| r.key)
+                .collect();
+            assert_eq!(ids, ["a", "b", "seed"]);
+        }
+
+        // No checkpoint was stored on either side.
+        let shared = checkpointer_for(&("same".into(), "same".into()), &None);
+        for db in [&a, &b] {
+            assert!(db.get_local(shared.replication_id()).await.is_err());
+        }
+
+        // Retries rescan, and change nothing.
+        let retry = replicate(&b, &a, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert_eq!((retry.docs_read, retry.docs_written), (3, 0));
+
+        // The warning is an event too.
+        let (tx, mut rx) = mpsc::channel(16);
+        replicate_with_events(&a, &b, ReplicationOptions::default(), tx)
+            .await
+            .unwrap();
+        let mut warnings = 0;
+        while let Ok(event) = rx.try_recv() {
+            warnings += matches!(event, ReplicationEvent::Warning(_)) as usize;
+        }
+        assert_eq!(warnings, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_replication_checks_the_id_of_a_target_without_notices() {
+        let source = Arc::new(MemoryAdapter::new("source"));
+        let target = Arc::new(Quiet(MemoryAdapter::new("target")));
+        for i in 0..3 {
+            put_doc(source.as_ref(), &format!("keep{i}"), serde_json::json!({})).await;
+        }
+        let (mut rx, handle) = replicate_live(
+            source.clone(),
+            target.clone(),
+            ReplicationOptions {
+                poll_interval: Duration::from_millis(20),
+                live: true,
+                ..Default::default()
+            },
+        );
+        while !matches!(rx.recv().await, Some(ReplicationEvent::Paused)) {}
+
+        // The source stays idle; the target is destroyed and reused.
+        target.destroy().await.unwrap();
+        put_doc(target.as_ref(), "reused", serde_json::json!({})).await;
+        let refilled = async {
+            loop {
+                if target
+                    .all_docs(AllDocsOptions::new())
+                    .await
+                    .unwrap()
+                    .rows
+                    .len()
+                    == 4
+                {
+                    return;
+                }
+                while rx.try_recv().is_ok() {}
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), refilled)
+            .await
+            .expect("the destroyed target was never refilled");
+        for i in 0..3 {
+            assert!(
+                target
+                    .get(&format!("keep{i}"), GetOptions::default())
+                    .await
+                    .is_ok()
+            );
+        }
+        assert_eq!(source.info().await.unwrap().update_seq, Seq::Num(3));
+        handle.cancel();
+    }
+
+    #[tokio::test]
+    async fn same_named_peers_get_distinct_replication_ids() {
+        let source = MemoryAdapter::new("local");
+        let a = NamedAt(MemoryAdapter::new("userdb"), "http://a.example/userdb");
+        let b = NamedAt(MemoryAdapter::new("userdb"), "http://b.example/userdb");
+
+        let id_a = new_checkpointer(&source, &a, &None).await.unwrap();
+        let id_b = new_checkpointer(&source, &b, &None).await.unwrap();
+        assert_ne!(id_a.replication_id(), id_b.replication_id());
+
+        // Local adapters have an identity of their own, not their name: two
+        // same-named local databases never share a checkpoint.
+        let local_a = new_checkpointer(&source, &MemoryAdapter::new("userdb"), &None)
+            .await
+            .unwrap();
+        let local_b = new_checkpointer(&source, &MemoryAdapter::new("userdb"), &None)
+            .await
+            .unwrap();
+        assert_ne!(local_a.replication_id(), local_b.replication_id());
+        let by_name = Checkpointer::new("local", "userdb", "nofilter");
+        assert_ne!(local_a.replication_id(), by_name.replication_id());
     }
 
     #[tokio::test]
@@ -932,6 +1648,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replicate_selector_sees_reserved_fields() {
+        let source = MemoryAdapter::new("source");
+        put_doc(&source, "user:1", serde_json::json!({"n": 1})).await;
+        put_doc(&source, "user:2", serde_json::json!({"n": 2})).await;
+        put_doc(&source, "x", serde_json::json!({"n": 3})).await;
+
+        let run = |selector: serde_json::Value| {
+            let source = &source;
+            async move {
+                let target = MemoryAdapter::new("target");
+                let result = replicate(
+                    source,
+                    &target,
+                    ReplicationOptions {
+                        filter: Some(ReplicationFilter::Selector(selector)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(result.ok);
+                let rows = target.all_docs(AllDocsOptions::new()).await.unwrap().rows;
+                rows.into_iter().map(|r| r.key).collect::<Vec<_>>()
+            }
+        };
+
+        assert_eq!(
+            run(serde_json::json!({"_id": {"$regex": "^user:"}})).await,
+            vec!["user:1", "user:2"]
+        );
+        assert_eq!(
+            run(serde_json::json!({"_id": {"$ne": "x"}})).await,
+            vec!["user:1", "user:2"]
+        );
+    }
+
+    #[tokio::test]
     async fn replicate_filtered_by_custom_closure() {
         let source = MemoryAdapter::new("source");
         let target = MemoryAdapter::new("target");
@@ -970,6 +1723,45 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn custom_filters_do_not_share_a_checkpoint() {
+        let source = MemoryAdapter::new("source");
+        let target = MemoryAdapter::new("target");
+        put_doc(&source, "public:1", serde_json::json!({})).await;
+        put_doc(&source, "private:1", serde_json::json!({})).await;
+        let prefix_filter = |prefix: &'static str| {
+            Some(ReplicationFilter::Custom(Arc::new(
+                move |c: &ChangeEvent| c.id.starts_with(prefix),
+            )))
+        };
+
+        let r1 = replicate(
+            &source,
+            &target,
+            ReplicationOptions {
+                filter: prefix_filter("public:"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(r1.docs_written, 1);
+
+        // A different closure must not resume from the first one's checkpoint.
+        let r2 = replicate(
+            &source,
+            &target,
+            ReplicationOptions {
+                filter: prefix_filter("private:"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(r2.docs_written, 1);
+        assert!(target.get("private:1", GetOptions::default()).await.is_ok());
     }
 
     #[tokio::test]
@@ -1097,5 +1889,1462 @@ mod tests {
 
         let target_info = target.info().await.unwrap();
         assert_eq!(target_info.doc_count, 3);
+    }
+
+    /// Target that behaves like CouchDB 3.5 where the memory adapter does not:
+    /// - `new_edits=false` writes report only the failed docs, so a fully
+    ///   successful batch is `[]`;
+    /// - `reject` models a `validate_doc_update` that refuses one doc id
+    ///   (per-doc `forbidden`, the rest of the batch is stored);
+    /// - `_local` docs get revs `0-N`: a `_rev` that is not `0-<n>` is a 400,
+    ///   and a write with `_rev: 0-n` stores `0-(n+1)` (CouchDB does not check
+    ///   that `n` is the current rev, and a write without `_rev` stores `0-1`).
+    struct CouchLikeTarget {
+        inner: MemoryAdapter,
+        reject: Option<&'static str>,
+    }
+
+    impl CouchLikeTarget {
+        fn new(inner: MemoryAdapter) -> Self {
+            Self {
+                inner,
+                reject: None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for CouchLikeTarget {
+        async fn info(&self) -> Result<DbInfo> {
+            self.inner.info().await
+        }
+        async fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
+            self.inner.get(id, opts).await
+        }
+        async fn bulk_docs(
+            &self,
+            docs: Vec<Document>,
+            opts: BulkDocsOptions,
+        ) -> Result<Vec<DocResult>> {
+            let new_edits = opts.new_edits;
+            let (rejected, docs): (Vec<_>, Vec<_>) = docs
+                .into_iter()
+                .partition(|d| Some(d.id.as_str()) == self.reject);
+            let mut results = self.inner.bulk_docs(docs, opts).await?;
+            results.extend(rejected.into_iter().map(|d| {
+                let mut result =
+                    DocResult::error(d.id, "forbidden", "rejected by validate_doc_update");
+                result.rev = d.rev.map(|r| r.to_string());
+                result
+            }));
+            if new_edits {
+                return Ok(results);
+            }
+            Ok(results.into_iter().filter(|r| !r.ok).collect())
+        }
+        async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
+            self.inner.all_docs(opts).await
+        }
+        async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
+            self.inner.changes(opts).await
+        }
+        async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
+            self.inner.revs_diff(revs).await
+        }
+        async fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
+            self.inner.bulk_get(docs).await
+        }
+        async fn put_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+            data: Vec<u8>,
+            content_type: &str,
+        ) -> Result<DocResult> {
+            self.inner
+                .put_attachment(doc_id, att_id, rev, data, content_type)
+                .await
+        }
+        async fn get_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            opts: GetAttachmentOptions,
+        ) -> Result<Vec<u8>> {
+            self.inner.get_attachment(doc_id, att_id, opts).await
+        }
+        async fn remove_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+        ) -> Result<DocResult> {
+            self.inner.remove_attachment(doc_id, att_id, rev).await
+        }
+        async fn get_local(&self, id: &str) -> Result<serde_json::Value> {
+            self.inner.get_local(id).await
+        }
+        async fn put_local(&self, id: &str, mut doc: serde_json::Value) -> Result<()> {
+            let n = match doc.get("_rev") {
+                None => 0,
+                Some(rev) => rev
+                    .as_str()
+                    .and_then(|r| r.strip_prefix("0-"))
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .ok_or_else(|| RouchError::BadRequest("Invalid rev format".into()))?,
+            };
+            doc["_rev"] = serde_json::json!(format!("0-{}", n + 1));
+            self.inner.put_local(id, doc).await
+        }
+        async fn remove_local(&self, id: &str) -> Result<()> {
+            self.inner.remove_local(id).await
+        }
+        async fn compact(&self) -> Result<()> {
+            self.inner.compact().await
+        }
+        async fn destroy(&self) -> Result<()> {
+            self.inner.destroy().await
+        }
+    }
+
+    #[tokio::test]
+    async fn docs_written_counts_couchdb_style_empty_replies() {
+        let source = MemoryAdapter::new("source");
+        let target = CouchLikeTarget::new(MemoryAdapter::new("target"));
+
+        put_doc(&source, "doc1", serde_json::json!({"v": 1})).await;
+        put_doc(&source, "doc2", serde_json::json!({"v": 2})).await;
+        put_doc(&source, "doc3", serde_json::json!({"v": 3})).await;
+
+        let result = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.docs_written, 3);
+        assert_eq!(target.info().await.unwrap().doc_count, 3);
+    }
+
+    #[tokio::test]
+    async fn docs_written_excludes_docs_couchdb_rejected_in_a_batch() {
+        let source = MemoryAdapter::new("source");
+        let target = CouchLikeTarget {
+            inner: MemoryAdapter::new("target"),
+            reject: Some("x"),
+        };
+        for id in ["a", "x", "b"] {
+            put_doc(&source, id, serde_json::json!({})).await;
+        }
+
+        // One batch of three; CouchDB answers with the one failure only.
+        let result = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+
+        assert!(!result.ok);
+        assert_eq!((result.docs_read, result.docs_written), (3, 2));
+        assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+        assert!(
+            result.errors[0].starts_with("write error for x: forbidden"),
+            "{:?}",
+            result.errors
+        );
+        let ids: Vec<String> = target
+            .all_docs(AllDocsOptions::new())
+            .await
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|r| r.key)
+            .collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_round_trips_the_couchdb_local_rev() {
+        let source = MemoryAdapter::new("source");
+        let target = CouchLikeTarget::new(MemoryAdapter::new("target"));
+        for i in 0..3 {
+            put_doc(&source, &format!("d{i}"), serde_json::json!({})).await;
+        }
+
+        // One checkpoint write per batch, each carrying the rev just read.
+        let result = replicate(
+            &source,
+            &target,
+            ReplicationOptions {
+                batch_size: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.ok, "{:?}", result.errors);
+
+        let rep_id = new_checkpointer(&source, &target, &None)
+            .await
+            .unwrap()
+            .replication_id()
+            .to_string();
+        let cp = target.get_local(&rep_id).await.unwrap();
+        assert_eq!(cp["_rev"], "0-3");
+        assert_eq!(cp["last_seq"], 3);
+    }
+
+    /// Faults a [`Faulty`] adapter injects around a memory adapter.
+    #[derive(Default)]
+    struct Faults {
+        /// `bulk_get` answers this doc id with an error item of this kind.
+        bulk_get_error: Option<(String, String)>,
+        /// `bulk_get` answers `not_found` for this (doc id, rev) only, though
+        /// the rev is still a leaf.
+        bulk_get_missing_rev: Option<(String, String)>,
+        /// Before answering `bulk_get`, edit this doc and compact, so the
+        /// requested rev no longer exists (one-shot).
+        supersede_on_bulk_get: Option<String>,
+        /// `bulk_docs` rejects this doc id with this error kind.
+        write_error: Option<(String, String)>,
+        /// The n-th `bulk_docs` call (1-based) fails as a whole, like a
+        /// connection reset.
+        bulk_docs_fails_on_call: Option<usize>,
+        /// `get_local` fails with this error.
+        get_local_error: Option<fn() -> RouchError>,
+        /// `put_local` fails with this error.
+        put_local_error: Option<fn() -> RouchError>,
+        /// The next this many `put_local` calls fail with `Conflict`.
+        put_local_conflicts: usize,
+        /// Unreachable: the calls a replication makes (`info`, `changes`,
+        /// `revs_diff`, `bulk_get`, `bulk_docs`, `get_local`, `put_local`)
+        /// fail, while `id()` falls back to this value (as an HTTP adapter may
+        /// without a server answer).
+        offline_id: Option<String>,
+    }
+
+    struct Faulty {
+        inner: MemoryAdapter,
+        faults: std::sync::Mutex<Faults>,
+        bulk_docs_calls: std::sync::atomic::AtomicUsize,
+        changes_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Faulty {
+        fn new(inner: MemoryAdapter, faults: Faults) -> Self {
+            Self {
+                inner,
+                faults: std::sync::Mutex::new(faults),
+                bulk_docs_calls: std::sync::atomic::AtomicUsize::new(0),
+                changes_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn heal(&self) {
+            *self.faults.lock().unwrap() = Faults::default();
+        }
+    }
+
+    impl Faulty {
+        fn check_online(&self) -> Result<()> {
+            match self.faults.lock().unwrap().offline_id {
+                Some(_) => Err(RouchError::DatabaseError("offline".into())),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for Faulty {
+        async fn info(&self) -> Result<DbInfo> {
+            self.check_online()?;
+            self.inner.info().await
+        }
+        async fn id(&self) -> Result<String> {
+            if let Some(id) = self.faults.lock().unwrap().offline_id.clone() {
+                return Ok(id);
+            }
+            self.inner.id().await
+        }
+        async fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
+            self.inner.get(id, opts).await
+        }
+        async fn bulk_docs(
+            &self,
+            docs: Vec<Document>,
+            opts: BulkDocsOptions,
+        ) -> Result<Vec<DocResult>> {
+            self.check_online()?;
+            let call = 1 + self
+                .bulk_docs_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.faults.lock().unwrap().bulk_docs_fails_on_call == Some(call) {
+                return Err(RouchError::DatabaseError("connection reset".into()));
+            }
+            let write_error = self.faults.lock().unwrap().write_error.clone();
+            let Some((bad_id, error)) = write_error else {
+                return self.inner.bulk_docs(docs, opts).await;
+            };
+            let (rejected, docs): (Vec<_>, Vec<_>) = docs.into_iter().partition(|d| d.id == bad_id);
+            let mut results = self.inner.bulk_docs(docs, opts).await?;
+            results.extend(
+                rejected
+                    .into_iter()
+                    .map(|d| DocResult::error(d.id, error.clone(), "injected")),
+            );
+            Ok(results)
+        }
+        async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
+            self.inner.all_docs(opts).await
+        }
+        async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
+            self.check_online()?;
+            self.changes_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.changes(opts).await
+        }
+        async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
+            self.check_online()?;
+            self.inner.revs_diff(revs).await
+        }
+        async fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
+            self.check_online()?;
+            let supersede = self.faults.lock().unwrap().supersede_on_bulk_get.take();
+            if let Some(id) = supersede {
+                let current = self.inner.get(&id, GetOptions::default()).await?;
+                let mut next = current.clone();
+                next.data = serde_json::json!({"v": "next"});
+                self.inner
+                    .bulk_docs(vec![next], BulkDocsOptions::new())
+                    .await?;
+                self.inner.compact().await?;
+            }
+            let mut resp = self.inner.bulk_get(docs).await?;
+            if let Some((id, rev)) = self.faults.lock().unwrap().bulk_get_missing_rev.clone() {
+                for doc in resp
+                    .results
+                    .iter_mut()
+                    .filter(|r| r.id == id)
+                    .flat_map(|r| r.docs.iter_mut())
+                    .filter(|d| d.ok.as_ref().is_some_and(|ok| ok["_rev"] == rev.as_str()))
+                {
+                    doc.ok = None;
+                    doc.error = Some(BulkGetError::new(&id, &rev, "not_found", "missing"));
+                }
+            }
+            if let Some((id, error)) = self.faults.lock().unwrap().bulk_get_error.clone() {
+                for result in resp.results.iter_mut().filter(|r| r.id == id) {
+                    for doc in &mut result.docs {
+                        let rev = doc.ok.as_ref().unwrap()["_rev"]
+                            .as_str()
+                            .unwrap()
+                            .to_string();
+                        doc.ok = None;
+                        doc.error = Some(BulkGetError::new(&id, rev, &error, "injected"));
+                    }
+                }
+            }
+            Ok(resp)
+        }
+        async fn put_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+            data: Vec<u8>,
+            content_type: &str,
+        ) -> Result<DocResult> {
+            self.inner
+                .put_attachment(doc_id, att_id, rev, data, content_type)
+                .await
+        }
+        async fn get_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            opts: GetAttachmentOptions,
+        ) -> Result<Vec<u8>> {
+            self.inner.get_attachment(doc_id, att_id, opts).await
+        }
+        async fn remove_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+        ) -> Result<DocResult> {
+            self.inner.remove_attachment(doc_id, att_id, rev).await
+        }
+        async fn get_local(&self, id: &str) -> Result<serde_json::Value> {
+            self.check_online()?;
+            if let Some(error) = self.faults.lock().unwrap().get_local_error {
+                return Err(error());
+            }
+            self.inner.get_local(id).await
+        }
+        async fn put_local(&self, id: &str, doc: serde_json::Value) -> Result<()> {
+            self.check_online()?;
+            {
+                let mut faults = self.faults.lock().unwrap();
+                if let Some(error) = faults.put_local_error {
+                    return Err(error());
+                }
+                if faults.put_local_conflicts > 0 {
+                    faults.put_local_conflicts -= 1;
+                    return Err(RouchError::Conflict);
+                }
+            }
+            self.inner.put_local(id, doc).await
+        }
+        async fn remove_local(&self, id: &str) -> Result<()> {
+            self.inner.remove_local(id).await
+        }
+        async fn compact(&self) -> Result<()> {
+            self.inner.compact().await
+        }
+        async fn destroy(&self) -> Result<()> {
+            self.inner.destroy().await
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_get_errors_fail_the_batch() {
+        let inner = MemoryAdapter::new("source");
+        put_doc(&inner, "a", serde_json::json!({"v": 1})).await;
+        put_doc(&inner, "b", serde_json::json!({"v": 2})).await;
+        let source = Faulty::new(
+            inner,
+            Faults {
+                bulk_get_error: Some(("b".into(), "unknown_error".into())),
+                ..Default::default()
+            },
+        );
+        let target = MemoryAdapter::new("target");
+
+        let r1 = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(!r1.ok);
+        assert!(r1.errors.iter().any(|e| e.contains("b")), "{:?}", r1.errors);
+
+        // The checkpoint did not skip `b`: once the source recovers, the next
+        // run delivers it.
+        source.heal();
+        let r2 = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(r2.ok, "{:?}", r2.errors);
+        assert_eq!(
+            target.get("b", GetOptions::default()).await.unwrap().data["v"],
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_get_not_found_for_superseded_rev_is_skipped() {
+        let inner = MemoryAdapter::new("source");
+        put_doc(&inner, "d", serde_json::json!({"v": 1})).await;
+        let source = Faulty::new(
+            inner,
+            Faults {
+                supersede_on_bulk_get: Some("d".into()),
+                ..Default::default()
+            },
+        );
+        let target = MemoryAdapter::new("target");
+
+        // The listed rev was edited and compacted away before it could be
+        // fetched: nothing is lost, its successor comes later in the feed.
+        let r1 = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(r1.ok, "{:?}", r1.errors);
+
+        let r2 = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(r2.ok, "{:?}", r2.errors);
+        assert_eq!(
+            target.get("d", GetOptions::default()).await.unwrap().data["v"],
+            "next"
+        );
+    }
+
+    #[tokio::test]
+    async fn denied_doc_does_not_stall_replication() {
+        let source = MemoryAdapter::new("source");
+        put_doc(&source, "a", serde_json::json!({"v": 1})).await;
+        put_doc(&source, "x", serde_json::json!({"v": 2})).await;
+        put_doc(&source, "b", serde_json::json!({"v": 3})).await;
+        let target = Faulty::new(
+            MemoryAdapter::new("target"),
+            Faults {
+                write_error: Some(("x".into(), "forbidden".into())),
+                ..Default::default()
+            },
+        );
+        let opts = || ReplicationOptions {
+            batch_size: 1,
+            ..Default::default()
+        };
+
+        // `x` is rejected for good (e.g. by validate_doc_update): it is
+        // reported, and the docs after it still replicate.
+        let (tx, mut rx) = mpsc::channel(64);
+        let r1 = replicate_with_events(&source, &target, opts(), tx)
+            .await
+            .unwrap();
+        assert!(!r1.ok);
+        assert_eq!(r1.docs_written, 2);
+        assert!(r1.errors.iter().any(|e| e.contains("x")), "{:?}", r1.errors);
+        assert!(target.get("b", GetOptions::default()).await.is_ok());
+        let mut denied_reported = false;
+        while let Ok(event) = rx.try_recv() {
+            denied_reported |= matches!(event, ReplicationEvent::Error(ref m) if m.contains("x"));
+        }
+        assert!(denied_reported);
+
+        // The checkpoint moved past `x`, so it is not retried forever.
+        let r2 = replicate(&source, &target, opts()).await.unwrap();
+        assert!(r2.ok, "{:?}", r2.errors);
+        assert_eq!(r2.docs_read, 0);
+    }
+
+    #[tokio::test]
+    async fn transient_write_error_stops_without_advancing() {
+        let source = MemoryAdapter::new("source");
+        put_doc(&source, "a", serde_json::json!({"v": 1})).await;
+        put_doc(&source, "x", serde_json::json!({"v": 2})).await;
+        put_doc(&source, "b", serde_json::json!({"v": 3})).await;
+        let target = Faulty::new(
+            MemoryAdapter::new("target"),
+            Faults {
+                write_error: Some(("x".into(), "unknown_error".into())),
+                ..Default::default()
+            },
+        );
+        let opts = || ReplicationOptions {
+            batch_size: 1,
+            ..Default::default()
+        };
+
+        let r1 = replicate(&source, &target, opts()).await.unwrap();
+        assert!(!r1.ok);
+        assert!(target.get("b", GetOptions::default()).await.is_err());
+
+        target.heal();
+        let r2 = replicate(&source, &target, opts()).await.unwrap();
+        assert!(r2.ok, "{:?}", r2.errors);
+        assert!(target.get("x", GetOptions::default()).await.is_ok());
+        assert!(target.get("b", GetOptions::default()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn live_replication_reports_write_failures() {
+        let source = Arc::new(MemoryAdapter::new("source"));
+        put_doc(source.as_ref(), "x", serde_json::json!({"v": 1})).await;
+        let target = Arc::new(Faulty::new(
+            MemoryAdapter::new("target"),
+            Faults {
+                write_error: Some(("x".into(), "unknown_error".into())),
+                ..Default::default()
+            },
+        ));
+
+        let (mut rx, _handle) = replicate_live(
+            source,
+            target,
+            ReplicationOptions {
+                live: true,
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+        );
+
+        // Without retry the failure is reported and ends the replication.
+        let events = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut events = Vec::new();
+            while let Some(event) = rx.recv().await {
+                events.push(event);
+            }
+            events
+        })
+        .await
+        .expect("live replication kept running after a write failure");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ReplicationEvent::Error(m) if m.contains("x")))
+        );
+        assert!(matches!(events.last(), Some(ReplicationEvent::Complete(r)) if !r.ok));
+    }
+
+    /// Wait (bounded) for the first event matching `pred`.
+    async fn wait_for(
+        rx: &mut mpsc::Receiver<ReplicationEvent>,
+        pred: impl Fn(&ReplicationEvent) -> bool,
+    ) -> bool {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                if pred(&event) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn live_replication_honors_since() {
+        let source = Arc::new(MemoryAdapter::new("source"));
+        let target = Arc::new(MemoryAdapter::new("target"));
+        put_doc(source.as_ref(), "old", serde_json::json!({})).await;
+        let now = source.info().await.unwrap().update_seq;
+
+        let (mut rx, handle) = replicate_live(
+            source.clone(),
+            target.clone(),
+            ReplicationOptions {
+                live: true,
+                since: Some(now),
+                checkpoint: false,
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+        );
+        assert!(wait_for(&mut rx, |e| matches!(e, ReplicationEvent::Paused)).await);
+        put_doc(source.as_ref(), "new", serde_json::json!({})).await;
+        assert!(wait_for(&mut rx, |e| matches!(e, ReplicationEvent::Change { .. })).await);
+        handle.cancel();
+
+        assert!(target.get("new", GetOptions::default()).await.is_ok());
+        assert!(target.get("old", GetOptions::default()).await.is_err());
+    }
+
+    /// A memory source that gets a new document written while the first
+    /// replication pass reads its changes feed (after the read).
+    struct WritesDuringFirstPass {
+        inner: MemoryAdapter,
+        written: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for WritesDuringFirstPass {
+        async fn info(&self) -> Result<DbInfo> {
+            self.inner.info().await
+        }
+        async fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
+            self.inner.get(id, opts).await
+        }
+        async fn bulk_docs(
+            &self,
+            docs: Vec<Document>,
+            opts: BulkDocsOptions,
+        ) -> Result<Vec<DocResult>> {
+            self.inner.bulk_docs(docs, opts).await
+        }
+        async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
+            self.inner.all_docs(opts).await
+        }
+        async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
+            let changes = self.inner.changes(opts).await;
+            if !self.written.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                put_doc(&self.inner, "late", serde_json::json!({})).await;
+            }
+            changes
+        }
+        fn subscribe(&self) -> Option<broadcast::Receiver<ChangeNotice>> {
+            self.inner.subscribe()
+        }
+        async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
+            self.inner.revs_diff(revs).await
+        }
+        async fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
+            self.inner.bulk_get(docs).await
+        }
+        async fn put_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+            data: Vec<u8>,
+            content_type: &str,
+        ) -> Result<DocResult> {
+            self.inner
+                .put_attachment(doc_id, att_id, rev, data, content_type)
+                .await
+        }
+        async fn get_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            opts: GetAttachmentOptions,
+        ) -> Result<Vec<u8>> {
+            self.inner.get_attachment(doc_id, att_id, opts).await
+        }
+        async fn remove_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+        ) -> Result<DocResult> {
+            self.inner.remove_attachment(doc_id, att_id, rev).await
+        }
+        async fn get_local(&self, id: &str) -> Result<serde_json::Value> {
+            self.inner.get_local(id).await
+        }
+        async fn put_local(&self, id: &str, doc: serde_json::Value) -> Result<()> {
+            self.inner.put_local(id, doc).await
+        }
+        async fn remove_local(&self, id: &str) -> Result<()> {
+            self.inner.remove_local(id).await
+        }
+        async fn compact(&self) -> Result<()> {
+            self.inner.compact().await
+        }
+        async fn destroy(&self) -> Result<()> {
+            self.inner.destroy().await
+        }
+    }
+
+    /// Live replication only reports `Paused` once caught up: a change made
+    /// during a pass is replicated by another pass first.
+    #[tokio::test(start_paused = true)]
+    async fn live_replication_pauses_only_when_caught_up() {
+        let inner = MemoryAdapter::new("source");
+        put_doc(&inner, "a", serde_json::json!({})).await;
+        let source = Arc::new(WritesDuringFirstPass {
+            inner,
+            written: std::sync::atomic::AtomicBool::new(false),
+        });
+        let target = Arc::new(MemoryAdapter::new("target"));
+        let (mut rx, handle) = replicate_live(
+            source,
+            target.clone(),
+            ReplicationOptions {
+                live: true,
+                poll_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+        );
+        // Events are sent in order: both passes report their change before
+        // the first Paused.
+        let mut changes = 0;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                Ok(Some(ReplicationEvent::Change { .. })) => changes += 1,
+                Ok(Some(ReplicationEvent::Paused)) => break,
+                Ok(Some(_)) => {}
+                other => panic!("no Paused: {other:?}"),
+            }
+        }
+        assert_eq!(changes, 2, "Paused before the change made during a pass");
+        for id in ["a", "late"] {
+            assert!(target.get(id, GetOptions::default()).await.is_ok(), "{id}");
+        }
+        handle.cancel();
+    }
+
+    /// F96: a local source announces its changes, so live replication
+    /// replicates them without waiting for a poll (on a paused clock a poll
+    /// would take an hour, and `wait_for` gives up after 5 s), and a change
+    /// made while a pass runs is not lost.
+    #[tokio::test(start_paused = true)]
+    async fn live_replication_wakes_on_source_notifications() {
+        let hour = Duration::from_secs(3600);
+        let source = Arc::new(MemoryAdapter::new("source"));
+        let target = Arc::new(MemoryAdapter::new("target"));
+        put_doc(source.as_ref(), "a", serde_json::json!({})).await;
+        let start = tokio::time::Instant::now();
+        let (mut rx, handle) = replicate_live(
+            source.clone(),
+            target.clone(),
+            ReplicationOptions {
+                live: true,
+                poll_interval: hour,
+                ..Default::default()
+            },
+        );
+        // Caught up after the first pass, which read `a`.
+        assert!(wait_for(&mut rx, |e| matches!(e, ReplicationEvent::Paused)).await);
+        assert!(target.get("a", GetOptions::default()).await.is_ok());
+        for id in ["b", "c"] {
+            put_doc(source.as_ref(), id, serde_json::json!({})).await;
+            assert!(wait_for(&mut rx, |e| matches!(e, ReplicationEvent::Paused)).await);
+            assert!(target.get(id, GetOptions::default()).await.is_ok(), "{id}");
+        }
+        // Writes racing with the passes.
+        let writer = {
+            let source = source.clone();
+            tokio::spawn(async move {
+                for i in 0..100 {
+                    put_doc(source.as_ref(), &format!("r{i}"), serde_json::json!({})).await;
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        writer.await.unwrap();
+        let done = tokio::time::timeout(Duration::from_secs(5), async {
+            while target.info().await.unwrap().doc_count < 103 {
+                assert!(rx.recv().await.is_some());
+            }
+        })
+        .await;
+        assert!(
+            done.is_ok(),
+            "{} docs",
+            target.info().await.unwrap().doc_count
+        );
+        assert!(start.elapsed() < hour, "waited {:?}", start.elapsed());
+        handle.cancel();
+    }
+
+    #[tokio::test]
+    async fn live_replication_without_checkpoints_does_not_rescan() {
+        let source = Arc::new(MemoryAdapter::new("source"));
+        let target = Arc::new(MemoryAdapter::new("target"));
+        for i in 0..3 {
+            put_doc(source.as_ref(), &format!("d{i}"), serde_json::json!({})).await;
+        }
+
+        let (mut rx, handle) = replicate_live(
+            source,
+            target.clone(),
+            ReplicationOptions {
+                live: true,
+                checkpoint: false,
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+        );
+        // Once caught up, later polls must start from where the last one
+        // ended instead of re-reading the whole feed, i.e. go idle.
+        assert!(wait_for(&mut rx, |e| matches!(e, ReplicationEvent::Paused)).await);
+        handle.cancel();
+        assert_eq!(target.info().await.unwrap().doc_count, 3);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_saved_after_already_synced_batches() {
+        let a = MemoryAdapter::new("a");
+        let b = MemoryAdapter::new("b");
+        for i in 0..10 {
+            put_doc(&a, &format!("d{i}"), serde_json::json!({})).await;
+        }
+        replicate(&a, &b, ReplicationOptions::default())
+            .await
+            .unwrap();
+        let opts = || ReplicationOptions {
+            batch_size: 3,
+            ..Default::default()
+        };
+
+        // B's feed only holds docs A already has: nothing is written...
+        let r1 = replicate(&b, &a, opts()).await.unwrap();
+        assert_eq!((r1.docs_read, r1.docs_written), (10, 0));
+        // ...but the progress is kept, so the next run does not rescan.
+        let r2 = replicate(&b, &a, opts()).await.unwrap();
+        assert_eq!(r2.docs_read, 0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_saved_when_filter_matches_nothing() {
+        let source = MemoryAdapter::new("source");
+        let target = MemoryAdapter::new("target");
+        for i in 0..5 {
+            put_doc(&source, &format!("d{i}"), serde_json::json!({})).await;
+        }
+        let filter = Some(ReplicationFilter::DocIds(vec!["missing".into()]));
+
+        let result = replicate(
+            &source,
+            &target,
+            ReplicationOptions {
+                filter: filter.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.ok);
+        assert_eq!(result.last_seq, Seq::Num(5));
+
+        let checkpointer = new_checkpointer(&source, &target, &filter).await.unwrap();
+        let since = checkpointer
+            .read_checkpoint(&source, &target)
+            .await
+            .unwrap();
+        assert_eq!(since, Seq::Num(5));
+    }
+
+    #[tokio::test]
+    async fn read_only_source_still_checkpoints() {
+        let inner = MemoryAdapter::new("source");
+        put_doc(&inner, "a", serde_json::json!({})).await;
+        put_doc(&inner, "b", serde_json::json!({})).await;
+        let source = Faulty::new(
+            inner,
+            Faults {
+                put_local_error: Some(|| RouchError::Forbidden("read only".into())),
+                ..Default::default()
+            },
+        );
+        let target = MemoryAdapter::new("target");
+
+        let r1 = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(r1.ok, "{:?}", r1.errors);
+        assert_eq!(r1.docs_read, 2);
+
+        // The target's checkpoint alone lets the next pull resume.
+        put_doc(&source.inner, "c", serde_json::json!({})).await;
+        let r2 = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(r2.ok, "{:?}", r2.errors);
+        assert_eq!(r2.docs_read, 1);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_write_errors_are_reported() {
+        let source = MemoryAdapter::new("source");
+        put_doc(&source, "a", serde_json::json!({})).await;
+        let target = Faulty::new(
+            MemoryAdapter::new("target"),
+            Faults {
+                put_local_error: Some(|| RouchError::DatabaseError("disk full".into())),
+                ..Default::default()
+            },
+        );
+
+        let result = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+        assert!(result.errors[0].contains("disk full"));
+    }
+
+    #[tokio::test]
+    async fn live_replication_started_offline_checkpoints_under_the_real_id() {
+        let source = Arc::new(MemoryAdapter::new("source"));
+        for i in 0..3 {
+            put_doc(source.as_ref(), &format!("d{i}"), serde_json::json!({})).await;
+        }
+        let target = Arc::new(Faulty::new(
+            MemoryAdapter::new("target"),
+            Faults {
+                offline_id: Some("http://target/db".into()),
+                ..Default::default()
+            },
+        ));
+
+        let (mut rx, handle) = replicate_live(
+            source.clone(),
+            target.clone(),
+            ReplicationOptions {
+                live: true,
+                retry: true,
+                back_off_function: Some(Box::new(|_| Duration::from_millis(10))),
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+        );
+        assert!(wait_for(&mut rx, |e| matches!(e, ReplicationEvent::Error(_))).await);
+        target.heal(); // back online
+        assert!(wait_for(&mut rx, |e| matches!(e, ReplicationEvent::Paused)).await);
+        handle.cancel();
+
+        // The progress is stored under the id computed once the target
+        // answered, so the next session resumes instead of rescanning.
+        let checkpointer = new_checkpointer(source.as_ref(), target.as_ref(), &None)
+            .await
+            .unwrap();
+        let since = checkpointer
+            .read_checkpoint(source.as_ref(), target.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(since, Seq::Num(3));
+    }
+
+    #[test]
+    fn seq_after_orders_numeric_and_opaque_sequences() {
+        let num = Seq::Num;
+        assert!(seq_after(&num(5), &num(3)));
+        assert!(!seq_after(&num(3), &num(3)));
+        assert!(!seq_after(&num(2), &num(3)));
+
+        // Opaque CouchDB sequences compare by their numeric prefix only.
+        let s = |v: &str| Seq::Str(v.into());
+        assert!(seq_after(&s("5-g1AAAAB"), &s("3-g1AAAAA")));
+        assert!(!seq_after(&s("3-g1AAAAA"), &s("3-g1AAAAA")));
+        assert!(!seq_after(&s("3-g1AAAAA"), &s("5-g1AAAAB")));
+        // 12 > 9 as numbers, though "12" < "9" as text.
+        assert!(seq_after(&s("12-g1AAAAB"), &s("9-g1AAAAA")));
+        assert!(!seq_after(&s("9-g1AAAAA"), &s("12-g1AAAAB")));
+    }
+
+    async fn target_ids(target: &dyn Adapter) -> Vec<String> {
+        target
+            .all_docs(AllDocsOptions::new())
+            .await
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|r| r.key)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn transport_error_mid_run_resumes_from_the_last_checkpointed_batch() {
+        let source = MemoryAdapter::new("source");
+        for i in 0..10 {
+            put_doc(&source, &format!("d{i}"), serde_json::json!({})).await;
+        }
+        let target = Faulty::new(
+            MemoryAdapter::new("target"),
+            Faults {
+                bulk_docs_fails_on_call: Some(3),
+                ..Default::default()
+            },
+        );
+        let opts = || ReplicationOptions {
+            batch_size: 2,
+            ..Default::default()
+        };
+
+        let first = replicate(&source, &target, opts()).await;
+        assert!(
+            matches!(first, Err(RouchError::DatabaseError(ref m)) if m == "connection reset"),
+            "{first:?}"
+        );
+        assert_eq!(target_ids(&target).await, vec!["d0", "d1", "d2", "d3"]);
+
+        // Batches 1 and 2 were checkpointed before the failure: the next run
+        // starts at the third batch, neither from zero nor past it.
+        target.heal();
+        let second = replicate(&source, &target, opts()).await.unwrap();
+        assert!(second.ok, "{:?}", second.errors);
+        assert_eq!((second.docs_read, second.docs_written), (6, 6));
+        assert_eq!(second.last_seq, Seq::Num(10));
+        assert_eq!(target.info().await.unwrap().doc_count, 10);
+    }
+
+    #[tokio::test]
+    async fn bulk_get_not_found_for_a_live_leaf_fails_the_batch() {
+        let inner = MemoryAdapter::new("source");
+        put_doc(&inner, "a", serde_json::json!({"v": 1})).await;
+        put_doc(&inner, "b", serde_json::json!({"v": 2})).await;
+        let source = Faulty::new(
+            inner,
+            Faults {
+                bulk_get_error: Some(("b".into(), "not_found".into())),
+                ..Default::default()
+            },
+        );
+        let target = MemoryAdapter::new("target");
+
+        // `b` is still a leaf on the source: not_found there is a failure to
+        // retry, not a superseded rev to skip.
+        let r1 = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(!r1.ok);
+        assert_eq!(r1.errors.len(), 1, "{:?}", r1.errors);
+        assert!(
+            r1.errors[0].starts_with("fetch error for b 1-"),
+            "{:?}",
+            r1.errors
+        );
+
+        source.heal();
+        let r2 = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(r2.ok, "{:?}", r2.errors);
+        assert_eq!(target_ids(&target).await, vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn bulk_get_not_found_for_a_conflicting_leaf_fails_the_batch() {
+        let inner = MemoryAdapter::new("source");
+        put_rev(&inner, "d", &["bbb", "aaa"], serde_json::json!({"v": "b"})).await;
+        put_rev(&inner, "d", &["ccc", "aaa"], serde_json::json!({"v": "c"})).await;
+        let source = Faulty::new(
+            inner,
+            Faults {
+                bulk_get_missing_rev: Some(("d".into(), "2-bbb".into())),
+                ..Default::default()
+            },
+        );
+        let target = MemoryAdapter::new("target");
+
+        // The losing branch is a leaf too: it must not be skipped as if it
+        // had been superseded.
+        let r1 = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(!r1.ok);
+        assert_eq!(
+            r1.errors,
+            vec!["fetch error for d 2-bbb: not_found: missing".to_string()]
+        );
+
+        source.heal();
+        let r2 = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(r2.ok, "{:?}", r2.errors);
+        assert_eq!(conflicts_of(&target, "d").await, vec!["2-bbb"]);
+    }
+
+    #[tokio::test]
+    async fn unauthorized_write_is_denied_like_forbidden() {
+        let source = MemoryAdapter::new("source");
+        put_doc(&source, "a", serde_json::json!({})).await;
+        put_doc(&source, "x", serde_json::json!({})).await;
+        put_doc(&source, "b", serde_json::json!({})).await;
+        let target = Faulty::new(
+            MemoryAdapter::new("target"),
+            Faults {
+                write_error: Some(("x".into(), "unauthorized".into())),
+                ..Default::default()
+            },
+        );
+        let opts = || ReplicationOptions {
+            batch_size: 1,
+            ..Default::default()
+        };
+
+        // CouchDB validators may throw `unauthorized` as well as `forbidden`;
+        // both are final, so the replication moves past the doc.
+        let r1 = replicate(&source, &target, opts()).await.unwrap();
+        assert!(!r1.ok);
+        assert_eq!((r1.docs_read, r1.docs_written), (3, 2));
+        assert_eq!(
+            r1.errors,
+            vec!["write error for x: unauthorized: injected".to_string()]
+        );
+        assert_eq!(target_ids(&target).await, vec!["a", "b"]);
+
+        let r2 = replicate(&source, &target, opts()).await.unwrap();
+        assert!(r2.ok, "{:?}", r2.errors);
+        assert_eq!(r2.docs_read, 0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_read_errors_are_surfaced() {
+        let source = MemoryAdapter::new("source");
+        put_doc(&source, "a", serde_json::json!({})).await;
+        let target = Faulty::new(
+            MemoryAdapter::new("target"),
+            Faults {
+                get_local_error: Some(|| RouchError::Unauthorized),
+                ..Default::default()
+            },
+        );
+
+        // Only a missing checkpoint means "start over"; a denied read must
+        // not silently rescan (or write) anything.
+        let result = replicate(&source, &target, ReplicationOptions::default()).await;
+        assert!(
+            matches!(result, Err(RouchError::Unauthorized)),
+            "{result:?}"
+        );
+        assert_eq!(target.info().await.unwrap().doc_count, 0);
+    }
+
+    #[tokio::test]
+    async fn source_checkpoint_write_errors_are_reported() {
+        let inner = MemoryAdapter::new("source");
+        put_doc(&inner, "a", serde_json::json!({})).await;
+        let source = Faulty::new(
+            inner,
+            Faults {
+                put_local_error: Some(|| RouchError::DatabaseError("disk full".into())),
+                ..Default::default()
+            },
+        );
+        let target = MemoryAdapter::new("target");
+
+        // Unlike Forbidden/Unauthorized (a read-only source, see
+        // read_only_source_still_checkpoints), a failed write is an error.
+        let result = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert_eq!(
+            result.errors,
+            vec!["checkpoint write failed: database error: disk full".to_string()]
+        );
+        assert_eq!(result.docs_written, 1);
+    }
+
+    #[tokio::test]
+    async fn failed_probe_of_a_replaced_source_rescans_from_the_start() {
+        let target = MemoryAdapter::new("target");
+        let old_source = MemoryAdapter::new("src");
+        for i in 0..5 {
+            put_doc(&old_source, &format!("old{i}"), serde_json::json!({})).await;
+        }
+        replicate(&old_source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+
+        // Same name (so same replication id), fresh feed at seq 2, and the
+        // probe write fails for a reason other than permissions: the source
+        // is not known to be read-only, so the target's seq 5 is not trusted.
+        let inner = MemoryAdapter::new("src");
+        put_doc(&inner, "x", serde_json::json!({})).await;
+        put_doc(&inner, "y", serde_json::json!({})).await;
+        let source = Faulty::new(
+            inner,
+            Faults {
+                put_local_error: Some(|| RouchError::DatabaseError("disk full".into())),
+                ..Default::default()
+            },
+        );
+        let result = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert_eq!((result.docs_read, result.docs_written), (2, 2));
+        assert!(target.get("x", GetOptions::default()).await.is_ok());
+        assert!(target.get("y", GetOptions::default()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_write_conflict_is_retried_once() {
+        let source = MemoryAdapter::new("source");
+        put_doc(&source, "a", serde_json::json!({})).await;
+        // CouchDB 3.5 never answers 409 to a `_local` write (it does not check
+        // `_rev`), but another writer or server may: re-read and retry once.
+        let target = Faulty::new(
+            MemoryAdapter::new("target"),
+            Faults {
+                put_local_conflicts: 1,
+                ..Default::default()
+            },
+        );
+
+        let result = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert!(result.ok, "{:?}", result.errors);
+        let checkpointer = new_checkpointer(&source, &target, &None).await.unwrap();
+        let cp = target
+            .get_local(checkpointer.replication_id())
+            .await
+            .unwrap();
+        assert_eq!(cp["last_seq"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_short_batch_ends_the_pass_without_another_changes_request() {
+        let inner = MemoryAdapter::new("source");
+        for id in ["a", "b", "c"] {
+            put_doc(&inner, id, serde_json::json!({})).await;
+        }
+        let source = Faulty::new(inner, Faults::default());
+        let target = MemoryAdapter::new("target");
+        // Fewer changes than batch_size means the feed is exhausted, whether
+        // the batch was written, already on the target, or filtered out.
+        let runs = [
+            ReplicationOptions::default(),
+            ReplicationOptions {
+                checkpoint: false,
+                ..Default::default()
+            },
+            ReplicationOptions {
+                filter: Some(ReplicationFilter::Custom(Arc::new(|_| false))),
+                ..Default::default()
+            },
+        ];
+        for (i, opts) in runs.into_iter().enumerate() {
+            let before = source
+                .changes_calls
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let result = replicate(&source, &target, opts).await.unwrap();
+            assert!(result.ok, "{:?}", result.errors);
+            assert_eq!(result.docs_read, [3, 3, 0][i]);
+            let calls = source
+                .changes_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+                - before;
+            assert_eq!(calls, 1, "run {i} asked for changes {calls} times");
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_filter_keeps_scanning_past_a_fully_rejected_batch() {
+        let source = MemoryAdapter::new("source");
+        for id in ["a1", "a2", "b1", "b2", "b3"] {
+            put_doc(&source, id, serde_json::json!({})).await;
+        }
+        let target = MemoryAdapter::new("target");
+
+        // The first batch of two is entirely filtered out; later batches
+        // still hold matching docs.
+        let result = replicate(
+            &source,
+            &target,
+            ReplicationOptions {
+                batch_size: 2,
+                filter: Some(ReplicationFilter::Custom(Arc::new(|c| {
+                    c.id.starts_with('b')
+                }))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.ok, "{:?}", result.errors);
+        assert_eq!((result.docs_read, result.docs_written), (3, 3));
+        assert_eq!(target_ids(&target).await, vec!["b1", "b2", "b3"]);
+    }
+
+    #[tokio::test]
+    async fn selector_on_deleted_replicates_only_tombstones() {
+        let source = MemoryAdapter::new("source");
+        put_doc(&source, "kept", serde_json::json!({"v": 1})).await;
+        put_doc(&source, "gone", serde_json::json!({"v": 2})).await;
+        let gone = source.get("gone", GetOptions::default()).await.unwrap();
+        let tombstone = source
+            .bulk_docs(
+                vec![Document {
+                    id: "gone".into(),
+                    rev: gone.rev,
+                    deleted: true,
+                    data: serde_json::json!({}),
+                    attachments: HashMap::new(),
+                }],
+                BulkDocsOptions::new(),
+            )
+            .await
+            .unwrap()[0]
+            .rev
+            .clone()
+            .unwrap();
+        let target = MemoryAdapter::new("target");
+
+        let result = replicate(
+            &source,
+            &target,
+            ReplicationOptions {
+                filter: Some(ReplicationFilter::Selector(
+                    serde_json::json!({"_deleted": true}),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.ok, "{:?}", result.errors);
+        assert_eq!((result.docs_read, result.docs_written), (2, 1));
+
+        let feed = target.changes(ChangesOptions::default()).await.unwrap();
+        let got: Vec<(&str, &str, bool)> = feed
+            .results
+            .iter()
+            .map(|c| (c.id.as_str(), c.changes[0].rev.as_str(), c.deleted))
+            .collect();
+        assert_eq!(got, vec![("gone", tombstone.as_str(), true)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_retry_backs_off_exponentially_by_default() {
+        let source = Arc::new(MemoryAdapter::new("source"));
+        put_doc(source.as_ref(), "d", serde_json::json!({})).await;
+        let target = Arc::new(Faulty::new(
+            MemoryAdapter::new("target"),
+            Faults {
+                offline_id: Some("http://target/db".into()),
+                ..Default::default()
+            },
+        ));
+
+        let (mut rx, handle) = replicate_live(
+            source,
+            target,
+            ReplicationOptions {
+                live: true,
+                retry: true,
+                ..Default::default()
+            },
+        );
+        // Virtual time: the gaps between failed attempts are the delays.
+        let mut failed_at = Vec::new();
+        while failed_at.len() < 4 {
+            match rx.recv().await {
+                Some(ReplicationEvent::Error(_)) => failed_at.push(tokio::time::Instant::now()),
+                Some(_) => {}
+                None => panic!("live replication ended while retrying"),
+            }
+        }
+        handle.cancel();
+        let gaps: Vec<Duration> = failed_at.windows(2).map(|w| w[1] - w[0]).collect();
+        assert_eq!(
+            gaps,
+            [2, 4, 8].map(Duration::from_secs),
+            "default backoff is 2^attempt seconds"
+        );
+    }
+
+    /// Start a live replication of one doc and wait until it is idle.
+    async fn idle_live_replication() -> (mpsc::Receiver<ReplicationEvent>, ReplicationHandle) {
+        let source = Arc::new(MemoryAdapter::new("source"));
+        put_doc(source.as_ref(), "d", serde_json::json!({})).await;
+        let (mut rx, handle) = replicate_live(
+            source,
+            Arc::new(MemoryAdapter::new("target")),
+            ReplicationOptions {
+                live: true,
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+        );
+        assert!(wait_for(&mut rx, |e| matches!(e, ReplicationEvent::Paused)).await);
+        (rx, handle)
+    }
+
+    /// Drain the channel until it closes (bounded).
+    async fn remaining_events(rx: &mut mpsc::Receiver<ReplicationEvent>) -> Vec<ReplicationEvent> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut events = Vec::new();
+            while let Some(event) = rx.recv().await {
+                events.push(event);
+            }
+            events
+        })
+        .await
+        .expect("live replication kept running")
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_live_replication_with_one_complete() {
+        let (mut rx, handle) = idle_live_replication().await;
+        handle.cancel();
+        let events = remaining_events(&mut rx).await;
+        let completes: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ReplicationEvent::Complete(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completes.len(), 1, "{events:?}");
+        assert!(completes[0].ok);
+        assert!(matches!(events.last(), Some(ReplicationEvent::Complete(_))));
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_handle_ends_live_replication() {
+        let (mut rx, handle) = idle_live_replication().await;
+        drop(handle);
+        let events = remaining_events(&mut rx).await;
+        assert!(
+            matches!(events.last(), Some(ReplicationEvent::Complete(r)) if r.ok),
+            "{events:?}"
+        );
     }
 }

@@ -3,16 +3,21 @@
 /// Provides a `ChangesStream` that wraps the adapter's `changes()` method
 /// and supports:
 /// - One-shot mode: fetch changes since a sequence and return
-/// - Live/continuous mode: keep polling for new changes
+/// - Live/continuous mode: wait for new changes, woken by the adapter's
+///   change notifications ([`Adapter::subscribe`]) when it has them, and
+///   polling at `poll_interval` otherwise
 /// - Filtering by document IDs
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use rouchdb_core::adapter::Adapter;
-use rouchdb_core::document::{ChangeEvent, ChangesOptions, ChangesStyle, Seq};
+use rouchdb_core::document::{ChangeEvent, ChangesOptions, ChangesResponse, ChangesStyle, Seq};
 
 /// A filter function for changes events.
 pub type ChangesFilter = Arc<dyn Fn(&ChangeEvent) -> bool + Send + Sync>;
@@ -21,11 +26,17 @@ pub type ChangesFilter = Arc<dyn Fn(&ChangeEvent) -> bool + Send + Sync>;
 ///
 /// Mirrors PouchDB's changes event model: `change`, `complete`, `error`,
 /// `paused`, and `active`.
+///
+/// `#[non_exhaustive]`: new events may be added in minor releases, so a
+/// `match` on it needs a catch-all arm, and `Complete` may gain fields
+/// (match it as `Complete { last_seq, .. }`).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ChangesEvent {
     /// A document changed.
     Change(ChangeEvent),
     /// The stream completed (limit reached or non-live mode ended).
+    #[non_exhaustive]
     Complete { last_seq: Seq },
     /// An error occurred while fetching changes.
     Error(String),
@@ -38,12 +49,9 @@ pub enum ChangesEvent {
 }
 use rouchdb_core::error::Result;
 
-/// A notification that a change occurred, sent through the broadcast channel.
-#[derive(Debug, Clone)]
-pub struct ChangeNotification {
-    pub seq: Seq,
-    pub doc_id: String,
-}
+/// A notification that a change occurred, sent through the broadcast
+/// channel: the notice adapters send ([`Adapter::subscribe`]).
+pub type ChangeNotification = rouchdb_core::adapter::ChangeNotice;
 
 /// A sender for change notifications. Adapters use this to notify listeners
 /// when documents are written.
@@ -60,7 +68,7 @@ impl ChangeSender {
 
     pub fn notify(&self, seq: Seq, doc_id: String) {
         // Ignore send errors (no receivers)
-        let _ = self.tx.send(ChangeNotification { seq, doc_id });
+        let _ = self.tx.send(ChangeNotification::new(seq, doc_id));
     }
 
     pub fn subscribe(&self) -> ChangeReceiver {
@@ -75,7 +83,21 @@ pub struct ChangeReceiver {
     rx: broadcast::Receiver<ChangeNotification>,
 }
 
+impl From<broadcast::Receiver<ChangeNotification>> for ChangeReceiver {
+    /// Wrap a subscription, such as the one [`Adapter::subscribe`] returns.
+    fn from(rx: broadcast::Receiver<ChangeNotification>) -> Self {
+        ChangeReceiver { rx }
+    }
+}
+
 impl ChangeReceiver {
+    /// Drop the notifications already queued (the caller is about to read
+    /// the changes feed, which covers them). A closed channel is left for
+    /// the next `recv` to report.
+    fn drain(&mut self) {
+        while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) = self.rx.try_recv() {}
+    }
+
     pub async fn recv(&mut self) -> Option<ChangeNotification> {
         loop {
             match self.rx.recv().await {
@@ -91,12 +113,29 @@ impl ChangeReceiver {
 }
 
 /// Configuration for a changes stream.
+///
+/// Set the options you need and fill the rest with `..Default::default()`:
+/// fields may be added in minor releases, and a literal that lists every
+/// field would then stop compiling.
+///
+/// ```
+/// use rouchdb_changes::ChangesStreamOptions;
+///
+/// let opts = ChangesStreamOptions {
+///     live: true,
+///     include_docs: true,
+///     ..Default::default()
+/// };
+/// # let _ = opts;
+/// ```
 #[derive(Clone)]
 pub struct ChangesStreamOptions {
     pub since: Seq,
     pub live: bool,
     pub include_docs: bool,
     pub doc_ids: Option<Vec<String>>,
+    /// Mango selector: only changes whose doc matches are emitted. The docs
+    /// are fetched to evaluate it and dropped again unless `include_docs`.
     pub selector: Option<serde_json::Value>,
     pub limit: Option<u64>,
     /// Include conflicting revisions per change event.
@@ -105,11 +144,15 @@ pub struct ChangesStreamOptions {
     pub style: ChangesStyle,
     /// A filter function applied post-fetch to each change event.
     pub filter: Option<ChangesFilter>,
-    /// Polling interval for live mode when no broadcast channel is available.
+    /// Polling interval for live mode when there is no change notification
+    /// channel (the adapter's [`Adapter::subscribe`] returns `None` and no
+    /// receiver was given), and retry base delay after a failed fetch.
     pub poll_interval: Duration,
-    /// How long to keep the connection open before closing in live mode.
+    /// In live mode, end the stream (with `Complete`) after this long
+    /// without new changes.
     pub timeout: Option<Duration>,
-    /// Interval for heartbeat signals in live mode (prevents connection timeout).
+    /// In live mode, emit a `Heartbeat` event at this interval while
+    /// waiting for changes.
     pub heartbeat: Option<Duration>,
 }
 
@@ -151,11 +194,42 @@ impl std::fmt::Debug for ChangesStreamOptions {
     }
 }
 
+/// Fold `opts.selector` into `opts.filter`: the selector needs the docs, so
+/// they are requested. Returns whether they must be stripped again because
+/// the caller did not ask for them.
+fn apply_selector(opts: &mut ChangesStreamOptions) -> bool {
+    let Some(selector) = opts.selector.take() else {
+        return false;
+    };
+    // Compiled once for the whole stream; an invalid selector matches nothing.
+    let selector = rouchdb_query::CompiledSelector::new(&selector).ok();
+    let existing = opts.filter.take();
+    opts.filter = Some(Arc::new(move |e: &ChangeEvent| {
+        existing.as_ref().is_none_or(|f| f(e))
+            && e.doc
+                .as_ref()
+                .is_some_and(|d| selector.as_ref().is_some_and(|s| s.matches(d)))
+    }));
+    let strip_docs = !opts.include_docs;
+    opts.include_docs = true;
+    strip_docs
+}
+
+/// Whether `new` is strictly later than `old`. Opaque CouchDB sequences are
+/// only comparable by their numeric prefix.
+fn seq_after(new: &Seq, old: &Seq) -> bool {
+    match (new, old) {
+        (Seq::Num(n), Seq::Num(o)) => n > o,
+        _ => new != old && new.as_num() >= old.as_num(),
+    }
+}
+
 /// Fetch changes from an adapter in one-shot mode.
 pub async fn get_changes(
     adapter: &dyn Adapter,
-    opts: ChangesStreamOptions,
+    mut opts: ChangesStreamOptions,
 ) -> Result<Vec<ChangeEvent>> {
+    let strip_docs = apply_selector(&mut opts);
     let filter = opts.filter.clone();
     let limit = opts.limit;
     let changes_opts = ChangesOptions {
@@ -173,7 +247,7 @@ pub async fn get_changes(
     };
 
     let response = adapter.changes(changes_opts).await?;
-    let mut results = if let Some(f) = filter {
+    let mut results: Vec<ChangeEvent> = if let Some(f) = filter {
         response.results.into_iter().filter(|e| f(e)).collect()
     } else {
         response.results
@@ -181,24 +255,63 @@ pub async fn get_changes(
     if let Some(l) = limit {
         results.truncate(l as usize);
     }
+    if strip_docs {
+        for event in &mut results {
+            event.doc = None;
+        }
+    }
     Ok(results)
 }
 
+/// Longest wait between retries after the adapter failed.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
 /// A live changes stream that yields change events as they happen.
 ///
-/// In live mode, after fetching existing changes, it waits for
-/// notifications via a broadcast channel or polls at regular intervals.
+/// In live mode, after fetching existing changes, it waits for change
+/// notifications (the receiver given to [`LiveChangesStream::new`], else
+/// the adapter's [`Adapter::subscribe`]) or, without any, polls at
+/// `poll_interval`.
+/// A failed fetch is reported as [`ChangesEvent::Error`]; a live stream then
+/// retries with a growing delay, a one-shot stream ends.
+///
+/// The stream keeps its position for its whole life. If the database is
+/// destroyed and reused, the new changes are numbered from 1 again and the
+/// stream does not start over: cancel it and create a new one from
+/// `Seq::zero()` after `destroy()`.
 pub struct LiveChangesStream {
     adapter: Arc<dyn Adapter>,
     receiver: Option<ChangeReceiver>,
     opts: ChangesStreamOptions,
+    /// Sequence of the last change consumed (emitted or filtered out), or
+    /// the feed position once the whole fetched batch is consumed.
     last_seq: Seq,
     buffer: Vec<ChangeEvent>,
     buffer_idx: usize,
+    /// `last_seq` reported with the buffered batch.
+    buffer_last_seq: Seq,
     state: LiveStreamState,
     count: u64,
+    /// Docs were only fetched to evaluate the selector.
+    strip_docs: bool,
+    /// Next poll (polling mode, while waiting).
+    next_poll: Option<Instant>,
+    /// When a waiting stream times out (the `timeout` option).
+    idle_deadline: Option<Instant>,
+    /// Next heartbeat (the `heartbeat` option).
+    next_heartbeat: Option<Instant>,
+    /// Paused was emitted and no change has arrived since.
+    paused: bool,
+    /// Consecutive failed fetches.
+    failures: u32,
+    /// A fetch in flight, kept here so that dropping `next_event()` midway
+    /// resumes it on the next call instead of aborting it.
+    pending_fetch: Option<PendingFetch>,
 }
 
+type PendingFetch = Pin<Box<dyn Future<Output = Result<ChangesResponse>> + Send>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LiveStreamState {
     /// Fetching the initial batch of changes.
     FetchingInitial,
@@ -206,146 +319,318 @@ enum LiveStreamState {
     Yielding,
     /// Waiting for new notifications.
     Waiting,
-    /// Done (limit reached or adapter closed).
+    /// Done (limit reached, timed out, or closed); Complete not yet emitted.
     Done,
+    /// Complete (or a terminal Error) was emitted.
+    Finished,
 }
 
 impl LiveChangesStream {
+    /// A stream over `adapter`. In live mode it wakes up on `receiver`'s
+    /// notifications, or, when `receiver` is `None`, on the adapter's own
+    /// ([`Adapter::subscribe`], subscribed here, before anything is read, so
+    /// no change is missed); it polls when there are none.
     pub fn new(
         adapter: Arc<dyn Adapter>,
         receiver: Option<ChangeReceiver>,
-        opts: ChangesStreamOptions,
+        mut opts: ChangesStreamOptions,
     ) -> Self {
+        let receiver = match receiver {
+            Some(receiver) => Some(receiver),
+            None if opts.live => adapter.subscribe().map(ChangeReceiver::from),
+            None => None,
+        };
+        let strip_docs = apply_selector(&mut opts);
         let last_seq = opts.since.clone();
+        let next_heartbeat = opts
+            .heartbeat
+            .filter(|_| opts.live)
+            .map(|d| Instant::now() + d);
         Self {
             adapter,
             receiver,
-            opts,
+            buffer_last_seq: last_seq.clone(),
             last_seq,
+            opts,
             buffer: Vec::new(),
             buffer_idx: 0,
             state: LiveStreamState::FetchingInitial,
             count: 0,
+            strip_docs,
+            next_poll: None,
+            idle_deadline: None,
+            next_heartbeat,
+            paused: false,
+            failures: 0,
+            pending_fetch: None,
         }
     }
 
-    /// Fetch changes since `last_seq` and buffer them.
-    async fn fetch_changes(&mut self) -> Result<()> {
-        let changes_opts = ChangesOptions {
-            since: self.last_seq.clone(),
-            limit: self.opts.limit.map(|l| l.saturating_sub(self.count)),
-            descending: false,
-            include_docs: self.opts.include_docs,
-            live: false,
-            doc_ids: self.opts.doc_ids.clone(),
-            conflicts: self.opts.conflicts,
-            style: self.opts.style.clone(),
-            ..Default::default()
-        };
+    /// The sequence to resume from: the last change consumed.
+    pub fn last_seq(&self) -> &Seq {
+        &self.last_seq
+    }
 
-        let response = self.adapter.changes(changes_opts).await?;
-        if !response.results.is_empty() {
-            self.last_seq = response.last_seq;
+    /// Fetch changes since `last_seq` and buffer them (resuming a fetch
+    /// left in flight by a dropped call).
+    async fn fetch_changes(&mut self) -> Result<()> {
+        if self.pending_fetch.is_none() {
+            let changes_opts = ChangesOptions {
+                since: self.last_seq.clone(),
+                // A post-fetch filter decides what counts toward the limit, so
+                // the adapter must not cap the batch (it would under-deliver).
+                limit: match self.opts.filter {
+                    Some(_) => None,
+                    None => self.opts.limit.map(|l| l.saturating_sub(self.count)),
+                },
+                descending: false,
+                include_docs: self.opts.include_docs,
+                live: false,
+                doc_ids: self.opts.doc_ids.clone(),
+                conflicts: self.opts.conflicts,
+                style: self.opts.style.clone(),
+                ..Default::default()
+            };
+            let adapter = self.adapter.clone();
+            self.pending_fetch = Some(Box::pin(async move { adapter.changes(changes_opts).await }));
         }
+        let fetched = self
+            .pending_fetch
+            .as_mut()
+            .expect("pending fetch set above")
+            .await;
+        self.pending_fetch = None;
+        let response = fetched?;
         self.buffer = response.results;
         self.buffer_idx = 0;
+        self.buffer_last_seq = response.last_seq;
+        self.failures = 0;
+        // Nothing to consume: the feed may still have moved past changes a
+        // doc_ids filter excluded.
+        if self.buffer.is_empty() && seq_after(&self.buffer_last_seq, &self.last_seq) {
+            self.last_seq = self.buffer_last_seq.clone();
+        }
         Ok(())
     }
 
+    /// Next buffered event that passes the filter, advancing `last_seq`.
+    fn pop_buffered(&mut self) -> Option<ChangeEvent> {
+        while self.buffer_idx < self.buffer.len() {
+            let mut event = self.buffer[self.buffer_idx].clone();
+            self.buffer_idx += 1;
+            self.last_seq = event.seq.clone();
+            if self.buffer_idx == self.buffer.len()
+                && seq_after(&self.buffer_last_seq, &self.last_seq)
+            {
+                self.last_seq = self.buffer_last_seq.clone();
+            }
+            // Apply the user filter here so `limit` (and `count`) reflect
+            // emitted, not merely scanned, events.
+            if let Some(ref f) = self.opts.filter
+                && !f(&event)
+            {
+                continue;
+            }
+            if self.strip_docs {
+                event.doc = None;
+            }
+            self.count += 1;
+            return Some(event);
+        }
+        None
+    }
+
+    /// Start waiting for new changes.
+    fn enter_waiting(&mut self) {
+        let now = Instant::now();
+        self.state = LiveStreamState::Waiting;
+        self.next_poll = Some(now + self.opts.poll_interval);
+        if self.idle_deadline.is_none() {
+            self.idle_deadline = self.opts.timeout.map(|t| now + t);
+        }
+    }
+
+    /// A fetch failed: a live stream retries later, a one-shot stream ends.
+    fn fetch_failed(&mut self, error: rouchdb_core::error::RouchError) -> ChangesEvent {
+        if self.opts.live {
+            self.failures = self.failures.saturating_add(1);
+            let delay = self
+                .opts
+                .poll_interval
+                .saturating_mul(1u32 << self.failures.min(8))
+                .min(MAX_RETRY_DELAY);
+            self.enter_waiting();
+            self.next_poll = Some(Instant::now() + delay);
+        } else {
+            self.state = LiveStreamState::Finished;
+        }
+        ChangesEvent::Error(error.to_string())
+    }
+
+    /// Fetched while waiting: switch to yielding if there is anything new.
+    fn resume_if_changed(&mut self) -> Option<ChangesEvent> {
+        if self.buffer.is_empty() {
+            return None;
+        }
+        self.state = LiveStreamState::Yielding;
+        self.idle_deadline = None;
+        if self.paused {
+            self.paused = false;
+            return Some(ChangesEvent::Active);
+        }
+        None
+    }
+
     /// Get the next change event, blocking if in live mode.
+    ///
+    /// Lifecycle events are skipped; `None` means the stream ended. In live
+    /// mode a failed fetch is retried (see [`Self::next_event`] to observe it).
     pub async fn next_change(&mut self) -> Option<ChangeEvent> {
         loop {
-            // Check limit
+            match self.next_event().await? {
+                ChangesEvent::Change(event) => return Some(event),
+                ChangesEvent::Complete { .. } => return None,
+                ChangesEvent::Error(_) if !self.opts.live => return None,
+                _ => {}
+            }
+        }
+    }
+
+    /// Get the next event: changes plus the `Paused`/`Active` transitions,
+    /// `Heartbeat`s while waiting, `Error`s, and a final `Complete`. Returns
+    /// `None` once the stream has ended.
+    pub async fn next_event(&mut self) -> Option<ChangesEvent> {
+        loop {
             if let Some(limit) = self.opts.limit
                 && self.count >= limit
+                && self.state != LiveStreamState::Finished
             {
-                return None;
+                self.state = LiveStreamState::Done;
             }
 
             match self.state {
                 LiveStreamState::FetchingInitial => {
-                    if self.fetch_changes().await.is_err() {
-                        return None;
+                    if let Err(e) = self.fetch_changes().await {
+                        return Some(self.fetch_failed(e));
                     }
-                    self.state = if self.buffer.is_empty() {
-                        if self.opts.live {
-                            LiveStreamState::Waiting
-                        } else {
-                            LiveStreamState::Done
-                        }
-                    } else {
-                        LiveStreamState::Yielding
-                    };
+                    self.state = LiveStreamState::Yielding;
                 }
                 LiveStreamState::Yielding => {
-                    if self.buffer_idx < self.buffer.len() {
-                        let event = self.buffer[self.buffer_idx].clone();
-                        self.buffer_idx += 1;
-                        // Apply the user filter here so `limit` (and `count`)
-                        // reflect emitted, not merely scanned, events.
-                        if let Some(ref f) = self.opts.filter
-                            && !f(&event)
-                        {
-                            continue;
-                        }
-                        self.count += 1;
-                        return Some(event);
+                    if let Some(event) = self.pop_buffered() {
+                        return Some(ChangesEvent::Change(event));
                     }
-                    // Buffer exhausted
-                    self.state = if self.opts.live {
-                        LiveStreamState::Waiting
-                    } else {
-                        LiveStreamState::Done
-                    };
+                    // Buffer exhausted: caught up.
+                    if !self.opts.live {
+                        self.state = LiveStreamState::Done;
+                        continue;
+                    }
+                    self.enter_waiting();
+                    if !self.paused {
+                        self.paused = true;
+                        return Some(ChangesEvent::Paused);
+                    }
                 }
                 LiveStreamState::Waiting => {
-                    // Wait for a notification or poll, with optional timeout
-                    let wait_result = if let Some(ref mut receiver) = self.receiver {
-                        if let Some(timeout_dur) = self.opts.timeout {
-                            match tokio::time::timeout(timeout_dur, receiver.recv()).await {
-                                Ok(Some(_)) => true,
-                                Ok(None) => return None, // Channel closed
-                                Err(_) => return None,   // Timeout elapsed
-                            }
-                        } else {
-                            receiver.recv().await.as_ref().is_some()
-                        }
-                    } else {
-                        // No broadcast channel, poll with interval
-                        if let Some(timeout_dur) = self.opts.timeout {
-                            match tokio::time::timeout(
-                                timeout_dur,
-                                tokio::time::sleep(self.opts.poll_interval),
-                            )
-                            .await
-                            {
-                                Ok(()) => true,
-                                Err(_) => return None, // Timeout elapsed
-                            }
-                        } else {
-                            tokio::time::sleep(self.opts.poll_interval).await;
-                            true
-                        }
-                    };
+                    let now = Instant::now();
 
-                    if !wait_result {
-                        return None;
+                    // Timed out: look once more so a change made just before
+                    // the deadline is not lost, then end.
+                    if self.idle_deadline.is_some_and(|d| now >= d) {
+                        if let Err(e) = self.fetch_changes().await {
+                            self.state = LiveStreamState::Finished;
+                            return Some(ChangesEvent::Error(e.to_string()));
+                        }
+                        match self.resume_if_changed() {
+                            Some(event) => return Some(event),
+                            None if self.state == LiveStreamState::Yielding => continue,
+                            None => {
+                                self.state = LiveStreamState::Done;
+                                continue;
+                            }
+                        }
                     }
 
-                    // Fetch new changes
-                    if self.fetch_changes().await.is_err() {
-                        return None;
+                    if let Some(heartbeat) = self.next_heartbeat
+                        && now >= heartbeat
+                    {
+                        self.next_heartbeat = self.opts.heartbeat.map(|d| now + d);
+                        return Some(ChangesEvent::Heartbeat);
                     }
-                    if !self.buffer.is_empty() {
-                        self.state = LiveStreamState::Yielding;
+
+                    // Sleep until the next poll, heartbeat or deadline (or a
+                    // notification), unless a fetch was left in flight.
+                    // Deadlines and the fetch live in `self`, so dropping this
+                    // future at any point loses nothing.
+                    if self.pending_fetch.is_none() && !self.wait_for_fetch().await {
+                        continue;
                     }
-                    // If still empty, stay in Waiting state
+                    let fetched = self.fetch_changes().await;
+                    self.next_poll = Some(Instant::now() + self.opts.poll_interval);
+                    if let Err(e) = fetched {
+                        return Some(self.fetch_failed(e));
+                    }
+                    if let Some(event) = self.resume_if_changed() {
+                        return Some(event);
+                    }
+                    // Caught up after recovering from a failed fetch.
+                    if self.state == LiveStreamState::Waiting && !self.paused {
+                        self.paused = true;
+                        return Some(ChangesEvent::Paused);
+                    }
                 }
                 LiveStreamState::Done => {
-                    return None;
+                    self.state = LiveStreamState::Finished;
+                    return Some(ChangesEvent::Complete {
+                        last_seq: self.last_seq.clone(),
+                    });
                 }
+                LiveStreamState::Finished => return None,
             }
         }
+    }
+
+    /// Wait until a fetch is due (poll time or notification). Returns false
+    /// when woken for something else (heartbeat, deadline, closed channel),
+    /// which the caller re-evaluates.
+    async fn wait_for_fetch(&mut self) -> bool {
+        let polling = self.receiver.is_none() || self.failures > 0;
+        let wake = [
+            if polling { self.next_poll } else { None },
+            self.next_heartbeat,
+            self.idle_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        match &mut self.receiver {
+            Some(receiver) if !polling => {
+                tokio::select! {
+                    n = receiver.recv() => {
+                        if n.is_none() {
+                            // Channel closed.
+                            self.state = LiveStreamState::Done;
+                            return false;
+                        }
+                        // One fetch covers every notification queued so far.
+                        receiver.drain();
+                        true
+                    }
+                    _ = sleep_until(wake) => false,
+                }
+            }
+            _ => {
+                sleep_until(wake).await;
+                self.next_poll.is_some_and(|p| Instant::now() >= p)
+            }
+        }
+    }
+}
+
+/// Sleep until `deadline`, or forever when there is none.
+async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(d).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -367,11 +652,22 @@ impl Drop for ChangesHandle {
     }
 }
 
+/// Send `value`, giving up if the stream is cancelled meanwhile. Returns
+/// whether the stream should go on.
+async fn send_or_cancel<T>(tx: &mpsc::Sender<T>, value: T, cancel: &CancellationToken) -> bool {
+    tokio::select! {
+        sent = tx.send(value) => sent.is_ok(),
+        _ = cancel.cancelled() => false,
+    }
+}
+
 /// Start a live changes stream that sends events through an mpsc channel.
 ///
 /// Spawns a background task that polls the adapter for changes and sends
 /// each `ChangeEvent` through the returned receiver. The `ChangesHandle`
-/// controls the stream's lifecycle.
+/// controls the stream's lifecycle; the task also stops once the receiver
+/// is dropped. Failed fetches are retried with a growing delay (use
+/// [`live_changes_events`] to observe them).
 pub fn live_changes(
     adapter: Arc<dyn Adapter>,
     opts: ChangesStreamOptions,
@@ -387,18 +683,19 @@ pub fn live_changes(
             LiveChangesStream::new(adapter, None, ChangesStreamOptions { live: true, ..opts });
 
         loop {
-            tokio::select! {
-                change = stream.next_change() => {
-                    match change {
-                        Some(event) => {
-                            if tx.send(event).await.is_err() {
-                                break; // Receiver dropped
-                            }
-                        }
-                        None => break, // Stream ended (limit reached)
+            let event = tokio::select! {
+                event = stream.next_event() => event,
+                _ = cancel_clone.cancelled() => break,
+                _ = tx.closed() => break, // Receiver dropped
+            };
+            match event {
+                Some(ChangesEvent::Change(change)) => {
+                    if !send_or_cancel(&tx, change, &cancel_clone).await {
+                        break;
                     }
                 }
-                _ = cancel_clone.cancelled() => break,
+                Some(ChangesEvent::Complete { .. }) | None => break, // limit reached
+                Some(_) => {}
             }
         }
     });
@@ -409,8 +706,8 @@ pub fn live_changes(
 /// Start a live changes stream that emits lifecycle events.
 ///
 /// Like `live_changes()` but wraps each event in a `ChangesEvent` enum
-/// that includes `Active`, `Paused`, `Complete`, and `Error` lifecycle events
-/// alongside the actual `Change` events.
+/// that includes `Active`, `Paused`, `Complete`, `Error` and `Heartbeat`
+/// lifecycle events alongside the actual `Change` events.
 pub fn live_changes_events(
     adapter: Arc<dyn Adapter>,
     opts: ChangesStreamOptions,
@@ -418,67 +715,25 @@ pub fn live_changes_events(
     let (tx, rx) = mpsc::channel(64);
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
-    let heartbeat_dur = opts.heartbeat;
 
     tokio::spawn(async move {
-        // The user filter is applied inside the stream so `limit` counts only
-        // emitted (post-filter) events.
         let mut stream =
             LiveChangesStream::new(adapter, None, ChangesStreamOptions { live: true, ..opts });
 
-        let mut was_paused = false;
-        // Optional keep-alive ticker; first tick is one interval from now.
-        let mut heartbeat = heartbeat_dur.map(|d| {
-            let mut i = tokio::time::interval_at(tokio::time::Instant::now() + d, d);
-            i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            i
-        });
-
         loop {
-            tokio::select! {
-                change = stream.next_change() => {
-                    match change {
-                        Some(event) => {
-                            // Emit Active if we were paused
-                            if was_paused {
-                                was_paused = false;
-                                let _ = tx.send(ChangesEvent::Active).await;
-                            }
-
-                            if tx.send(ChangesEvent::Change(event)).await.is_err() {
-                                break;
-                            }
-                        }
-                        None => {
-                            // Stream ended
-                            let _ = tx.send(ChangesEvent::Complete {
-                                last_seq: stream.last_seq.clone(),
-                            }).await;
-                            break;
-                        }
-                    }
-                }
-                _ = async { heartbeat.as_mut().unwrap().tick().await }, if heartbeat.is_some() => {
-                    if tx.send(ChangesEvent::Heartbeat).await.is_err() {
-                        break;
-                    }
-                    continue;
-                }
+            let event = tokio::select! {
+                event = stream.next_event() => event,
                 _ = cancel_clone.cancelled() => {
-                    let _ = tx.send(ChangesEvent::Complete {
-                        last_seq: stream.last_seq.clone(),
-                    }).await;
+                    let _ = tx.try_send(ChangesEvent::Complete {
+                        last_seq: stream.last_seq().clone(),
+                    });
                     break;
-                },
-            }
-
-            // If the buffer is exhausted and we're in waiting state, emit Paused
-            if stream.buffer_idx >= stream.buffer.len()
-                && matches!(stream.state, LiveStreamState::Waiting)
-                && !was_paused
-            {
-                was_paused = true;
-                let _ = tx.send(ChangesEvent::Paused).await;
+                }
+                _ = tx.closed() => break, // Receiver dropped
+            };
+            let Some(event) = event else { break };
+            if !send_or_cancel(&tx, event, &cancel_clone).await {
+                break;
             }
         }
     });
@@ -683,6 +938,103 @@ mod tests {
         assert_eq!(events[1].id, "d2");
     }
 
+    // -----------------------------------------------------------------------
+    // Adapter change notifications (F96), on a paused clock: a poll would
+    // advance it by `HOUR`, so staying below proves no change waited for one.
+    // -----------------------------------------------------------------------
+
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    fn hourly_polls() -> ChangesStreamOptions {
+        ChangesStreamOptions {
+            live: true,
+            poll_interval: HOUR,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_feed_wakes_on_adapter_notifications() {
+        let db = Arc::new(MemoryAdapter::new("n"));
+        let start = Instant::now();
+        let (mut rx, handle) = live_changes(db.clone(), hourly_polls());
+        for id in ["a", "b", "c"] {
+            put_doc(db.as_ref(), id, serde_json::json!({})).await;
+            assert_eq!(rx.recv().await.unwrap().id, id);
+        }
+        assert!(start.elapsed() < HOUR, "waited {:?}", start.elapsed());
+        handle.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_feed_loses_no_change_under_concurrent_writes() {
+        let db = Arc::new(MemoryAdapter::new("n"));
+        let start = Instant::now();
+        let (mut rx, handle) = live_changes(db.clone(), hourly_polls());
+        let writers: Vec<_> = (0..8)
+            .map(|w| {
+                let db = db.clone();
+                tokio::spawn(async move {
+                    for i in 0..50 {
+                        put_doc(db.as_ref(), &format!("w{w}-{i}"), serde_json::json!({})).await;
+                        tokio::task::yield_now().await;
+                    }
+                })
+            })
+            .collect();
+        // A burst larger than the notification buffer: the subscriber lags
+        // and must still re-read everything.
+        let burst: Vec<Document> = (0..1500)
+            .map(|i| Document::from_json(serde_json::json!({"_id": format!("burst-{i}")})).unwrap())
+            .collect();
+        db.bulk_docs(burst, BulkDocsOptions::new()).await.unwrap();
+        let mut seen = std::collections::HashSet::new();
+        while seen.len() < 8 * 50 + 1500 {
+            let event = rx.recv().await.unwrap();
+            assert!(seen.insert(event.id.clone()), "{} twice", event.id);
+        }
+        for writer in writers {
+            writer.await.unwrap();
+        }
+        assert!(start.elapsed() < HOUR, "waited {:?}", start.elapsed());
+        handle.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_notifications_cost_one_fetch() {
+        let db = Flaky::notifying();
+        let (mut rx, handle) = live_changes(db.clone(), hourly_polls());
+        put_doc(&db.inner, "first", serde_json::json!({})).await;
+        assert_eq!(rx.recv().await.unwrap().id, "first");
+        let before = db.calls.load(Ordering::SeqCst);
+        // Written while the feed waits, without yielding to it: their 50
+        // notifications are queued when it wakes up.
+        for i in 0..50 {
+            put_doc(&db.inner, &format!("d{i}"), serde_json::json!({})).await;
+        }
+        for i in 0..50 {
+            assert_eq!(rx.recv().await.unwrap().id, format!("d{i}"));
+        }
+        let fetches = db.calls.load(Ordering::SeqCst) - before;
+        assert!(fetches <= 3, "{fetches} fetches for one burst");
+        handle.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_feed_polls_an_adapter_without_notifications() {
+        // `Flaky` does not forward `subscribe`: the feed falls back to polling.
+        let db = Flaky::new(false);
+        let start = Instant::now();
+        let (mut rx, handle) = live_changes(db.clone(), hourly_polls());
+        put_doc(&db.inner, "a", serde_json::json!({})).await;
+        assert_eq!(rx.recv().await.unwrap().id, "a");
+        tokio::task::yield_now().await;
+        put_doc(&db.inner, "b", serde_json::json!({})).await;
+        assert_eq!(rx.recv().await.unwrap().id, "b");
+        assert!(start.elapsed() >= HOUR, "waited {:?}", start.elapsed());
+        handle.cancel();
+    }
+
     #[tokio::test]
     async fn change_sender_subscribe() {
         let (sender, _rx) = ChangeSender::new(16);
@@ -693,5 +1045,612 @@ mod tests {
         let notification = sub.recv().await.unwrap();
         assert_eq!(notification.seq, Seq::Num(1));
         assert_eq!(notification.doc_id, "doc1");
+    }
+
+    // -----------------------------------------------------------------------
+    // Live-feed lifecycle (virtual time: sleeps auto-advance when idle)
+    // -----------------------------------------------------------------------
+
+    use rouchdb_core::document::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// A memory adapter whose `changes()` can be made to fail, and which
+    /// counts `changes()` calls.
+    struct Flaky {
+        inner: MemoryAdapter,
+        fail: AtomicBool,
+        calls: AtomicUsize,
+        /// How long each `changes()` call takes, in milliseconds.
+        latency_ms: std::sync::atomic::AtomicU64,
+        /// Forward the memory adapter's change notifications.
+        notify: bool,
+    }
+
+    impl Flaky {
+        fn new(fail: bool) -> Arc<Self> {
+            Arc::new(Self {
+                inner: MemoryAdapter::new("flaky"),
+                fail: AtomicBool::new(fail),
+                calls: AtomicUsize::new(0),
+                latency_ms: std::sync::atomic::AtomicU64::new(0),
+                notify: false,
+            })
+        }
+
+        /// A healthy adapter that announces its changes.
+        fn notifying() -> Arc<Self> {
+            let mut flaky = Arc::try_unwrap(Self::new(false)).ok().unwrap();
+            flaky.notify = true;
+            Arc::new(flaky)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for Flaky {
+        async fn info(&self) -> Result<DbInfo> {
+            self.inner.info().await
+        }
+        async fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
+            self.inner.get(id, opts).await
+        }
+        async fn bulk_docs(
+            &self,
+            docs: Vec<Document>,
+            opts: BulkDocsOptions,
+        ) -> Result<Vec<DocResult>> {
+            self.inner.bulk_docs(docs, opts).await
+        }
+        async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
+            self.inner.all_docs(opts).await
+        }
+        fn subscribe(&self) -> Option<broadcast::Receiver<rouchdb_core::adapter::ChangeNotice>> {
+            if self.notify {
+                self.inner.subscribe()
+            } else {
+                None
+            }
+        }
+        async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let latency = self.latency_ms.load(Ordering::SeqCst);
+            if latency > 0 {
+                tokio::time::sleep(Duration::from_millis(latency)).await;
+            }
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(rouchdb_core::error::RouchError::DatabaseError(
+                    "connection refused".into(),
+                ));
+            }
+            self.inner.changes(opts).await
+        }
+        async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
+            self.inner.revs_diff(revs).await
+        }
+        async fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
+            self.inner.bulk_get(docs).await
+        }
+        async fn put_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+            data: Vec<u8>,
+            content_type: &str,
+        ) -> Result<DocResult> {
+            self.inner
+                .put_attachment(doc_id, att_id, rev, data, content_type)
+                .await
+        }
+        async fn get_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            opts: GetAttachmentOptions,
+        ) -> Result<Vec<u8>> {
+            self.inner.get_attachment(doc_id, att_id, opts).await
+        }
+        async fn remove_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+        ) -> Result<DocResult> {
+            self.inner.remove_attachment(doc_id, att_id, rev).await
+        }
+        async fn get_local(&self, id: &str) -> Result<serde_json::Value> {
+            self.inner.get_local(id).await
+        }
+        async fn put_local(&self, id: &str, doc: serde_json::Value) -> Result<()> {
+            self.inner.put_local(id, doc).await
+        }
+        async fn remove_local(&self, id: &str) -> Result<()> {
+            self.inner.remove_local(id).await
+        }
+        async fn compact(&self) -> Result<()> {
+            self.inner.compact().await
+        }
+        async fn destroy(&self) -> Result<()> {
+            self.inner.destroy().await
+        }
+    }
+
+    /// Next event that is not a heartbeat, within `secs` of virtual time.
+    async fn next_non_heartbeat(
+        rx: &mut mpsc::Receiver<ChangesEvent>,
+        secs: u64,
+    ) -> Option<ChangesEvent> {
+        tokio::time::timeout(Duration::from_secs(secs), async {
+            loop {
+                match rx.recv().await {
+                    Some(ChangesEvent::Heartbeat) => continue,
+                    other => return other,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_shorter_than_poll_still_delivers_changes() {
+        let db = Arc::new(MemoryAdapter::new("test"));
+        let (mut rx, _handle) = live_changes_events(
+            db.clone(),
+            ChangesStreamOptions {
+                heartbeat: Some(Duration::from_millis(100)),
+                poll_interval: Duration::from_millis(500),
+                ..Default::default()
+            },
+        );
+        // Written once the feed is already waiting between polls.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        put_doc(db.as_ref(), "a", serde_json::json!({})).await;
+
+        let delivered = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, ChangesEvent::Change(ref c) if c.id == "a") {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(delivered, "only heartbeats arrived");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn events_signal_paused_and_active() {
+        let db = Arc::new(MemoryAdapter::new("test"));
+        put_doc(db.as_ref(), "a", serde_json::json!({})).await;
+        let (mut rx, _handle) = live_changes_events(
+            db.clone(),
+            ChangesStreamOptions {
+                poll_interval: Duration::from_millis(50),
+                ..Default::default()
+            },
+        );
+
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            seen.push(next_non_heartbeat(&mut rx, 5).await);
+        }
+        put_doc(db.as_ref(), "b", serde_json::json!({})).await;
+        for _ in 0..2 {
+            seen.push(next_non_heartbeat(&mut rx, 5).await);
+        }
+        let names: Vec<String> = seen
+            .iter()
+            .map(|e| match e {
+                Some(ChangesEvent::Change(c)) => format!("change:{}", c.id),
+                Some(ChangesEvent::Paused) => "paused".into(),
+                Some(ChangesEvent::Active) => "active".into(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(names, vec!["change:a", "paused", "active", "change:b"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fetch_errors_are_reported_and_retried() {
+        let db = Flaky::new(true);
+        let (mut rx, _handle) = live_changes_events(
+            db.clone(),
+            ChangesStreamOptions {
+                poll_interval: Duration::from_millis(50),
+                ..Default::default()
+            },
+        );
+
+        let first = next_non_heartbeat(&mut rx, 5).await;
+        assert!(matches!(first, Some(ChangesEvent::Error(_))), "{first:?}");
+
+        // Once the server is back, the same feed resumes.
+        db.fail.store(false, Ordering::SeqCst);
+        put_doc(&db.inner, "a", serde_json::json!({})).await;
+        let resumed = tokio::time::timeout(Duration::from_secs(300), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, ChangesEvent::Change(ref c) if c.id == "a") {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(resumed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_changes_survives_fetch_errors() {
+        let db = Flaky::new(true);
+        let (mut rx, _handle) = live_changes(
+            db.clone(),
+            ChangesStreamOptions {
+                poll_interval: Duration::from_millis(50),
+                ..Default::default()
+            },
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        db.fail.store(false, Ordering::SeqCst);
+        put_doc(&db.inner, "a", serde_json::json!({})).await;
+
+        let event = tokio::time::timeout(Duration::from_secs(300), rx.recv())
+            .await
+            .expect("feed stalled");
+        assert_eq!(event.expect("feed ended on a fetch error").id, "a");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_ends_an_idle_feed() {
+        let db = Arc::new(MemoryAdapter::new("test"));
+        let (mut rx, _handle) = live_changes_events(
+            db.clone(),
+            ChangesStreamOptions {
+                timeout: Some(Duration::from_secs(2)),
+                poll_interval: Duration::from_millis(500),
+                ..Default::default()
+            },
+        );
+        let ended = tokio::time::timeout(Duration::from_secs(60), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, ChangesEvent::Complete { .. }) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(ended, "idle feed never timed out");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_shorter_than_poll_keeps_late_changes() {
+        let db = Arc::new(MemoryAdapter::new("test"));
+        let (mut rx, _handle) = live_changes_events(
+            db.clone(),
+            ChangesStreamOptions {
+                timeout: Some(Duration::from_millis(100)),
+                poll_interval: Duration::from_millis(500),
+                ..Default::default()
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        put_doc(db.as_ref(), "late", serde_json::json!({})).await;
+
+        let mut ids = Vec::new();
+        while let Some(event) = next_non_heartbeat(&mut rx, 10).await {
+            match event {
+                ChangesEvent::Change(c) => ids.push(c.id),
+                ChangesEvent::Complete { .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(ids, vec!["late"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn complete_reports_scanned_last_seq() {
+        let db = Arc::new(MemoryAdapter::new("test"));
+        for i in 0..3 {
+            put_doc(db.as_ref(), &format!("d{i}"), serde_json::json!({})).await;
+        }
+        let (mut rx, _handle) = live_changes_events(
+            db.clone(),
+            ChangesStreamOptions {
+                doc_ids: Some(vec!["nope".into()]),
+                timeout: Some(Duration::from_millis(100)),
+                poll_interval: Duration::from_millis(500),
+                ..Default::default()
+            },
+        );
+        let last_seq = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = rx.recv().await {
+                if let ChangesEvent::Complete { last_seq } = event {
+                    return Some(last_seq);
+                }
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten();
+        assert_eq!(last_seq, Some(Seq::Num(3)));
+    }
+
+    #[tokio::test]
+    async fn filtered_limited_stream_delivers_the_limit() {
+        let (db, _sender) = setup().await;
+        for i in 0..6 {
+            put_doc(db.as_ref(), &format!("d{i}"), serde_json::json!({"i": i})).await;
+        }
+        let even: ChangesFilter = Arc::new(|e: &ChangeEvent| {
+            e.id.trim_start_matches('d')
+                .parse::<u64>()
+                .is_ok_and(|n| n % 2 == 0)
+        });
+        let mut stream = LiveChangesStream::new(
+            db,
+            None,
+            ChangesStreamOptions {
+                limit: Some(2),
+                filter: Some(even),
+                ..Default::default()
+            },
+        );
+        let mut ids = Vec::new();
+        while let Some(event) = stream.next_change().await {
+            ids.push(event.id);
+        }
+        assert_eq!(ids, vec!["d0", "d2"]);
+    }
+
+    #[tokio::test]
+    async fn free_functions_apply_the_selector() {
+        let db = Arc::new(MemoryAdapter::new("test"));
+        put_doc(db.as_ref(), "alice", serde_json::json!({"type": "user"})).await;
+        put_doc(db.as_ref(), "inv1", serde_json::json!({"type": "invoice"})).await;
+        put_doc(db.as_ref(), "bob", serde_json::json!({"type": "user"})).await;
+        let opts = || ChangesStreamOptions {
+            selector: Some(serde_json::json!({"type": "user"})),
+            poll_interval: Duration::from_millis(20),
+            ..Default::default()
+        };
+
+        let one_shot = get_changes(db.as_ref(), opts()).await.unwrap();
+        let ids: Vec<&str> = one_shot.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["alice", "bob"]);
+        assert!(one_shot.iter().all(|e| e.doc.is_none()));
+
+        let (mut rx, handle) = live_changes(db.clone(), opts());
+        let mut live = Vec::new();
+        for _ in 0..2 {
+            let e = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(e.doc.is_none());
+            live.push(e.id);
+        }
+        put_doc(db.as_ref(), "inv2", serde_json::json!({"type": "invoice"})).await;
+        put_doc(db.as_ref(), "carol", serde_json::json!({"type": "user"})).await;
+        let e = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        live.push(e.id);
+        handle.cancel();
+        assert_eq!(live, vec!["alice", "bob", "carol"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropped_receiver_stops_polling() {
+        let db = Flaky::new(false);
+        let (rx, _handle) = live_changes(
+            db.clone(),
+            ChangesStreamOptions {
+                poll_interval: Duration::from_millis(50),
+                ..Default::default()
+            },
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        drop(rx);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let calls = db.calls.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(db.calls.load(Ordering::SeqCst), calls, "still polling");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancel_interrupts_a_blocked_send() {
+        let db = Arc::new(MemoryAdapter::new("test"));
+        for i in 0..100 {
+            put_doc(db.as_ref(), &format!("d{i:03}"), serde_json::json!({})).await;
+        }
+        for events in [false, true] {
+            // Nobody reads: the task blocks once the channel is full.
+            let handle = if events {
+                let (rx, handle) = live_changes_events(db.clone(), Default::default());
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                handle.cancel();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                assert!(rx.is_closed(), "events task still blocked after cancel");
+                handle
+            } else {
+                let (rx, handle) = live_changes(db.clone(), Default::default());
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                handle.cancel();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                assert!(rx.is_closed(), "task still blocked after cancel");
+                handle
+            };
+            drop(handle);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn next_event_survives_being_dropped_mid_fetch() {
+        let db = Flaky::new(false);
+        db.latency_ms.store(50, Ordering::SeqCst);
+        let mut stream = LiveChangesStream::new(
+            db.clone(),
+            None,
+            ChangesStreamOptions {
+                live: true,
+                poll_interval: Duration::from_millis(500),
+                ..Default::default()
+            },
+        );
+        let mut ticks = tokio::time::interval(Duration::from_millis(20));
+        let mut written = false;
+
+        // A caller racing next_event() against its own timer drops the
+        // future, sometimes in the middle of a fetch.
+        let delivered = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                tokio::select! {
+                    event = stream.next_event() => match event {
+                        Some(ChangesEvent::Change(c)) if c.id == "late" => return true,
+                        Some(ChangesEvent::Paused) if !written => {
+                            written = true;
+                            put_doc(&db.inner, "late", serde_json::json!({})).await;
+                        }
+                        None => return false,
+                        _ => {}
+                    },
+                    _ = ticks.tick() => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(delivered, "change never delivered");
+    }
+
+    #[test]
+    fn seq_after_orders_numeric_and_opaque_sequences() {
+        let num = Seq::Num;
+        assert!(seq_after(&num(5), &num(3)));
+        assert!(!seq_after(&num(3), &num(3)));
+        assert!(!seq_after(&num(2), &num(3)));
+
+        // Opaque CouchDB sequences compare by their numeric prefix only.
+        let s = |v: &str| Seq::Str(v.into());
+        assert!(seq_after(&s("5-g1AAAAB"), &s("3-g1AAAAA")));
+        assert!(!seq_after(&s("3-g1AAAAA"), &s("3-g1AAAAA")));
+        assert!(!seq_after(&s("3-g1AAAAA"), &s("5-g1AAAAB")));
+        assert!(seq_after(&s("12-g1AAAAB"), &s("9-g1AAAAA")));
+    }
+
+    /// `d` has two leaves under 1-aaa (2-ccc wins), `e` is a plain doc.
+    async fn conflicted_db() -> Arc<MemoryAdapter> {
+        let db = Arc::new(MemoryAdapter::new("test"));
+        for ids in [["bbb", "aaa"], ["ccc", "aaa"]] {
+            let doc = Document::from_json(serde_json::json!({
+                "_id": "d",
+                "_rev": format!("2-{}", ids[0]),
+                "_revisions": {"start": 2, "ids": ids},
+            }))
+            .unwrap();
+            db.bulk_docs(vec![doc], BulkDocsOptions::replication())
+                .await
+                .unwrap();
+        }
+        put_doc(db.as_ref(), "e", serde_json::json!({})).await;
+        db
+    }
+
+    fn doc_ids_conflicts_all_leaves() -> ChangesStreamOptions {
+        ChangesStreamOptions {
+            doc_ids: Some(vec!["d".into()]),
+            conflicts: true,
+            style: ChangesStyle::AllDocs,
+            poll_interval: Duration::from_millis(20),
+            ..Default::default()
+        }
+    }
+
+    /// (id, leaf revs, conflicts) of a change.
+    fn shape(c: &ChangeEvent) -> (String, Vec<String>, Option<Vec<String>>) {
+        let mut revs: Vec<String> = c.changes.iter().map(|r| r.rev.clone()).collect();
+        revs.sort();
+        (c.id.clone(), revs, c.conflicts.clone())
+    }
+
+    fn expected_shape() -> Vec<(String, Vec<String>, Option<Vec<String>>)> {
+        vec![(
+            "d".into(),
+            vec!["2-bbb".into(), "2-ccc".into()],
+            Some(vec!["2-bbb".into()]),
+        )]
+    }
+
+    #[tokio::test]
+    async fn one_shot_changes_pass_doc_ids_conflicts_and_style() {
+        let db = conflicted_db().await;
+        let changes = get_changes(db.as_ref(), doc_ids_conflicts_all_leaves())
+            .await
+            .unwrap();
+        assert_eq!(
+            changes.iter().map(shape).collect::<Vec<_>>(),
+            expected_shape()
+        );
+    }
+
+    #[tokio::test]
+    async fn live_changes_pass_doc_ids_conflicts_and_style() {
+        let db = conflicted_db().await;
+        let (mut rx, handle) = live_changes_events(db, doc_ids_conflicts_all_leaves());
+        let changes = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut changes = Vec::new();
+            loop {
+                match rx.recv().await {
+                    Some(ChangesEvent::Change(c)) => changes.push(shape(&c)),
+                    Some(ChangesEvent::Paused) | None => return changes,
+                    Some(_) => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        handle.cancel();
+        assert_eq!(changes, expected_shape());
+    }
+
+    #[tokio::test]
+    async fn cancelled_event_stream_completes_at_the_last_seq() {
+        let db = Arc::new(MemoryAdapter::new("test"));
+        for id in ["a", "b", "c"] {
+            put_doc(db.as_ref(), id, serde_json::json!({})).await;
+        }
+        let (mut rx, handle) = live_changes_events(
+            db,
+            ChangesStreamOptions {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+        );
+        let rest = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, ChangesEvent::Paused) {
+                    break;
+                }
+            }
+            handle.cancel();
+            let mut rest = Vec::new();
+            while let Some(event) = rx.recv().await {
+                rest.push(event);
+            }
+            rest
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(rest.last(), Some(ChangesEvent::Complete { last_seq }) if *last_seq == Seq::Num(3)),
+            "{:?}",
+            rest.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>()
+        );
     }
 }
