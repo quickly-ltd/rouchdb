@@ -663,6 +663,10 @@ async fn run_replication(
 /// checkpoints and sends one [`ReplicationEvent::Warning`] (see
 /// [`ReplicationResult::warnings`]).
 ///
+/// Cancellation interrupts waiting adapter calls and event sends. Already
+/// committed writes are not rolled back. A terminal `Complete` on cancellation
+/// is best-effort: a full event queue must not keep the worker alive.
+///
 /// An invalid [`ReplicationFilter::Selector`] sends one `Error` event and
 /// ends the replication (even with `retry`) before anything is read or
 /// written.
@@ -681,208 +685,227 @@ pub fn replicate_live(
     let cancel_clone = cancel.clone();
 
     tokio::spawn(async move {
-        // An invalid selector can never succeed: report it and stop, even
-        // with `retry`, before anything is read or written.
-        let selector = match compile_filter(&opts.filter) {
-            Ok(selector) => selector,
-            Err(e) => {
-                let _ = tx.send(ReplicationEvent::Error(e.to_string())).await;
-                return;
-            }
-        };
-        // Subscribed before the first pass, so a change made during a pass
-        // wakes the next one up. The target is followed only for resets (it
-        // is destroyed, and maybe reused, while the source is idle); a
-        // target that cannot announce them has its id compared every
-        // `poll_interval` instead.
-        let mut notices = source.subscribe();
-        let mut target_notices = target.subscribe();
-        let mut attempt: u32 = 0;
-        // Track the last successful result so a single terminal Complete can
-        // be emitted when the live loop finally exits.
         let mut last_result: Option<ReplicationResult> = None;
-        // Starts at the caller's `since` (or the checkpoint when unset), then
-        // follows each pass's last_seq so polls never rescan the feed. One
-        // session (one checkpointer) spans the live replication until a pass
-        // fails with an error or a peer is reset.
-        let mut since = opts.since.clone();
-        let mut session: Option<Session> = None;
-        // The identities the cursor and the session belong to.
-        let mut session_ids: Option<(String, String)> = None;
-        // A peer announced a reset (`ChangeNotice::reset`) since the last
-        // pass.
-        let mut reset = false;
-
-        'live: loop {
-            let result = async {
-                // A peer that was destroyed (and possibly reused) since the
-                // last pass reports a new identity, and announces a reset if
-                // it can; its sequences start over, so the cursor would skip
-                // its changes. Start again from the checkpoint of the new
-                // pair (none after a destroy: from the start).
-                let ids = peer_ids(source.as_ref(), target.as_ref()).await?;
-                if std::mem::take(&mut reset) || session_ids.as_ref().is_some_and(|old| *old != ids)
-                {
-                    since = None;
-                    session = None;
-                }
-                if session.is_none() {
-                    let new = session_for(&ids, &opts.filter);
-                    for warning in &new.warnings {
-                        let _ = tx.send(ReplicationEvent::Warning(warning.clone())).await;
-                    }
-                    session = Some(new);
-                }
-                session_ids = Some(ids);
-                let session = session.as_ref().expect("initialized above");
-                run_replication(
-                    source.as_ref(),
-                    target.as_ref(),
-                    &opts,
-                    selector.as_ref(),
-                    session,
-                    since.clone(),
-                    Some(&tx),
-                )
-                .await
-            }
-            .await;
-
-            // Whether the pass caught up with the source without reporting
-            // Paused yet.
-            let mut caught_up = false;
-            let failure = match result {
-                Ok(outcome) => {
-                    // Resume the next pass where this one stopped.
-                    since = Some(outcome.result.last_seq.clone());
-                    if outcome.failure.is_none() {
-                        attempt = 0; // Reset retry counter on success
-                        if outcome.result.docs_read == 0 {
-                            // No changes — emit Paused and wait
-                            let _ = tx.send(ReplicationEvent::Paused).await;
-                        } else {
-                            caught_up = true;
-                        }
-                    }
-                    last_result = Some(outcome.result);
-                    outcome.failure
-                }
+        // Cover the whole worker, including adapter I/O and bounded-channel
+        // sends. Checking only the idle/backoff waits leaves cancellation
+        // stuck behind a pending pass or an event queue without a reader.
+        let worker = async {
+            // An invalid selector can never succeed: report it and stop, even
+            // with `retry`, before anything is read or written.
+            let selector = match compile_filter(&opts.filter) {
+                Ok(selector) => selector,
                 Err(e) => {
-                    // The peer may have been unreachable when the id was
-                    // derived (an HTTP adapter then falls back to its URL):
-                    // derive it again on the next attempt.
-                    session = None;
-                    Some(e.to_string())
+                    let _ = tx.send(ReplicationEvent::Error(e.to_string())).await;
+                    return;
                 }
             };
+            // Subscribed before the first pass, so a change made during a pass
+            // wakes the next one up. The target is followed only for resets (it
+            // is destroyed, and maybe reused, while the source is idle); a
+            // target that cannot announce them has its id compared every
+            // `poll_interval` instead.
+            let mut notices = source.subscribe();
+            let mut target_notices = target.subscribe();
+            let mut attempt: u32 = 0;
+            // Starts at the caller's `since` (or the checkpoint when unset), then
+            // follows each pass's last_seq so polls never rescan the feed. One
+            // session (one checkpointer) spans the live replication until a pass
+            // fails with an error or a peer is reset.
+            let mut since = opts.since.clone();
+            let mut session: Option<Session> = None;
+            // The identities the cursor and the session belong to.
+            let mut session_ids: Option<(String, String)> = None;
+            // A peer announced a reset (`ChangeNotice::reset`) since the last
+            // pass.
+            let mut reset = false;
 
-            if let Some(message) = failure {
-                let _ = tx.send(ReplicationEvent::Error(message)).await;
-                if retry {
-                    attempt += 1;
-                    let delay = if let Some(ref f) = back_off {
-                        f(attempt)
-                    } else {
-                        // Default exponential backoff: min(1s * 2^attempt, 60s)
-                        let secs = (1u64 << attempt.min(6)).min(60);
-                        Duration::from_secs(secs)
-                    };
-                    tokio::select! {
-                        _ = tokio::time::sleep(delay) => continue 'live,
-                        _ = cancel_clone.cancelled() => break 'live,
+            'live: loop {
+                let result = async {
+                    // A peer that was destroyed (and possibly reused) since the
+                    // last pass reports a new identity, and announces a reset if
+                    // it can; its sequences start over, so the cursor would skip
+                    // its changes. Start again from the checkpoint of the new
+                    // pair (none after a destroy: from the start).
+                    let ids = peer_ids(source.as_ref(), target.as_ref()).await?;
+                    if std::mem::take(&mut reset)
+                        || session_ids.as_ref().is_some_and(|old| *old != ids)
+                    {
+                        since = None;
+                        session = None;
                     }
-                } else {
-                    break 'live;
-                }
-            }
-
-            // Whether a peer may have been reset without announcing it to
-            // us: its id changed since the pass started.
-            let ids_changed = || async {
-                peer_ids(source.as_ref(), target.as_ref())
+                    if session.is_none() {
+                        let new = session_for(&ids, &opts.filter);
+                        for warning in &new.warnings {
+                            let _ = tx.send(ReplicationEvent::Warning(warning.clone())).await;
+                        }
+                        session = Some(new);
+                    }
+                    session_ids = Some(ids);
+                    let session = session.as_ref().expect("initialized above");
+                    run_replication(
+                        source.as_ref(),
+                        target.as_ref(),
+                        &opts,
+                        selector.as_ref(),
+                        session,
+                        since.clone(),
+                        Some(&tx),
+                    )
                     .await
-                    .is_ok_and(|ids| session_ids.as_ref() != Some(&ids))
-            };
-
-            // Changes (and resets) announced during the pass are handled
-            // right away. The target's other notices are the pass's own
-            // writes, or writes of others that the source does not need.
-            let mut wake = false;
-            if let Some(rx) = notices.as_mut() {
-                let drained = drain_notices(rx);
-                wake |= drained.any;
-                reset |= drained.reset;
-            }
-            if let Some(rx) = target_notices.as_mut() {
-                let drained = drain_notices(rx);
-                reset |= drained.reset;
-                // A lagging receiver may have missed a reset.
-                if drained.lagged && ids_changed().await {
-                    wake = true;
                 }
-            }
-            if wake || reset {
-                continue 'live;
-            }
+                .await;
 
-            // Wait for a change on the source (its notifications, or
-            // poll_interval without them), a reset of the target (its
-            // notifications, or its id checked every poll_interval without
-            // them) or cancellation.
-            if caught_up && notices.is_some() {
-                let _ = tx.send(ReplicationEvent::Paused).await;
-            }
-            let mut deadline = tokio::time::Instant::now() + poll_interval;
-            loop {
-                tokio::select! {
-                    notice = next_notice(&mut notices), if notices.is_some() => {
-                        match notice {
-                            Err(broadcast::error::RecvError::Closed) => {
-                                notices = None; // poll from now on
+                // Whether the pass caught up with the source without reporting
+                // Paused yet.
+                let mut caught_up = false;
+                let failure = match result {
+                    Ok(outcome) => {
+                        // Resume the next pass where this one stopped.
+                        since = Some(outcome.result.last_seq.clone());
+                        if outcome.failure.is_none() {
+                            attempt = 0; // Reset retry counter on success
+                            if outcome.result.docs_read == 0 {
+                                // No changes — emit Paused and wait
+                                let _ = tx.send(ReplicationEvent::Paused).await;
+                            } else {
+                                caught_up = true;
                             }
-                            Ok(notice) => reset |= notice.reset,
-                            Err(broadcast::error::RecvError::Lagged(_)) => {}
                         }
-                        if let Some(rx) = notices.as_mut() {
-                            reset |= drain_notices(rx).reset;
-                        }
-                        break;
+                        last_result = Some(outcome.result);
+                        outcome.failure
                     }
-                    _ = tokio::time::sleep_until(deadline), if notices.is_none() => break,
-                    notice = next_notice(&mut target_notices), if target_notices.is_some() => {
-                        match notice {
-                            Ok(notice) if notice.reset => {
-                                reset = true;
-                                break;
+                    Err(e) => {
+                        // The peer may have been unreachable when the id was
+                        // derived (an HTTP adapter then falls back to its URL):
+                        // derive it again on the next attempt.
+                        session = None;
+                        Some(e.to_string())
+                    }
+                };
+
+                if let Some(message) = failure {
+                    let _ = tx.send(ReplicationEvent::Error(message)).await;
+                    if retry {
+                        attempt += 1;
+                        let delay = if let Some(ref f) = back_off {
+                            f(attempt)
+                        } else {
+                            // Default exponential backoff: min(1s * 2^attempt, 60s)
+                            let secs = (1u64 << attempt.min(6)).min(60);
+                            Duration::from_secs(secs)
+                        };
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => continue 'live,
+                            _ = cancel_clone.cancelled() => break 'live,
+                        }
+                    } else {
+                        break 'live;
+                    }
+                }
+
+                // Whether a peer may have been reset without announcing it to
+                // us: its id changed since the pass started.
+                let ids_changed = || async {
+                    peer_ids(source.as_ref(), target.as_ref())
+                        .await
+                        .is_ok_and(|ids| session_ids.as_ref() != Some(&ids))
+                };
+
+                // Changes (and resets) announced during the pass are handled
+                // right away. The target's other notices are the pass's own
+                // writes, or writes of others that the source does not need.
+                let mut wake = false;
+                if let Some(rx) = notices.as_mut() {
+                    let drained = drain_notices(rx);
+                    wake |= drained.any;
+                    reset |= drained.reset;
+                }
+                if let Some(rx) = target_notices.as_mut() {
+                    let drained = drain_notices(rx);
+                    reset |= drained.reset;
+                    // A lagging receiver may have missed a reset.
+                    if drained.lagged && ids_changed().await {
+                        wake = true;
+                    }
+                }
+                if wake || reset {
+                    continue 'live;
+                }
+
+                // Wait for a change on the source (its notifications, or
+                // poll_interval without them), a reset of the target (its
+                // notifications, or its id checked every poll_interval without
+                // them) or cancellation.
+                if caught_up && notices.is_some() {
+                    let _ = tx.send(ReplicationEvent::Paused).await;
+                }
+                let mut deadline = tokio::time::Instant::now() + poll_interval;
+                loop {
+                    tokio::select! {
+                        notice = next_notice(&mut notices), if notices.is_some() => {
+                            match notice {
+                                Err(broadcast::error::RecvError::Closed) => {
+                                    notices = None; // poll from now on
+                                }
+                                Ok(notice) => reset |= notice.reset,
+                                Err(broadcast::error::RecvError::Lagged(_)) => {}
                             }
-                            Ok(_) => {}
-                            Err(broadcast::error::RecvError::Closed) => {
-                                target_notices = None; // check its id from now on
-                                deadline = tokio::time::Instant::now() + poll_interval;
+                            if let Some(rx) = notices.as_mut() {
+                                reset |= drain_notices(rx).reset;
                             }
-                            Err(broadcast::error::RecvError::Lagged(_)) => {
-                                if ids_changed().await {
+                            break;
+                        }
+                        _ = tokio::time::sleep_until(deadline), if notices.is_none() => break,
+                        notice = next_notice(&mut target_notices), if target_notices.is_some() => {
+                            match notice {
+                                Ok(notice) if notice.reset => {
+                                    reset = true;
                                     break;
+                                }
+                                Ok(_) => {}
+                                Err(broadcast::error::RecvError::Closed) => {
+                                    target_notices = None; // check its id from now on
+                                    deadline = tokio::time::Instant::now() + poll_interval;
+                                }
+                                Err(broadcast::error::RecvError::Lagged(_)) => {
+                                    if ids_changed().await {
+                                        break;
+                                    }
                                 }
                             }
                         }
-                    }
-                    _ = tokio::time::sleep_until(deadline),
-                        if notices.is_some() && target_notices.is_none() =>
-                    {
-                        if ids_changed().await {
-                            break;
+                        _ = tokio::time::sleep_until(deadline),
+                            if notices.is_some() && target_notices.is_none() =>
+                        {
+                            if ids_changed().await {
+                                break;
+                            }
+                            deadline = tokio::time::Instant::now() + poll_interval;
                         }
-                        deadline = tokio::time::Instant::now() + poll_interval;
+                        _ = cancel_clone.cancelled() => break 'live,
                     }
-                    _ = cancel_clone.cancelled() => break 'live,
                 }
             }
+        };
+        tokio::select! {
+            biased;
+            _ = cancel_clone.cancelled() => {},
+            _ = tx.closed() => {},
+            _ = worker => {},
         }
 
-        // Emit a single terminal Complete on exit.
+        // A cancelled worker must never wait for room in the event queue.
+        // Preserve the last completed pass when a terminal event fits.
         if let Some(result) = last_result {
-            let _ = tx.send(ReplicationEvent::Complete(result)).await;
+            if cancel_clone.is_cancelled() {
+                let _ = tx.try_send(ReplicationEvent::Complete(result));
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancel_clone.cancelled() => {},
+                    _ = tx.send(ReplicationEvent::Complete(result)) => {},
+                }
+            }
         }
     });
 
@@ -2119,6 +2142,7 @@ mod tests {
         /// fail, while `id()` falls back to this value (as an HTTP adapter may
         /// without a server answer).
         offline_id: Option<String>,
+        pending_changes: Option<Arc<tokio::sync::Notify>>,
     }
 
     struct Faulty {
@@ -2196,6 +2220,11 @@ mod tests {
             self.inner.all_docs(opts).await
         }
         async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
+            let pending = self.faults.lock().unwrap().pending_changes.clone();
+            if let Some(entered) = pending {
+                entered.notify_one();
+                return std::future::pending().await;
+            }
             self.check_online()?;
             self.changes_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3346,5 +3375,64 @@ mod tests {
             matches!(events.last(), Some(ReplicationEvent::Complete(r)) if r.ok),
             "{events:?}"
         );
+    }
+    #[tokio::test]
+    async fn audit_regression_cancel_closes_full_event_queue() {
+        let source = Arc::new(MemoryAdapter::new("source"));
+        for i in 0..100 {
+            put_doc(source.as_ref(), &format!("d{i}"), serde_json::json!({})).await;
+        }
+        let target = Arc::new(MemoryAdapter::new("target"));
+        let (mut rx, handle) = replicate_live(
+            source,
+            target.clone(),
+            ReplicationOptions {
+                batch_size: 1,
+                ..Default::default()
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while rx.len() < 64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("event queue should fill");
+        handle.cancel();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !rx.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancellation must close a full event queue without a reader");
+        let written = target.info().await.unwrap().doc_count;
+        assert!(written < 100, "cancel must stop the current pass");
+        while rx.recv().await.is_some() {}
+        assert_eq!(target.info().await.unwrap().doc_count, written);
+    }
+
+    #[tokio::test]
+    async fn audit_regression_cancel_interrupts_pending_adapter_call() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let source = Arc::new(Faulty::new(
+            MemoryAdapter::new("source"),
+            Faults {
+                pending_changes: Some(entered.clone()),
+                ..Default::default()
+            },
+        ));
+        let (mut rx, handle) = replicate_live(
+            source.clone(),
+            Arc::new(MemoryAdapter::new("target")),
+            ReplicationOptions::default(),
+        );
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        handle.cancel();
+        remaining_events(&mut rx).await;
+        // Only this test's reference remains after the worker has exited.
+        assert_eq!(Arc::strong_count(&source), 1);
     }
 }

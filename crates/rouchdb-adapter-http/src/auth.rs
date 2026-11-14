@@ -101,11 +101,13 @@ impl AuthClient {
 
     /// Log out (delete session cookie).
     pub async fn logout(&self) -> Result<()> {
-        self.client
+        let response = self
+            .client
             .delete(format!("{}/_session", self.server_url))
             .send()
             .await
             .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+        crate::check_response(response).await?;
         Ok(())
     }
 
@@ -202,5 +204,26 @@ mod tests {
             *requests.lock().unwrap(),
             vec!["PUT /_users/org.couchdb.user%3Abob%2Fevil%23x%3Fy%20z HTTP/1.1"]
         );
+    }
+    #[tokio::test]
+    async fn audit_regression_logout_reports_http_failures() {
+        use rouchdb_core::error::RouchError;
+        for (status, body) in [
+            (
+                "401 Unauthorized",
+                r#"{"error":"unauthorized","reason":"login required"}"#,
+            ),
+            (
+                "500 Internal Server Error",
+                r#"{"error":"internal_server_error","reason":"session store offline"}"#,
+            ),
+        ] {
+            let (url, _) = recording_stub_server(json_response(status, body)).await;
+            let result = AuthClient::new(&url).logout().await;
+            match status {
+                "401 Unauthorized" => assert!(matches!(result, Err(RouchError::Unauthorized))),
+                _ => assert!(matches!(result, Err(RouchError::DatabaseError(_)))),
+            }
+        }
     }
 }
