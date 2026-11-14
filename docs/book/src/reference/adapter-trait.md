@@ -71,6 +71,8 @@ pub trait Adapter: Send + Sync {
 
     // Methods with default implementations:
 
+    fn subscribe(&self) -> Option<tokio::sync::broadcast::Receiver<ChangeNotice>> { None }
+
     async fn close(&self) -> Result<()> { Ok(()) }
 
     async fn purge(
@@ -107,7 +109,8 @@ pub trait Adapter: Send + Sync {
 **Behavior contract:**
 
 - With default `GetOptions`: returns the winning revision of the document. Returns `RouchError::NotFound` if the document does not exist or the winning revision is a deletion.
-- With `opts.rev = Some(rev)`: returns the specific revision, even if it is not the winner. Returns `NotFound` if that revision does not exist.
+- With `opts.rev = Some(rev)`: returns the specific revision, even if it is not the winner. Returns `NotFound` if that revision does not exist (including revisions stemmed by the revision limit or compacted away) and `InvalidRev` if `rev` is malformed. A 32-digit hex revision id is case-insensitive (CouchDB stores it in lower case).
+- An id starting with `_local/` reads the local document of that name (as CouchDB does).
 - With `opts.conflicts = true`: the returned document includes information about conflicting leaf revisions.
 - With `opts.open_revs = Some(OpenRevs::All)`: returns all leaf revisions of the document.
 - With `opts.revs = true`: includes full revision history in the response.
@@ -162,8 +165,9 @@ This distinction is critical for correct replication behavior. When documents ar
 - Returns documents sorted by `_id` in CouchDB collation order.
 - Supports key range filtering via `start_key`, `end_key`, `key`, and `keys`.
 - When `include_docs` is true, the full document body is included in each row.
-- Deleted documents are excluded from results unless requested by specific key.
-- Supports `descending` order, `skip`, and `limit` for pagination.
+- Deleted documents are excluded from results unless requested with `keys`.
+- With `keys`, one row per requested key in request order (reversed for `descending`, duplicates kept): a deleted document is a row with `value.deleted == Some(true)` and no `doc`, an unknown ID is `AllDocsRow::not_found(key)`.
+- Supports `descending` order, `skip`, and `limit` for pagination (with `keys`, they count every row, error rows included).
 
 **`changes` behavior contract:**
 
@@ -172,6 +176,8 @@ This distinction is critical for correct replication behavior. When documents ar
 - When `include_docs` is true, the full document body is included.
 - Supports `limit` to cap the number of results, `descending` for reverse order, and `doc_ids` to filter by specific document IDs.
 - The `last_seq` in the response can be passed as `since` in the next call for incremental polling.
+
+**`subscribe` (optional):** an adapter that can announce its changes returns a `tokio::sync::broadcast::Receiver<ChangeNotice>` and sends one `ChangeNotice::new(seq, doc_id)` per changed document once the write is committed (visible to readers); local documents are not announced. The default returns `None`. Live changes streams and live replication wait on these notices and poll `changes` only for adapters without them. The memory and redb adapters implement it; the HTTP adapter does not. Notices are wake-ups: a subscriber that lags (`RecvError::Lagged`) re-reads the changes feed from its last sequence. An adapter that implements it must also send `ChangeNotice::reset()` (`reset: true`) once `destroy` has emptied the database and renewed its `id`: live replication listens for it on both peers, so a target destroyed while the source is idle is refilled. Adapters without notices have their `id` compared every `poll_interval` instead.
 
 **When they are called:** `all_docs` is called by `Database::all_docs` and internally by the Mango query engine and map/reduce views. `changes` is called by `Database::changes` and is the starting point of every replication cycle.
 
@@ -269,7 +275,7 @@ This is why local documents are excluded from replication -- each side maintains
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `compact` | `async fn compact(&self) -> Result<()>` | Remove old (non-leaf) revisions and clean up unreferenced attachment data. |
-| `destroy` | `async fn destroy(&self) -> Result<()>` | Destroy the database and all its data. After calling this, the adapter should not be used. |
+| `destroy` | `async fn destroy(&self) -> Result<()>` | Destroy the database and all its data (local documents and security included). The adapter stays usable and behaves as a new, empty database (the http adapter re-creates the remote database on its next use). |
 | `close` | `async fn close(&self) -> Result<()>` | Release resources (default: no-op). |
 | `purge` | `async fn purge(&self, req: HashMap<String, Vec<String>>) -> Result<PurgeResponse>` | Permanently remove specific revisions. Purged revisions do not replicate. Default returns an error. |
 | `get_security` | `async fn get_security(&self) -> Result<SecurityDocument>` | Get the database security document (default: empty document). |
@@ -307,7 +313,8 @@ pub struct MyAdapter { /* ... */ }
 #[async_trait]
 impl Adapter for MyAdapter {
     async fn info(&self) -> Result<DbInfo> {
-        // ...
+        // db_name, doc_count, doc_del_count, update_seq
+        Ok(DbInfo::new("mydb", 0, 0, 0))
     }
 
     async fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
@@ -317,6 +324,8 @@ impl Adapter for MyAdapter {
     // ... implement all other methods
 }
 ```
+
+The result types adapters return are `#[non_exhaustive]`: build them with their constructors (`DbInfo::new`, `DocResult::ok` / `DocResult::error`, `AllDocsResponse::new`, `AllDocsRow::document` / `not_found`, `ChangesResponse::new`, `ChangeEvent::new`, `RevsDiffResponse::new`, `BulkGetResponse::new`, `BulkGetDoc::ok` / `error`, `PurgeResponse::new`, `ChangeNotice::new`, ...). See [Building Results](../guides/adapters.md#building-results) and [API Stability](api-stability.md).
 
 Then use it with `Database`:
 

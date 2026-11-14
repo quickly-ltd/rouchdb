@@ -67,9 +67,18 @@ fn generate_replication_id(source_id: &str, target_id: &str) -> String {
 }
 ```
 
-This ID is used as the key for checkpoint documents on both sides. The same
-source+target pair always produces the same ID, so a replication that is
-stopped and restarted will find its previous checkpoint.
+The inputs are the peers' identities (`Adapter::id()`, not their names) and
+a fingerprint of the filter. This ID is used as the key for checkpoint
+documents on both sides. The same source+target pair always produces the
+same ID, so a replication that is stopped and restarted will find its
+previous checkpoint.
+
+When both peers report the **same** identity, the two directions (and any
+other such pair) would share one ID, and a pass could resume from a
+checkpoint another replication wrote, skipping documents. Checkpoints are
+then neither read nor written: every run scans the whole changes feed, and
+the result lists a warning (`ReplicationResult::warnings`, and a
+`ReplicationEvent::Warning` when events are streamed).
 
 A random `session_id` (UUID v4) is also generated per replication run to
 detect stale checkpoints.
@@ -261,7 +270,7 @@ pub struct ReplicationOptions {
   `bulk_get`. `Custom` filters after fetching changes.
 - `live` -- enable continuous replication mode.
 - `retry` -- automatically retry on transient errors in live mode.
-- `poll_interval` -- how often to poll for new changes in live mode.
+- `poll_interval` -- how often to poll for new changes in live mode, when the source cannot announce them (`Adapter::subscribe`).
 - `back_off_function` -- custom backoff for retries; receives retry count,
   returns delay duration.
 
@@ -335,7 +344,8 @@ continuous loop:
  │         │                                        │
  │    emit Paused                                   │
  │         │                                        │
- │    sleep(poll_interval)                          │
+ │    wait: source change notice, or               │
+ │    sleep(poll_interval) without notices         │
  │         │                                        │
  │    ┌────▼────┐                                   │
  │    │cancelled?│──yes──→ stop                     │
@@ -352,12 +362,24 @@ Key implementation details:
   `handle.cancel()` or dropping the handle stops the loop.
 - **Event channel:** A `tokio::sync::mpsc::Sender<ReplicationEvent>`
   streams progress events (`Active`, `Change`, `Complete`, `Paused`,
-  `Error`) to the caller.
+  `Error`, `Warning`) to the caller.
 - **Retry with backoff:** When `retry: true` and an error occurs, the loop
   sleeps for `back_off_function(retry_count)` before retrying. The retry
   counter resets after a successful cycle.
-- **Poll interval:** Between successful cycles where no changes were found,
-  the loop sleeps for `poll_interval` before checking again.
+- **Waiting for changes:** When the source announces its changes
+  (`Adapter::subscribe`, as the memory and redb adapters do), the loop
+  subscribes before the first pass and, once caught up (emitting `Paused`),
+  waits for the next notice: a local write is replicated immediately and a
+  change made during a pass triggers another pass. A source that cannot
+  announce changes (a remote CouchDB) is polled: between cycles the loop
+  sleeps for `poll_interval`.
+- **Resets:** every pass compares both peers' `Adapter::id()` with the ones
+  its cursor belongs to and starts over (new checkpointer, cursor from the
+  new pair's checkpoint) when one changed. While waiting, the loop also
+  listens to the target's notices for a `ChangeNotice::reset()` (sent by
+  `destroy`), and compares the ids of a target without notices every
+  `poll_interval`, so a target destroyed and reused while the source is
+  idle is refilled without waiting for a source change.
 
 ## Event Streaming
 

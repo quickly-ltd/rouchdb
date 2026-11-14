@@ -13,7 +13,8 @@ use rouchdb::Database;
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `memory` | `fn memory(name: &str) -> Self` | Create an in-memory database. Data is lost when the `Database` is dropped. Useful for testing. |
-| `open` | `fn open(path: impl AsRef<Path>, name: &str) -> Result<Self>` | Open or create a persistent database backed by [redb](https://github.com/cberner/redb). Returns an error if the file cannot be opened or created. |
+| `open` | `fn open(path: impl AsRef<Path>, name: &str) -> Result<Self>` | Open or create a persistent database backed by [redb](https://github.com/cberner/redb). Returns an error if the file cannot be opened or created, and `RouchError::UpgradeRequired` (without modifying it) for a file written by rouchdb 0.4 or earlier. |
+| `open_with` | `fn open_with(path: impl AsRef<Path>, name: &str, options: OpenOptions) -> Result<Self>` | Like `open`; `OpenOptions::new().upgrade(UpgradePolicy::WithBackup(None))` upgrades a 0.4 file after writing a verified backup (see [Migrating from 0.4 to 0.5](../upgrading/0.4-to-0.5.md#redb-files-upgrade-once-explicitly)). |
 | `http` | `fn http(url: &str) -> Self` | Connect to a remote CouchDB-compatible server. The URL should include the database name (e.g., `http://localhost:5984/mydb`). |
 | `http_with_auth` | `fn http_with_auth(url: &str, auth: &AuthClient) -> Self` | Connect to CouchDB with cookie authentication. The `AuthClient` must have been logged in via `auth.login()` first. |
 | `from_adapter` | `fn from_adapter(adapter: Arc<dyn Adapter>) -> Self` | Create a `Database` from any custom adapter implementation. Use this when you need to provide your own storage backend. |
@@ -45,7 +46,7 @@ These methods correspond to CouchDB's core document API. See the [Core Types Ref
 | `post` | `async fn post(&self, data: serde_json::Value)` | `Result<DocResult>` | Create a new document with an auto-generated UUID v4 as the ID. Equivalent to PouchDB's `db.post()`. |
 | `put` | `async fn put(&self, id: &str, data: serde_json::Value)` | `Result<DocResult>` | Create a new document. If a document with the same `_id` already exists and has no previous revision, this creates it; otherwise it may conflict. |
 | `update` | `async fn update(&self, id: &str, rev: &str, data: serde_json::Value)` | `Result<DocResult>` | Update an existing document. You must provide the current `_rev` string. Returns `RouchError::Conflict` if the rev does not match. |
-| `remove` | `async fn remove(&self, id: &str, rev: &str)` | `Result<DocResult>` | Delete a document by marking it as deleted. Requires the current `_rev`. The document remains in the database as a deletion tombstone. |
+| `remove` | `async fn remove(&self, id: &str, rev: &str)` | `Result<DocResult>` | Delete a document by marking it as deleted. Requires the current `_rev`. The document remains in the database as a deletion tombstone. Like CouchDB's `DELETE`, a missing or already deleted document is `RouchError::NotFound`. |
 | `bulk_docs` | `async fn bulk_docs(&self, docs: Vec<Document>, opts: BulkDocsOptions)` | `Result<Vec<DocResult>>` | Write multiple documents atomically. See [`BulkDocsOptions`](core-types.md) for user mode vs. replication mode. |
 | `all_docs` | `async fn all_docs(&self, opts: AllDocsOptions)` | `Result<AllDocsResponse>` | Query all documents, optionally filtered by key range. Supports pagination, descending order, and including full document bodies. |
 | `changes` | `async fn changes(&self, opts: ChangesOptions)` | `Result<ChangesResponse>` | Get the list of changes since a given sequence. Used for change tracking, live feeds, and replication. |
@@ -69,8 +70,8 @@ db.remove("user:alice", &updated.rev.unwrap()).await?;
 
 // Bulk write
 let docs = vec![
-    Document { id: "a".into(), rev: None, deleted: false, data: json!({}), attachments: HashMap::new() },
-    Document { id: "b".into(), rev: None, deleted: false, data: json!({}), attachments: HashMap::new() },
+    Document::new("a", json!({})),
+    Document::new("b", json!({})),
 ];
 let results = db.bulk_docs(docs, BulkDocsOptions::new()).await?;
 
@@ -192,7 +193,7 @@ All replication methods implement the CouchDB replication protocol: checkpoint r
 | `checkpoint` | `bool` | `true` | Set to `false` to disable checkpoint saving/reading. |
 | `live` | `bool` | `false` | Enable continuous replication (used with `replicate_to_live`). |
 | `retry` | `bool` | `false` | Automatically retry on failure (live mode). |
-| `poll_interval` | `Duration` | `500ms` | How often to poll for new changes in live mode. |
+| `poll_interval` | `Duration` | `500ms` | How often to poll for new changes in live mode when the adapter cannot announce them (`Adapter::subscribe` returns `None`, e.g. HTTP); memory and redb wake the stream up on each change. |
 | `back_off_function` | `Option<Box<dyn Fn(u32) -> Duration>>` | `None` | Custom backoff function for retries. Receives retry count, returns delay. |
 
 ### ReplicationFilter
@@ -252,7 +253,7 @@ println!("Index: {} ({})", explanation.index.name, explanation.index.index_type)
 
 | Method | Signature | Return Type | Description |
 |--------|-----------|-------------|-------------|
-| `put_design` | `async fn put_design(&self, ddoc: DesignDocument)` | `Result<DocResult>` | Create or update a design document. |
+| `put_design` | `async fn put_design(&self, ddoc: DesignDocument)` | `Result<DocResult>` | Create or update a design document, written exactly as given (`DesignDocument` keeps every member, so a `get_design` + `put_design` round trip is lossless). Like `put`, a failed write (e.g. `RouchError::Conflict`) is an error. |
 | `get_design` | `async fn get_design(&self, name: &str)` | `Result<DesignDocument>` | Retrieve a design document by short name (without `_design/` prefix). |
 | `delete_design` | `async fn delete_design(&self, name: &str, rev: &str)` | `Result<DocResult>` | Delete a design document. |
 | `view_cleanup` | `async fn view_cleanup(&self)` | `Result<()>` | Remove unused view indexes. |
@@ -308,7 +309,7 @@ See the [Plugins](../guides/plugins.md) guide for details.
 | `close` | `async fn close(&self)` | `Result<()>` | Close the database connection. No-op for HTTP adapter. |
 | `compact` | `async fn compact(&self)` | `Result<()>` | Compact the database: removes old revisions and cleans up unreferenced attachment data. |
 | `purge` | `async fn purge(&self, id: &str, revs: Vec<String>)` | `Result<PurgeResponse>` | Permanently remove specific revisions of a document. Unlike `remove()`, purged revisions do not replicate. |
-| `destroy` | `async fn destroy(&self)` | `Result<()>` | Destroy the database and all its data. This is irreversible. |
+| `destroy` | `async fn destroy(&self)` | `Result<()>` | Destroy the database and all its data (local documents, attachments, security and Mango indexes included). This is irreversible. The handle stays usable as a new, empty database; an http database is re-created on its next use. |
 
 ---
 

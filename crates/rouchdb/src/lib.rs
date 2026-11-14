@@ -30,6 +30,12 @@
 //! # }
 //! ```
 
+// The README's Rust examples are compiled (and run) as doctests of this
+// crate, so they cannot drift from the API.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeDoctests;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -37,16 +43,19 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // Re-export core types
-pub use rouchdb_core::adapter::Adapter;
+pub use rouchdb_core::adapter::{Adapter, ChangeNotice};
 pub use rouchdb_core::document::*;
 pub use rouchdb_core::error::{Result, RouchError};
+pub use rouchdb_core::json::MAX_NESTING_DEPTH;
 pub use rouchdb_core::merge::{is_deleted, winning_rev};
 
 // Re-export adapters
-pub use rouchdb_adapter_http::HttpAdapter;
 pub use rouchdb_adapter_http::auth::{AuthClient, Session, UserContext};
+pub use rouchdb_adapter_http::{HttpAdapter, HttpAdapterOptions};
 pub use rouchdb_adapter_memory::MemoryAdapter;
-pub use rouchdb_adapter_redb::RedbAdapter;
+pub use rouchdb_adapter_redb::{
+    DiscardedRevision, OpenOptions, RedbAdapter, StoredFormat, UpgradePolicy, UpgradeReport,
+};
 
 // Re-export subsystems
 pub use rouchdb_changes::{
@@ -54,9 +63,10 @@ pub use rouchdb_changes::{
     LiveChangesStream, live_changes, live_changes_events,
 };
 pub use rouchdb_query::{
-    BuiltIndex, CreateIndexResponse, ExplainIndex, ExplainResponse, FindOptions, FindResponse,
-    IndexDefinition, IndexFields, IndexInfo, ReduceFn, SortField, StaleOption, ViewQueryOptions,
-    ViewResult, build_index, find, matches_selector, query_view,
+    BuiltIndex, CompiledSelector, CreateIndexResponse, ExplainIndex, ExplainResponse, FindOptions,
+    FindResponse, IndexDefinition, IndexFields, IndexInfo, ReduceFn, SortDirection, SortField,
+    StaleOption, ViewQueryOptions, ViewResult, build_index, find, find_in_docs, matches_selector,
+    query_view,
 };
 pub use rouchdb_views::{DesignDocument, PersistentViewIndex, ViewDef, ViewEngine};
 
@@ -67,16 +77,33 @@ pub use rouchdb_replication::{
 
 /// Plugin trait for extending Database behavior.
 ///
-/// Plugins receive lifecycle hooks during database operations.
+/// Plugins receive lifecycle hooks during database operations, including
+/// documents replicated into the database.
 #[async_trait::async_trait]
 pub trait Plugin: Send + Sync {
     /// The plugin name.
     fn name(&self) -> &str;
-    /// Called before documents are written.
+    /// Called before documents are written; may modify them or reject the
+    /// write with an error.
+    ///
+    /// For replicated documents it acts like a CouchDB `validate_doc_update`:
+    /// it is called once per document, changes it makes are ignored (the
+    /// source's body is kept under the source's revision id), and a document
+    /// it drops or rejects with `Forbidden`, `Unauthorized` or `BadRequest`
+    /// is reported as denied while the rest of the batch is still written.
+    ///
+    /// `put_attachment` and `remove_attachment` call it with the revision
+    /// they create: the parent's body and its attachments with the change
+    /// applied (a new attachment carries its data). It can reject the write
+    /// (the error is returned unchanged, and dropping the document is
+    /// `Forbidden`), but its changes are ignored: the stored body already
+    /// went through the plugins when it was written.
     async fn before_write(&self, _docs: &mut Vec<Document>) -> Result<()> {
         Ok(())
     }
-    /// Called after documents are written.
+    /// Called after documents (or attachments) were written. The write is
+    /// already committed: an error is returned to the caller but does not
+    /// undo it, so retrying the same write will conflict.
     async fn after_write(&self, _results: &[DocResult]) -> Result<()> {
         Ok(())
     }
@@ -86,13 +113,285 @@ pub trait Plugin: Send + Sync {
     }
 }
 
+/// Runs a database's plugins around writes that do not go through
+/// `Database::bulk_docs`: it is the adapter replication writes into.
+struct PluginAdapter {
+    inner: Arc<dyn Adapter>,
+    plugins: Vec<Arc<dyn Plugin>>,
+}
+
+/// The per-doc error a plugin rejection is reported as, if it is a
+/// rejection that retrying cannot fix.
+fn denial(error: &RouchError) -> Option<&'static str> {
+    match error {
+        RouchError::Forbidden(_) | RouchError::BadRequest(_) => Some("forbidden"),
+        RouchError::Unauthorized => Some("unauthorized"),
+        _ => None,
+    }
+}
+
+impl PluginAdapter {
+    /// Run `before_write` on the revision an attachment write creates: the
+    /// document at `rev` with `edit` applied to its attachments (a document
+    /// with no body when `rev` cannot be read, which the write itself then
+    /// reports). As for replicated documents, plugins only accept or reject
+    /// it: the stored body already went through them, so their changes are
+    /// not applied. A rejection is returned as is; dropping the document is
+    /// `Forbidden`.
+    async fn validate_attachment_edit(
+        &self,
+        doc_id: &str,
+        rev: &str,
+        edit: impl FnOnce(&mut HashMap<String, AttachmentMeta>),
+    ) -> Result<()> {
+        let opts = GetOptions {
+            rev: Some(rev.to_string()),
+            ..Default::default()
+        };
+        let mut doc = match self.inner.get(doc_id, opts).await {
+            Ok(doc) => doc,
+            Err(_) => Document {
+                id: doc_id.to_string(),
+                rev: rev.parse().ok(),
+                deleted: false,
+                data: serde_json::json!({}),
+                attachments: HashMap::new(),
+            },
+        };
+        doc.deleted = false;
+        edit(&mut doc.attachments);
+        let mut docs = vec![doc];
+        for plugin in &self.plugins {
+            plugin.before_write(&mut docs).await?;
+            if docs.is_empty() {
+                return Err(RouchError::Forbidden(format!(
+                    "dropped by plugin {}",
+                    plugin.name()
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Adapter for PluginAdapter {
+    async fn info(&self) -> Result<DbInfo> {
+        self.inner.info().await
+    }
+
+    async fn id(&self) -> Result<String> {
+        self.inner.id().await
+    }
+
+    async fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
+        self.inner.get(id, opts).await
+    }
+
+    async fn bulk_docs(
+        &self,
+        docs: Vec<Document>,
+        opts: BulkDocsOptions,
+    ) -> Result<Vec<DocResult>> {
+        // Validate each doc on its own so one rejected doc is reported as
+        // denied instead of failing (and forever blocking) the whole batch.
+        // Plugins only accept or reject replicated docs: the original body
+        // is written, since a changed body stored under the source's
+        // revision id would silently diverge from it for good.
+        let mut accepted = Vec::with_capacity(docs.len());
+        let mut denied = Vec::new();
+        for doc in docs {
+            let mut probe = vec![doc.clone()];
+            let mut outcome = Ok(());
+            for plugin in &self.plugins {
+                outcome = plugin.before_write(&mut probe).await;
+                if outcome.is_err() {
+                    break;
+                }
+                if probe.is_empty() {
+                    outcome = Err(RouchError::Forbidden(format!(
+                        "dropped by plugin {}",
+                        plugin.name()
+                    )));
+                    break;
+                }
+            }
+            match outcome {
+                Ok(()) => accepted.push(doc),
+                Err(e) => match denial(&e) {
+                    Some(kind) => denied.push(DocResult::error(doc.id, kind, e.to_string())),
+                    None => return Err(e),
+                },
+            }
+        }
+
+        let written: Vec<(String, Option<String>)> = accepted
+            .iter()
+            .map(|d| (d.id.clone(), d.rev.as_ref().map(|r| r.to_string())))
+            .collect();
+        let mut results = if accepted.is_empty() {
+            Vec::new()
+        } else {
+            self.inner.bulk_docs(accepted, opts.clone()).await?
+        };
+        // CouchDB answers new_edits=false writes with only the failures;
+        // report the rest as written so after_write sees every doc.
+        if !opts.new_edits && results.len() < written.len() {
+            let failed: std::collections::HashSet<String> =
+                results.iter().map(|r| r.id.clone()).collect();
+            for (id, rev) in written {
+                if !failed.contains(&id) {
+                    let mut written = DocResult::ok(id, "");
+                    written.rev = rev;
+                    results.push(written);
+                }
+            }
+        }
+        for plugin in &self.plugins {
+            plugin.after_write(&results).await?;
+        }
+        results.extend(denied);
+        Ok(results)
+    }
+
+    async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
+        self.inner.all_docs(opts).await
+    }
+
+    async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
+        self.inner.changes(opts).await
+    }
+
+    async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
+        self.inner.revs_diff(revs).await
+    }
+
+    async fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
+        self.inner.bulk_get(docs).await
+    }
+
+    async fn put_attachment(
+        &self,
+        doc_id: &str,
+        att_id: &str,
+        rev: &str,
+        data: Vec<u8>,
+        content_type: &str,
+    ) -> Result<DocResult> {
+        let attachment = AttachmentMeta::new(content_type, data.clone());
+        self.validate_attachment_edit(doc_id, rev, |atts| {
+            atts.insert(att_id.to_string(), attachment);
+        })
+        .await?;
+        let result = self
+            .inner
+            .put_attachment(doc_id, att_id, rev, data, content_type)
+            .await?;
+        for plugin in &self.plugins {
+            plugin.after_write(std::slice::from_ref(&result)).await?;
+        }
+        Ok(result)
+    }
+
+    async fn get_attachment(
+        &self,
+        doc_id: &str,
+        att_id: &str,
+        opts: GetAttachmentOptions,
+    ) -> Result<Vec<u8>> {
+        self.inner.get_attachment(doc_id, att_id, opts).await
+    }
+
+    async fn remove_attachment(&self, doc_id: &str, att_id: &str, rev: &str) -> Result<DocResult> {
+        self.validate_attachment_edit(doc_id, rev, |atts| {
+            atts.remove(att_id);
+        })
+        .await?;
+        let result = self.inner.remove_attachment(doc_id, att_id, rev).await?;
+        for plugin in &self.plugins {
+            plugin.after_write(std::slice::from_ref(&result)).await?;
+        }
+        Ok(result)
+    }
+
+    async fn get_local(&self, id: &str) -> Result<serde_json::Value> {
+        self.inner.get_local(id).await
+    }
+
+    async fn put_local(&self, id: &str, doc: serde_json::Value) -> Result<()> {
+        self.inner.put_local(id, doc).await
+    }
+
+    async fn remove_local(&self, id: &str) -> Result<()> {
+        self.inner.remove_local(id).await
+    }
+
+    async fn compact(&self) -> Result<()> {
+        self.inner.compact().await
+    }
+
+    async fn destroy(&self) -> Result<()> {
+        self.inner.destroy().await
+    }
+
+    fn subscribe(&self) -> Option<tokio::sync::broadcast::Receiver<ChangeNotice>> {
+        self.inner.subscribe()
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.inner.close().await
+    }
+
+    async fn purge(&self, req: HashMap<String, Vec<String>>) -> Result<PurgeResponse> {
+        self.inner.purge(req).await
+    }
+
+    async fn get_security(&self) -> Result<SecurityDocument> {
+        self.inner.get_security().await
+    }
+
+    async fn put_security(&self, doc: SecurityDocument) -> Result<()> {
+        self.inner.put_security(doc).await
+    }
+}
+
 /// A high-level database handle that wraps any adapter implementation.
 ///
 /// Provides a user-friendly API similar to PouchDB's JavaScript interface.
 pub struct Database {
     adapter: Arc<dyn Adapter>,
-    indexes: Arc<RwLock<HashMap<String, BuiltIndex>>>,
+    /// Set for `http()` databases, whose Mango queries and indexes run on
+    /// the server.
+    remote: Option<Arc<HttpAdapter>>,
+    indexes: Arc<RwLock<HashMap<String, MangoIndex>>>,
     plugins: Vec<Arc<dyn Plugin>>,
+}
+
+/// A Mango index kept up to date from the changes feed.
+struct MangoIndex {
+    built: BuiltIndex,
+    /// Sequence of the last change applied to the index.
+    last_seq: Seq,
+}
+
+/// Name of an index whose first field the selector constrains (the one
+/// with the smallest name if several are usable).
+fn usable_index(
+    indexes: &HashMap<String, MangoIndex>,
+    selector: &serde_json::Value,
+) -> Option<String> {
+    indexes
+        .iter()
+        .filter(|(_, index)| {
+            index.built.def.fields.first().is_some_and(|first| {
+                first
+                    .try_field_and_direction()
+                    .is_ok_and(|(field, _)| selector.get(field).is_some())
+            })
+        })
+        .map(|(name, _)| name)
+        .min()
+        .cloned()
 }
 
 impl Database {
@@ -100,36 +399,79 @@ impl Database {
     pub fn memory(name: &str) -> Self {
         Self {
             adapter: Arc::new(MemoryAdapter::new(name)),
+            remote: None,
             indexes: Arc::new(RwLock::new(HashMap::new())),
             plugins: Vec::new(),
         }
     }
 
     /// Open or create a persistent database backed by redb.
+    ///
+    /// **Files written by rouchdb 0.4 or earlier are not opened**: this
+    /// returns [`RouchError::UpgradeRequired`] and leaves the file untouched.
+    /// Upgrade such a file once with `rouchdb migrate <path>` (which keeps a
+    /// verified backup), [`RedbAdapter::upgrade`], or
+    /// [`Database::open_with`] and [`UpgradePolicy::WithBackup`]. Upgraded
+    /// files, and files created by 0.5, can no longer be opened by 0.4 (it
+    /// refuses them instead of misreading them). See
+    /// [`RedbAdapter::open`] for details.
     pub fn open(path: impl AsRef<Path>, name: &str) -> Result<Self> {
-        let adapter = RedbAdapter::open(path, name)?;
+        Self::open_with(path, name, OpenOptions::default())
+    }
+
+    /// Open or create a persistent database backed by redb, choosing what
+    /// happens to a file written by rouchdb 0.4 or earlier:
+    ///
+    /// ```no_run
+    /// # async fn run() -> rouchdb::Result<()> {
+    /// use rouchdb::{Database, OpenOptions, UpgradePolicy};
+    ///
+    /// // A 0.4 file is upgraded after a verified backup of it is written to
+    /// // `app.redb.rouchdb-0.4.bak`.
+    /// let db = Database::open_with(
+    ///     "app.redb",
+    ///     "app",
+    ///     OpenOptions::new().upgrade(UpgradePolicy::WithBackup(None)),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The first `compact()` after an upgrade deletes the bodies of old
+    /// revisions and attachment bytes only they reference (0.4 never
+    /// compacted): see [`RedbAdapter::upgrade`]. To get the
+    /// [`UpgradeReport`], open the adapter with [`RedbAdapter::open_with`]
+    /// and wrap it with [`Database::from_adapter`].
+    pub fn open_with(path: impl AsRef<Path>, name: &str, options: OpenOptions) -> Result<Self> {
+        let adapter = RedbAdapter::open_with(path, name, options)?;
         Ok(Self {
             adapter: Arc::new(adapter),
+            remote: None,
             indexes: Arc::new(RwLock::new(HashMap::new())),
             plugins: Vec::new(),
         })
     }
 
     /// Connect to a remote CouchDB instance.
+    ///
+    /// Mango queries and indexes (`find`, `create_index`, `get_indexes`,
+    /// `delete_index`, `explain`) run on the server.
     pub fn http(url: &str) -> Self {
-        Self {
-            adapter: Arc::new(HttpAdapter::new(url)),
-            indexes: Arc::new(RwLock::new(HashMap::new())),
-            plugins: Vec::new(),
-        }
+        Self::remote(HttpAdapter::new(url))
     }
 
     /// Connect to a remote CouchDB instance using an authenticated client.
     ///
     /// The `AuthClient` should have been logged in via `auth.login()` first.
     pub fn http_with_auth(url: &str, auth: &AuthClient) -> Self {
+        Self::remote(HttpAdapter::with_auth_client(url, auth))
+    }
+
+    fn remote(adapter: HttpAdapter) -> Self {
+        let adapter = Arc::new(adapter);
         Self {
-            adapter: Arc::new(HttpAdapter::with_auth_client(url, auth)),
+            adapter: adapter.clone(),
+            remote: Some(adapter),
             indexes: Arc::new(RwLock::new(HashMap::new())),
             plugins: Vec::new(),
         }
@@ -139,6 +481,7 @@ impl Database {
     pub fn from_adapter(adapter: Arc<dyn Adapter>) -> Self {
         Self {
             adapter,
+            remote: None,
             indexes: Arc::new(RwLock::new(HashMap::new())),
             plugins: Vec::new(),
         }
@@ -155,9 +498,17 @@ impl Database {
         self.adapter.as_ref()
     }
 
-    /// Get an Arc clone of the underlying adapter.
-    pub fn adapter_arc(&self) -> Arc<dyn Adapter> {
-        self.adapter.clone()
+    /// The adapter writes from outside `bulk_docs` (replication, attachment
+    /// updates) go through, so they run this database's plugins.
+    fn plugin_adapter(&self) -> Arc<dyn Adapter> {
+        if self.plugins.is_empty() {
+            self.adapter.clone()
+        } else {
+            Arc::new(PluginAdapter {
+                inner: self.adapter.clone(),
+                plugins: self.plugins.clone(),
+            })
+        }
     }
 
     // -----------------------------------------------------------------
@@ -181,56 +532,81 @@ impl Database {
 
     /// Create a new document with an auto-generated ID.
     ///
-    /// Equivalent to PouchDB's `db.post(doc)`. Generates a UUID v4 as the
-    /// document ID and calls `put()`.
+    /// Equivalent to PouchDB's `db.post(doc)`. Uses the body's `_id` when it
+    /// has one, otherwise generates a UUID v4, written like CouchDB's ids as
+    /// 32 lowercase hex digits.
     pub async fn post(&self, data: serde_json::Value) -> Result<DocResult> {
-        let id = uuid::Uuid::new_v4().to_string();
-        self.put(&id, data).await
+        let mut doc = Document {
+            id: String::new(),
+            rev: None,
+            deleted: false,
+            data,
+            attachments: HashMap::new(),
+        };
+        doc.prepare_for_write()?;
+        if doc.id.is_empty() {
+            doc.id = uuid::Uuid::new_v4().simple().to_string();
+        }
+        self.write_one(doc).await
     }
 
     /// Create or update a document.
     ///
-    /// If the document doesn't exist, creates it.
-    /// If it does exist, you must provide the current `_rev` in `opts_rev`
-    /// to avoid conflicts.
+    /// If the document doesn't exist, creates it. To update an existing
+    /// document, include its current `_rev` in `data` (or use `update`).
+    /// Special members in `data` are interpreted like CouchDB does
+    /// (`_rev`, `_deleted`, `_attachments`); read-only metadata such as
+    /// `_conflicts` is ignored and any other `_`-prefixed member is rejected.
+    ///
+    /// A failed write (conflict, invalid document, ...) is returned as an
+    /// error, never as `Ok` with `ok: false`.
     pub async fn put(&self, id: &str, data: serde_json::Value) -> Result<DocResult> {
         if id.is_empty() {
             return Err(RouchError::MissingId);
         }
-        let doc = Document {
+        let mut doc = Document {
             id: id.to_string(),
             rev: None,
             deleted: false,
             data,
             attachments: HashMap::new(),
         };
-        let results = self.bulk_docs(vec![doc], BulkDocsOptions::new()).await?;
-        first_result(results)
+        doc.prepare_for_write()?;
+        self.write_one(doc).await
     }
 
     /// Update an existing document (requires providing the current rev).
+    ///
+    /// Returns `RouchError::Conflict` if `rev` is not a current leaf
+    /// revision of the document.
     pub async fn update(&self, id: &str, rev: &str, data: serde_json::Value) -> Result<DocResult> {
         if id.is_empty() {
             return Err(RouchError::MissingId);
         }
         let revision: Revision = rev.parse()?;
-        let doc = Document {
+        let mut doc = Document {
             id: id.to_string(),
             rev: Some(revision),
             deleted: false,
             data,
             attachments: HashMap::new(),
         };
-        let results = self.bulk_docs(vec![doc], BulkDocsOptions::new()).await?;
-        first_result(results)
+        doc.prepare_for_write()?;
+        self.write_one(doc).await
     }
 
     /// Delete a document (requires the current rev).
+    ///
+    /// Like CouchDB's `DELETE` (and PouchDB's `remove`), a document that
+    /// does not exist or is already deleted is `RouchError::NotFound`;
+    /// `RouchError::Conflict` if `rev` is not a current leaf revision of the
+    /// document.
     pub async fn remove(&self, id: &str, rev: &str) -> Result<DocResult> {
         if id.is_empty() {
             return Err(RouchError::MissingId);
         }
         let revision: Revision = rev.parse()?;
+        self.ensure_live(id).await?;
         let doc = Document {
             id: id.to_string(),
             rev: Some(revision),
@@ -238,8 +614,31 @@ impl Database {
             data: serde_json::json!({}),
             attachments: HashMap::new(),
         };
+        self.write_one(doc).await
+    }
+
+    /// `NotFound` unless `id` is a live document (or an existing local
+    /// document), the check CouchDB's `DELETE` makes before writing.
+    async fn ensure_live(&self, id: &str) -> Result<()> {
+        match rouchdb_core::write::local_doc_id(id) {
+            Some(local) => self.adapter.get_local(local).await.map(|_| ()),
+            None => self
+                .adapter
+                .get(id, GetOptions::default())
+                .await
+                .map(|_| ()),
+        }
+    }
+
+    /// Write a single document and turn a failed `DocResult` into an error.
+    async fn write_one(&self, doc: Document) -> Result<DocResult> {
         let results = self.bulk_docs(vec![doc], BulkDocsOptions::new()).await?;
-        first_result(results)
+        let result = first_result(results)?;
+        if result.ok {
+            Ok(result)
+        } else {
+            Err(doc_result_error(result))
+        }
     }
 
     /// Write multiple documents at once.
@@ -267,30 +666,58 @@ impl Database {
     ///
     /// If `opts.selector` is set, changes are fetched with `include_docs: true`
     /// internally and filtered by the Mango selector. Only matching changes are
-    /// returned.
+    /// returned; `limit` counts matching changes, and when it is reached
+    /// `last_seq` is the sequence of the last change returned. An invalid
+    /// selector returns `BadRequest`.
     pub async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
-        if let Some(ref selector) = opts.selector {
-            let selector = selector.clone();
-            let user_wants_docs = opts.include_docs;
-            let mut fetch_opts = opts;
-            fetch_opts.include_docs = true;
-            fetch_opts.selector = None; // Don't pass to adapter
-            let mut response = self.adapter.changes(fetch_opts).await?;
-            response.results.retain(|event| {
-                event
-                    .doc
-                    .as_ref()
-                    .is_some_and(|d| matches_selector(d, &selector))
-            });
-            if !user_wants_docs {
-                for event in &mut response.results {
-                    event.doc = None;
+        let Some(ref selector) = opts.selector else {
+            return self.adapter.changes(opts).await;
+        };
+        let selector = CompiledSelector::new(selector)?;
+        let user_wants_docs = opts.include_docs;
+        let limit = opts.limit;
+        let since = opts.since.clone();
+        let mut fetch_opts = ChangesOptions {
+            include_docs: true,
+            selector: None, // Don't pass to adapter
+            ..opts
+        };
+        // The limit applies after filtering, so read in batches until it is
+        // reached (descending feeds cannot be resumed, so read them whole).
+        fetch_opts.limit = match limit {
+            Some(l) if !fetch_opts.descending => Some(l.max(SELECTOR_CHANGES_BATCH)),
+            _ => None,
+        };
+
+        let mut results = Vec::new();
+        let last_seq = loop {
+            let response = self.adapter.changes(fetch_opts.clone()).await?;
+            let fetched = response.results.len() as u64;
+            for event in response.results {
+                if limit.is_some_and(|l| results.len() as u64 >= l) {
+                    break;
+                }
+                if event.doc.as_ref().is_some_and(|d| selector.matches(d)) {
+                    results.push(event);
                 }
             }
-            Ok(response)
-        } else {
-            self.adapter.changes(opts).await
+            if limit.is_some_and(|l| results.len() as u64 >= l) {
+                break results
+                    .last()
+                    .map_or(since, |event: &ChangeEvent| event.seq.clone());
+            }
+            match fetch_opts.limit {
+                Some(batch) if fetched >= batch => fetch_opts.since = response.last_seq,
+                _ => break response.last_seq,
+            }
+        };
+
+        if !user_wants_docs {
+            for event in &mut results {
+                event.doc = None;
+            }
         }
+        Ok(ChangesResponse::new(results, last_seq))
     }
 
     /// Start a live (continuous) changes feed.
@@ -298,54 +725,13 @@ impl Database {
     /// Returns a receiver for `ChangeEvent` and a `ChangesHandle` that can be
     /// used to cancel the stream. Dropping the handle also cancels it.
     ///
-    /// If `opts.selector` is set, events are post-filtered using the Mango
-    /// selector — only matching changes are forwarded through the channel.
+    /// If `opts.selector` is set, only changes whose document matches the
+    /// Mango selector are forwarded through the channel.
     pub fn live_changes(
         &self,
         opts: ChangesStreamOptions,
     ) -> (tokio::sync::mpsc::Receiver<ChangeEvent>, ChangesHandle) {
-        if let Some(selector) = opts.selector.clone() {
-            let user_wants_docs = opts.include_docs;
-            // Push the selector into the stream's filter so `limit` counts only
-            // matching changes (composing with any pre-existing filter).
-            let existing = opts.filter.clone();
-            let filter: ChangesFilter = Arc::new(move |e: &ChangeEvent| {
-                if let Some(ref ex) = existing
-                    && !ex(e)
-                {
-                    return false;
-                }
-                e.doc
-                    .as_ref()
-                    .is_some_and(|d| matches_selector(d, &selector))
-            });
-            let inner_opts = ChangesStreamOptions {
-                include_docs: true, // Need docs for selector evaluation
-                selector: None,
-                filter: Some(filter),
-                ..opts
-            };
-            let (inner_rx, handle) = live_changes(self.adapter.clone(), inner_opts);
-            if user_wants_docs {
-                return (inner_rx, handle);
-            }
-
-            // Strip docs the user did not request.
-            let (tx, rx) = tokio::sync::mpsc::channel(64);
-            tokio::spawn(async move {
-                let mut inner_rx = inner_rx;
-                while let Some(mut event) = inner_rx.recv().await {
-                    event.doc = None;
-                    if tx.send(event).await.is_err() {
-                        break;
-                    }
-                }
-            });
-
-            (rx, handle)
-        } else {
-            live_changes(self.adapter.clone(), opts)
-        }
+        live_changes(self.adapter.clone(), opts)
     }
 
     /// Start a live changes feed with lifecycle events.
@@ -356,54 +742,7 @@ impl Database {
         &self,
         opts: ChangesStreamOptions,
     ) -> (tokio::sync::mpsc::Receiver<ChangesEvent>, ChangesHandle) {
-        if let Some(selector) = opts.selector.clone() {
-            let user_wants_docs = opts.include_docs;
-            // Push the selector into the stream's filter so `limit` counts only
-            // matching changes (composing with any pre-existing filter).
-            let existing = opts.filter.clone();
-            let filter: ChangesFilter = Arc::new(move |e: &ChangeEvent| {
-                if let Some(ref ex) = existing
-                    && !ex(e)
-                {
-                    return false;
-                }
-                e.doc
-                    .as_ref()
-                    .is_some_and(|d| matches_selector(d, &selector))
-            });
-            let inner_opts = ChangesStreamOptions {
-                include_docs: true,
-                selector: None,
-                filter: Some(filter),
-                ..opts
-            };
-            let (inner_rx, handle) = live_changes_events(self.adapter.clone(), inner_opts);
-            if user_wants_docs {
-                return (inner_rx, handle);
-            }
-
-            // Strip docs the user did not request from Change events.
-            let (tx, rx) = tokio::sync::mpsc::channel(64);
-            tokio::spawn(async move {
-                let mut inner_rx = inner_rx;
-                while let Some(event) = inner_rx.recv().await {
-                    let forward = match event {
-                        ChangesEvent::Change(mut ce) => {
-                            ce.doc = None;
-                            ChangesEvent::Change(ce)
-                        }
-                        other => other,
-                    };
-                    if tx.send(forward).await.is_err() {
-                        break;
-                    }
-                }
-            });
-
-            (rx, handle)
-        } else {
-            live_changes_events(self.adapter.clone(), opts)
-        }
+        live_changes_events(self.adapter.clone(), opts)
     }
 
     // -----------------------------------------------------------------
@@ -419,7 +758,7 @@ impl Database {
         data: Vec<u8>,
         content_type: &str,
     ) -> Result<DocResult> {
-        self.adapter
+        self.plugin_adapter()
             .put_attachment(doc_id, att_id, rev, data, content_type)
             .await
     }
@@ -450,7 +789,9 @@ impl Database {
         att_id: &str,
         rev: &str,
     ) -> Result<DocResult> {
-        self.adapter.remove_attachment(doc_id, att_id, rev).await
+        self.plugin_adapter()
+            .remove_attachment(doc_id, att_id, rev)
+            .await
     }
 
     // -----------------------------------------------------------------
@@ -461,116 +802,103 @@ impl Database {
     ///
     /// If a matching index exists (created via `create_index()`), it will be
     /// used to avoid a full table scan. Otherwise falls back to scanning all
-    /// documents.
+    /// documents. The index is brought up to date incrementally from the
+    /// changes feed; invalid selectors or sort fields return `BadRequest`.
+    ///
+    /// On an `http()` database the query runs on the server (`_find`); only
+    /// when the server has no index for the requested sort are the
+    /// documents fetched and queried locally.
+    ///
+    /// # Stack usage
+    ///
+    /// Compiling and matching a selector recurse once per nested object, and
+    /// the selector's depth is not limited. On a 2 MiB thread (the default
+    /// for Tokio workers) a debug build overflows the stack, aborting the
+    /// process, at around 700 levels of nested objects; a release build
+    /// handles a few thousand. Selectors parsed with `serde_json::from_str`
+    /// are safe, because serde_json stops at 127 levels. If you accept
+    /// selectors that may be deeper (from `rouchdb_core::json::from_slice`,
+    /// another parser, or built in code), check their depth first with
+    /// `rouchdb_core::json::value_depth`, or run `find` on threads with a
+    /// larger stack, as `rouchdb-server` does (16 MiB).
     pub async fn find(&self, opts: FindOptions) -> Result<FindResponse> {
-        // Check if we have a usable index
-        let mut indexes = self.indexes.write().await;
+        if let Some(ref remote) = self.remote
+            && let Some(response) = remote_find(remote, &opts).await?
+        {
+            return Ok(response);
+        }
 
-        // Find the name of a usable index (if any)
-        let usable_name = indexes
-            .iter()
-            .find(|(_, idx)| {
-                if idx.def.fields.is_empty() {
-                    return false;
-                }
-                let (first_field, _) = idx.def.fields[0].field_and_direction();
-                opts.selector.get(first_field).is_some()
+        // Validate the query before doing any work.
+        CompiledSelector::new(&opts.selector)?;
+        for sort_field in opts.sort.iter().flatten() {
+            sort_field.try_field_and_direction()?;
+        }
+
+        let usable = usable_index(&*self.indexes.read().await, &opts.selector);
+        let candidate_ids = match usable {
+            Some(name) => self.index_candidates(&name, &opts.selector).await?,
+            None => None,
+        };
+        let Some(candidate_ids) = candidate_ids else {
+            // No usable index — full table scan
+            return find(self.adapter.as_ref(), opts).await;
+        };
+
+        // Fetch only the candidate docs
+        let all = self
+            .adapter
+            .all_docs(AllDocsOptions {
+                include_docs: true,
+                keys: Some(candidate_ids),
+                ..AllDocsOptions::new()
             })
-            .map(|(name, _)| name.clone());
+            .await?;
+        find_in_docs(all.rows.into_iter().filter_map(|row| row.doc), &opts)
+    }
 
-        if let Some(name) = usable_name {
-            // Rebuild the index lazily to pick up any document changes
-            let def = indexes[&name].def.clone();
-            let rebuilt = build_index(self.adapter.as_ref(), &def).await?;
-            indexes.insert(name.clone(), rebuilt);
-
-            let candidate_ids = indexes[&name].find_matching(&opts.selector);
-            drop(indexes);
-
-            // Fetch only the candidate docs
-            let all = self
+    /// Bring index `name` up to date with the changes feed and return the
+    /// ids of the documents that may match `selector`, or `None` if the index
+    /// no longer exists.
+    ///
+    /// Changes are read without holding the lock; the write lock is only
+    /// taken to apply them.
+    async fn index_candidates(
+        &self,
+        name: &str,
+        selector: &serde_json::Value,
+    ) -> Result<Option<Vec<String>>> {
+        loop {
+            let since = match self.indexes.read().await.get(name) {
+                Some(index) => index.last_seq.clone(),
+                None => return Ok(None),
+            };
+            let changes = self
                 .adapter
-                .all_docs(AllDocsOptions {
+                .changes(ChangesOptions {
+                    since: since.clone(),
                     include_docs: true,
-                    keys: Some(candidate_ids),
-                    ..AllDocsOptions::new()
+                    ..Default::default()
                 })
                 .await?;
 
-            let mut matched: Vec<serde_json::Value> = Vec::new();
-            for row in &all.rows {
-                if let Some(ref doc_json) = row.doc
-                    && matches_selector(doc_json, &opts.selector)
-                {
-                    matched.push(doc_json.clone());
-                }
+            if changes.results.is_empty() {
+                let indexes = self.indexes.read().await;
+                return Ok(indexes
+                    .get(name)
+                    .map(|index| index.built.find_matching(selector)));
             }
 
-            // Sort
-            if let Some(ref sort_fields) = opts.sort {
-                matched.sort_by(|a, b| {
-                    use rouchdb_core::collation::collate;
-                    use rouchdb_query::SortDirection;
-                    for sf in sort_fields {
-                        let (field, direction) = sf.field_and_direction();
-                        // Resolve dotted/nested paths (e.g. "address.city")
-                        // identically to the full-scan path in mango::find.
-                        let va = rouchdb_query::get_nested_field(a, field)
-                            .unwrap_or(&serde_json::Value::Null);
-                        let vb = rouchdb_query::get_nested_field(b, field)
-                            .unwrap_or(&serde_json::Value::Null);
-                        let cmp = collate(va, vb);
-                        let cmp = if direction == SortDirection::Desc {
-                            cmp.reverse()
-                        } else {
-                            cmp
-                        };
-                        if cmp != std::cmp::Ordering::Equal {
-                            return cmp;
-                        }
-                    }
-                    std::cmp::Ordering::Equal
-                });
+            let mut indexes = self.indexes.write().await;
+            let Some(index) = indexes.get_mut(name) else {
+                return Ok(None);
+            };
+            // Another query applied changes meanwhile: catch up from there.
+            if index.last_seq != since {
+                continue;
             }
-
-            // Skip
-            if let Some(skip) = opts.skip {
-                matched = matched.into_iter().skip(skip as usize).collect();
-            }
-
-            // Limit
-            if let Some(limit) = opts.limit {
-                matched.truncate(limit as usize);
-            }
-
-            // Field projection
-            if let Some(ref fields) = opts.fields {
-                matched = matched
-                    .into_iter()
-                    .map(|doc| {
-                        let mut result = serde_json::Map::new();
-                        if let serde_json::Value::Object(map) = &doc {
-                            for field in fields {
-                                if let Some(val) = map.get(field) {
-                                    result.insert(field.clone(), val.clone());
-                                }
-                            }
-                            if let Some(id) = map.get("_id") {
-                                result
-                                    .entry("_id".to_string())
-                                    .or_insert_with(|| id.clone());
-                            }
-                        }
-                        serde_json::Value::Object(result)
-                    })
-                    .collect();
-            }
-
-            Ok(FindResponse { docs: matched })
-        } else {
-            drop(indexes);
-            // No usable index — full table scan
-            find(self.adapter.as_ref(), opts).await
+            index.built.apply_changes(&changes.results);
+            index.last_seq = changes.last_seq;
+            return Ok(Some(index.built.find_matching(selector)));
         }
     }
 
@@ -581,8 +909,13 @@ impl Database {
     /// Create a Mango index for faster queries.
     ///
     /// Equivalent to PouchDB's `db.createIndex()`. Builds the index
-    /// immediately by scanning all documents.
+    /// immediately by scanning all documents; later finds keep it up to date
+    /// from the changes feed. On an `http()` database the index is created
+    /// on the server (`_index`).
     pub async fn create_index(&self, def: IndexDefinition) -> Result<CreateIndexResponse> {
+        for sort_field in &def.fields {
+            sort_field.try_field_and_direction()?;
+        }
         let name = if def.name.is_empty() {
             // Auto-generate name from fields
             let field_names: Vec<&str> = def
@@ -598,12 +931,13 @@ impl Database {
             def.name.clone()
         };
 
-        let mut indexes = self.indexes.write().await;
-        if indexes.contains_key(&name) {
-            return Ok(CreateIndexResponse {
-                result: "exists".to_string(),
-                name,
-            });
+        if let Some(ref remote) = self.remote {
+            return remote_create_index(remote, name, def).await;
+        }
+
+        let exists = || CreateIndexResponse::new("exists", name.clone());
+        if self.indexes.read().await.contains_key(&name) {
+            return Ok(exists());
         }
 
         let index_def = IndexDefinition {
@@ -612,26 +946,54 @@ impl Database {
             ddoc: def.ddoc,
         };
 
-        let built = build_index(self.adapter.as_ref(), &index_def).await?;
-        indexes.insert(name.clone(), built);
+        // Build from the changes feed, so the index knows the sequence it is
+        // up to date with.
+        let changes = self
+            .adapter
+            .changes(ChangesOptions {
+                include_docs: true,
+                ..Default::default()
+            })
+            .await?;
+        let mut built = BuiltIndex::new(index_def);
+        built.apply_changes(&changes.results);
 
-        Ok(CreateIndexResponse {
-            result: "created".to_string(),
-            name,
-        })
+        let mut indexes = self.indexes.write().await;
+        if indexes.contains_key(&name) {
+            return Ok(exists());
+        }
+        indexes.insert(
+            name.clone(),
+            MangoIndex {
+                built,
+                last_seq: changes.last_seq,
+            },
+        );
+
+        Ok(CreateIndexResponse::new("created", name))
     }
 
     /// Get all indexes defined on this database.
+    ///
+    /// On an `http()` database these are the server's JSON indexes (none if
+    /// the server cannot be reached).
     pub async fn get_indexes(&self) -> Vec<IndexInfo> {
+        if let Some(ref remote) = self.remote {
+            let mut result: Vec<IndexInfo> = remote_indexes(remote)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(_, info)| info)
+                .collect();
+            result.sort_by(|a, b| a.name.cmp(&b.name));
+            return result;
+        }
         let indexes = self.indexes.read().await;
         let mut result: Vec<IndexInfo> = indexes
             .values()
-            .map(|idx| IndexInfo {
-                name: idx.def.name.clone(),
-                ddoc: idx.def.ddoc.clone(),
-                def: IndexFields {
-                    fields: idx.def.fields.clone(),
-                },
+            .map(|idx| {
+                let def = &idx.built.def;
+                IndexInfo::new(def.name.clone(), def.ddoc.clone(), def.fields.clone())
             })
             .collect();
         result.sort_by(|a, b| a.name.cmp(&b.name));
@@ -642,48 +1004,42 @@ impl Database {
     ///
     /// Returns which index would be used and the query plan.
     pub async fn explain(&self, opts: FindOptions) -> ExplainResponse {
-        let indexes = self.indexes.read().await;
-        let usable = indexes.values().find(|idx| {
-            if idx.def.fields.is_empty() {
-                return false;
-            }
-            let (first_field, _) = idx.def.fields[0].field_and_direction();
-            opts.selector.get(first_field).is_some()
-        });
+        if let Some(ref remote) = self.remote
+            && let Some(explained) = remote_explain(remote, &opts).await
+        {
+            return explained;
+        }
+        let usable = {
+            let indexes = self.indexes.read().await;
+            usable_index(&indexes, &opts.selector)
+                .and_then(|name| indexes.get(&name))
+                .map(|index| index.built.def.clone())
+        };
 
         let dbname = self.info().await.map(|i| i.db_name).unwrap_or_default();
 
-        if let Some(index) = usable {
-            ExplainResponse {
+        if let Some(def) = usable {
+            ExplainResponse::new(
                 dbname,
-                index: ExplainIndex {
-                    ddoc: index.def.ddoc.clone(),
-                    name: index.def.name.clone(),
-                    index_type: "json".into(),
-                    def: IndexFields {
-                        fields: index.def.fields.clone(),
-                    },
-                },
-                selector: opts.selector,
-                fields: opts.fields,
-            }
+                ExplainIndex::new(def.ddoc, def.name, "json", def.fields),
+                opts.selector,
+                opts.fields,
+            )
         } else {
-            ExplainResponse {
+            ExplainResponse::new(
                 dbname,
-                index: ExplainIndex {
-                    ddoc: None,
-                    name: "_all_docs".into(),
-                    index_type: "special".into(),
-                    def: IndexFields { fields: vec![] },
-                },
-                selector: opts.selector,
-                fields: opts.fields,
-            }
+                ExplainIndex::new(None, "_all_docs", "special", vec![]),
+                opts.selector,
+                opts.fields,
+            )
         }
     }
 
     /// Delete an index by name.
     pub async fn delete_index(&self, name: &str) -> Result<()> {
+        if let Some(ref remote) = self.remote {
+            return remote_delete_index(remote, name).await;
+        }
         let mut indexes = self.indexes.write().await;
         indexes
             .remove(name)
@@ -696,11 +1052,18 @@ impl Database {
     // -----------------------------------------------------------------
 
     /// Store a design document.
+    ///
+    /// Like `put`, a failed write (e.g. `RouchError::Conflict`) is an error,
+    /// never `Ok` with `ok: false`.
+    ///
+    /// The document is written exactly as given, like a `PUT`: since
+    /// `DesignDocument` keeps every member of a design document (see its
+    /// docs), a `get_design` + `put_design` round trip changes nothing but
+    /// what was edited, and a member removed from the struct is removed.
     pub async fn put_design(&self, ddoc: DesignDocument) -> Result<DocResult> {
-        let json = ddoc.to_json();
-        let doc = Document::from_json(json)?;
-        let mut results = self.bulk_docs(vec![doc], BulkDocsOptions::new()).await?;
-        Ok(results.remove(0))
+        let mut doc = Document::from_json(ddoc.to_json())?;
+        doc.prepare_for_write()?;
+        self.write_one(doc).await
     }
 
     /// Retrieve a design document by name.
@@ -728,12 +1091,11 @@ impl Database {
 
     /// Remove orphaned view indexes.
     ///
-    /// Scans all design documents and removes any cached indexes
-    /// that no longer have a corresponding design document view.
+    /// This is a no-op: a `Database` keeps no view indexes (persistent views
+    /// live in a `ViewEngine`, which drops unused ones with
+    /// `ViewEngine::remove_indexes_not_in`, and Mango indexes are removed
+    /// with `delete_index`). It exists for PouchDB API compatibility.
     pub async fn view_cleanup(&self) -> Result<()> {
-        // This is a no-op in the base implementation since we don't
-        // store persistent view indexes in the Database struct itself.
-        // The ViewEngine handles its own cleanup.
         Ok(())
     }
 
@@ -742,20 +1104,24 @@ impl Database {
     // -----------------------------------------------------------------
 
     /// Replicate from this database to the target.
+    ///
+    /// The target's plugins run on the replicated documents.
     pub async fn replicate_to(&self, target: &Database) -> Result<ReplicationResult> {
         replicate(
             self.adapter.as_ref(),
-            target.adapter.as_ref(),
+            target.plugin_adapter().as_ref(),
             ReplicationOptions::default(),
         )
         .await
     }
 
     /// Replicate from the source to this database.
+    ///
+    /// This database's plugins run on the replicated documents.
     pub async fn replicate_from(&self, source: &Database) -> Result<ReplicationResult> {
         replicate(
             source.adapter.as_ref(),
-            self.adapter.as_ref(),
+            self.plugin_adapter().as_ref(),
             ReplicationOptions::default(),
         )
         .await
@@ -767,13 +1133,18 @@ impl Database {
         target: &Database,
         opts: ReplicationOptions,
     ) -> Result<ReplicationResult> {
-        replicate(self.adapter.as_ref(), target.adapter.as_ref(), opts).await
+        replicate(
+            self.adapter.as_ref(),
+            target.plugin_adapter().as_ref(),
+            opts,
+        )
+        .await
     }
 
     /// Replicate with event streaming.
     ///
-    /// Same as `replicate_to()` but emits `ReplicationEvent` through the
-    /// returned receiver as replication progresses.
+    /// Same as `replicate_to()` but also returns every `ReplicationEvent`
+    /// emitted while replicating, buffered in the returned receiver.
     pub async fn replicate_to_with_events(
         &self,
         target: &Database,
@@ -782,9 +1153,28 @@ impl Database {
         ReplicationResult,
         tokio::sync::mpsc::Receiver<ReplicationEvent>,
     )> {
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let result =
-            replicate_with_events(self.adapter.as_ref(), target.adapter.as_ref(), opts, tx).await?;
+        // Drain the events while replicating: nobody can read the returned
+        // receiver until this call finishes, so a bounded channel that fills
+        // up would stall the replication forever.
+        let (tx, mut inner_rx) = tokio::sync::mpsc::channel(64);
+        let target_adapter = target.plugin_adapter();
+        let replication =
+            replicate_with_events(self.adapter.as_ref(), target_adapter.as_ref(), opts, tx);
+        let collect = async {
+            let mut events = Vec::new();
+            while let Some(event) = inner_rx.recv().await {
+                events.push(event);
+            }
+            events
+        };
+        let (result, events) = tokio::join!(replication, collect);
+        let result = result?;
+
+        // Hand the events back through a channel large enough to hold them.
+        let (tx, rx) = tokio::sync::mpsc::channel(events.len().max(1));
+        for event in events {
+            let _ = tx.try_send(event);
+        }
         Ok((result, rx))
     }
 
@@ -801,7 +1191,7 @@ impl Database {
         tokio::sync::mpsc::Receiver<ReplicationEvent>,
         ReplicationHandle,
     ) {
-        replicate_live(self.adapter.clone(), target.adapter.clone(), opts)
+        replicate_live(self.adapter.clone(), target.plugin_adapter(), opts)
     }
 
     /// Bidirectional sync (replicate in both directions).
@@ -825,12 +1215,29 @@ impl Database {
         self.adapter.compact().await
     }
 
-    /// Destroy the database and all its data.
+    /// Destroy the database and all its data: documents, local documents
+    /// (replication checkpoints included), attachments, the security
+    /// document and its Mango indexes.
+    ///
+    /// The handle stays usable and then behaves as a new, empty database,
+    /// whatever the adapter: memory and redb start over in place, and an
+    /// http database is re-created on its next use (unless it was opened
+    /// with `skip_setup`, in which case operations fail with `NotFound`
+    /// until the database is created again).
+    ///
+    /// Replications with a destroyed memory or redb database start over on
+    /// their own (it gets a new identity). A re-created http database keeps
+    /// its identity: cancel live replications with it and copy everything
+    /// again with `since: Some(Seq::zero())` and `checkpoint: false`. Live
+    /// changes streams keep their position: after `destroy()`, cancel them
+    /// and create new ones from `Seq::zero()`.
     pub async fn destroy(&self) -> Result<()> {
         for plugin in &self.plugins {
             plugin.on_destroy().await?;
         }
-        self.adapter.destroy().await
+        self.adapter.destroy().await?;
+        self.indexes.write().await.clear();
+        Ok(())
     }
 
     /// Permanently remove document revisions.
@@ -886,6 +1293,65 @@ fn first_result(results: Vec<DocResult>) -> Result<DocResult> {
     })
 }
 
+/// Map a failed per-document write result to the matching error.
+fn doc_result_error(result: DocResult) -> RouchError {
+    let reason = result
+        .reason
+        .clone()
+        .or_else(|| result.error.clone())
+        .unwrap_or_else(|| "document write failed".into());
+    match result.error.as_deref() {
+        Some("conflict") => RouchError::Conflict,
+        Some("not_found") => RouchError::NotFound(result.id),
+        Some("unauthorized") => RouchError::Unauthorized,
+        Some("forbidden") => RouchError::Forbidden(reason),
+        _ => RouchError::BadRequest(reason),
+    }
+}
+
+/// Restrict an `all_docs` range query to a partition, whose ids are, in id
+/// (byte) order, exactly those in `[prefix, after)` (`after` is the prefix
+/// with its final `:` bumped to `;`).
+///
+/// A bound outside the partition is replaced by the partition's own, with
+/// the inclusiveness that bound needs: `inclusive_end` stays the caller's
+/// only while the end key is the caller's.
+///
+/// Descending, the upper bound is the start key, which is always inclusive,
+/// so a document whose id is `after` itself comes first. The query then
+/// asks for one row more without skipping and returns the caller's
+/// `(skip, limit)`, to apply once the rows outside the partition are gone.
+fn clamp_to_partition(
+    opts: &mut AllDocsOptions,
+    prefix: &str,
+    after: &str,
+) -> Option<(u64, Option<u64>)> {
+    let mut page = None;
+    if opts.descending {
+        if !opts.start_key.as_deref().is_some_and(|k| k < after) {
+            opts.start_key = Some(after.to_string());
+            page = Some((opts.skip, opts.limit));
+            opts.limit = opts
+                .limit
+                .map(|l| l.saturating_add(opts.skip).saturating_add(1));
+            opts.skip = 0;
+        }
+        if !opts.end_key.as_deref().is_some_and(|k| k >= prefix) {
+            opts.end_key = Some(prefix.to_string());
+            opts.inclusive_end = true;
+        }
+    } else {
+        if !opts.start_key.as_deref().is_some_and(|k| k >= prefix) {
+            opts.start_key = Some(prefix.to_string());
+        }
+        if !opts.end_key.as_deref().is_some_and(|k| k < after) {
+            opts.end_key = Some(after.to_string());
+            opts.inclusive_end = false;
+        }
+    }
+    page
+}
+
 /// Escape regex metacharacters in a string for safe use in a regex pattern.
 fn regex_escape(s: &str) -> String {
     let mut escaped = String::with_capacity(s.len() * 2);
@@ -903,23 +1369,53 @@ fn regex_escape(s: &str) -> String {
 
 impl Partition<'_> {
     /// Query all documents in this partition.
+    ///
+    /// Key ranges are clamped to the partition, and `key`/`keys` outside it
+    /// return no rows.
     pub async fn all_docs(&self, mut opts: AllDocsOptions) -> Result<AllDocsResponse> {
         let prefix = format!("{}:", self.name);
-        let end = format!("{}:\u{ffff}", self.name);
-        if opts.start_key.is_none() {
-            opts.start_key = Some(prefix);
+
+        if let Some(ref mut keys) = opts.keys {
+            keys.retain(|k| k.starts_with(&prefix));
         }
-        if opts.end_key.is_none() {
-            opts.end_key = Some(end);
+        if opts.key.as_ref().is_some_and(|k| !k.starts_with(&prefix)) {
+            opts.key = None;
+            opts.keys = Some(Vec::new());
         }
-        self.db.all_docs(opts).await
+        let page = if opts.key.is_none() && opts.keys.is_none() {
+            clamp_to_partition(&mut opts, &prefix, &format!("{};", self.name))
+        } else {
+            None
+        };
+
+        let mut response = self.db.all_docs(opts).await?;
+        response.rows.retain(|row| row.key.starts_with(&prefix));
+        if let Some((skip, limit)) = page {
+            let limit = limit.map_or(usize::MAX, |l| l as usize);
+            response.rows = response
+                .rows
+                .into_iter()
+                .skip(skip as usize)
+                .take(limit)
+                .collect();
+            response.offset = response.offset.saturating_add(skip);
+        }
+        Ok(response)
     }
 
     /// Run a Mango find query scoped to this partition.
     pub async fn find(&self, mut opts: FindOptions) -> Result<FindResponse> {
+        // Validate the selector as a whole selector first: in a combinator
+        // some invalid ones (`{"$gt": 1}`) would be accepted.
+        CompiledSelector::new(&opts.selector)?;
         let escaped = regex_escape(&self.name);
         let partition_filter = serde_json::json!({"_id": {"$regex": format!("^{}:", escaped)}});
-        opts.selector = serde_json::json!({"$and": [opts.selector, partition_filter]});
+        opts.selector = match opts.selector {
+            // `{}` matches every document, but inside `$and` it would be an
+            // equality test with `{}` that no document passes.
+            serde_json::Value::Object(ref map) if map.is_empty() => partition_filter,
+            selector => serde_json::json!({"$and": [selector, partition_filter]}),
+        };
         self.db.find(opts).await
     }
 
@@ -947,6 +1443,174 @@ impl Partition<'_> {
         self.db.put(&full_id, data).await
     }
 }
+
+// ---------------------------------------------------------------------------
+// Mango on a remote CouchDB
+// ---------------------------------------------------------------------------
+
+/// `limit` sent to `_find` when the caller wants every match (CouchDB
+/// returns 25 documents by default).
+const REMOTE_FIND_NO_LIMIT: u64 = (1 << 53) - 1;
+
+/// Turn an error response from CouchDB into a `RouchError`.
+fn remote_error(status: u16, body: &serde_json::Value) -> RouchError {
+    let reason = body
+        .get("reason")
+        .and_then(|r| r.as_str())
+        .unwrap_or_default()
+        .to_string();
+    match status {
+        400 => RouchError::BadRequest(reason),
+        401 => RouchError::Unauthorized,
+        403 => RouchError::Forbidden(reason),
+        404 => RouchError::NotFound(reason),
+        409 => RouchError::Conflict,
+        _ => RouchError::DatabaseError(format!("HTTP {status}: {body}")),
+    }
+}
+
+/// Send a request and return the JSON body of a successful response, or
+/// the status and body of an error response.
+async fn remote_request(
+    remote: &HttpAdapter,
+    method: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<std::result::Result<serde_json::Value, (u16, serde_json::Value)>> {
+    let (status, response) = remote.request_json(method, path, body).await?;
+    Ok(if (200..300).contains(&status) {
+        Ok(response)
+    } else {
+        Err((status, response))
+    })
+}
+
+/// The `_find`/`_explain` request body for a query.
+fn remote_query_body(opts: &FindOptions) -> Result<serde_json::Value> {
+    let mut body = serde_json::to_value(opts)?;
+    body["limit"] = serde_json::json!(opts.limit.unwrap_or(REMOTE_FIND_NO_LIMIT));
+    Ok(body)
+}
+
+/// Run a query with `_find`; `None` if the server has no index for the
+/// requested sort (the caller then queries locally).
+async fn remote_find(remote: &HttpAdapter, opts: &FindOptions) -> Result<Option<FindResponse>> {
+    let body = remote_query_body(opts)?;
+    match remote_request(remote, "POST", "_find", Some(&body)).await? {
+        Ok(response) => {
+            let docs = match response.get("docs") {
+                Some(serde_json::Value::Array(docs)) => docs.clone(),
+                _ => Vec::new(),
+            };
+            Ok(Some(FindResponse::new(docs)))
+        }
+        Err((400, body)) if body["error"] == "no_usable_index" => Ok(None),
+        Err((status, body)) => Err(remote_error(status, &body)),
+    }
+}
+
+async fn remote_create_index(
+    remote: &HttpAdapter,
+    name: String,
+    def: IndexDefinition,
+) -> Result<CreateIndexResponse> {
+    let mut body = serde_json::json!({
+        "index": {"fields": def.fields},
+        "name": name,
+        "type": "json",
+    });
+    if let Some(ddoc) = def.ddoc {
+        body["ddoc"] = serde_json::json!(ddoc);
+    }
+    match remote_request(remote, "POST", "_index", Some(&body)).await? {
+        Ok(response) => Ok(CreateIndexResponse::new(
+            response["result"].as_str().unwrap_or("created"),
+            response["name"].as_str().unwrap_or(&name),
+        )),
+        Err((status, body)) => Err(remote_error(status, &body)),
+    }
+}
+
+/// The server's JSON indexes, with the id of their design document.
+async fn remote_indexes(remote: &HttpAdapter) -> Result<Vec<(String, IndexInfo)>> {
+    let response = remote_request(remote, "GET", "_index", None)
+        .await?
+        .map_err(|(status, body)| remote_error(status, &body))?;
+    let mut result = Vec::new();
+    for index in response["indexes"].as_array().into_iter().flatten() {
+        if index["type"] != "json" {
+            continue;
+        }
+        let ddoc = index["ddoc"].as_str().unwrap_or_default().to_string();
+        let fields = serde_json::from_value(index["def"]["fields"].clone()).unwrap_or_default();
+        result.push((
+            ddoc.clone(),
+            IndexInfo::new(
+                index["name"].as_str().unwrap_or_default(),
+                Some(ddoc),
+                fields,
+            ),
+        ));
+    }
+    Ok(result)
+}
+
+async fn remote_delete_index(remote: &HttpAdapter, name: &str) -> Result<()> {
+    let ddoc = remote_indexes(remote)
+        .await?
+        .into_iter()
+        .find(|(_, info)| info.name == name)
+        .map(|(ddoc, _)| ddoc)
+        .ok_or_else(|| RouchError::NotFound(format!("index {}", name)))?;
+    let ddoc = ddoc.strip_prefix("_design/").unwrap_or(&ddoc);
+    let path = format!(
+        "_index/{}/json/{}",
+        encode_path_segment(ddoc),
+        encode_path_segment(name)
+    );
+    remote_request(remote, "DELETE", &path, None)
+        .await?
+        .map(|_| ())
+        .map_err(|(status, body)| remote_error(status, &body))
+}
+
+/// Ask the server how it would run a query; `None` if that fails.
+async fn remote_explain(remote: &HttpAdapter, opts: &FindOptions) -> Option<ExplainResponse> {
+    let body = remote_query_body(opts).ok()?;
+    let response = remote_request(remote, "POST", "_explain", Some(&body))
+        .await
+        .ok()?
+        .ok()?;
+    let index = &response["index"];
+    Some(ExplainResponse::new(
+        response["dbname"].as_str().unwrap_or_default(),
+        ExplainIndex::new(
+            index["ddoc"].as_str().map(str::to_string),
+            index["name"].as_str().unwrap_or_default(),
+            index["type"].as_str().unwrap_or_default(),
+            serde_json::from_value(index["def"]["fields"].clone()).unwrap_or_default(),
+        ),
+        opts.selector.clone(),
+        opts.fields.clone(),
+    ))
+}
+
+/// Percent-encode a URL path segment (everything but RFC 3986 unreserved
+/// characters).
+fn encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+/// Batch size for reading a changes feed filtered by a selector.
+const SELECTOR_CHANGES_BATCH: u64 = 500;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -997,9 +1661,9 @@ mod tests {
 
         let r2 = db.remove("doc1", &rev).await.unwrap();
         assert!(r2.ok);
+        assert!(r2.rev.as_deref().unwrap().starts_with("2-"), "{r2:?}");
 
-        let err = db.get("doc1").await;
-        assert!(err.is_err());
+        assert!(matches!(db.get("doc1").await, Err(RouchError::NotFound(_))));
     }
 
     #[tokio::test]
@@ -1072,17 +1736,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn database_from_adapter_and_accessor() {
-        let adapter = Arc::new(MemoryAdapter::new("custom"));
-        let db = Database::from_adapter(adapter);
-
-        let _adapter_ref = db.adapter();
-        db.put("doc1", serde_json::json!({})).await.unwrap();
-        let info = db.info().await.unwrap();
-        assert_eq!(info.doc_count, 1);
-    }
-
-    #[tokio::test]
     async fn database_get_with_opts() {
         let db = Database::memory("test");
         let r1 = db.put("doc1", serde_json::json!({"v": 1})).await.unwrap();
@@ -1128,26 +1781,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn database_all_docs() {
-        let db = Database::memory("test");
-        db.put("a", serde_json::json!({})).await.unwrap();
-        db.put("b", serde_json::json!({})).await.unwrap();
-
-        let result = db.all_docs(AllDocsOptions::new()).await.unwrap();
-        assert_eq!(result.rows.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn database_changes() {
-        let db = Database::memory("test");
-        db.put("a", serde_json::json!({})).await.unwrap();
-        db.put("b", serde_json::json!({})).await.unwrap();
-
-        let changes = db.changes(ChangesOptions::default()).await.unwrap();
-        assert_eq!(changes.results.len(), 2);
-    }
-
-    #[tokio::test]
     async fn database_replicate_to_with_opts() {
         let local = Database::memory("local");
         let remote = Database::memory("remote");
@@ -1180,7 +1813,10 @@ mod tests {
 
         let r1 = db.post(serde_json::json!({"name": "Alice"})).await.unwrap();
         assert!(r1.ok);
-        assert!(!r1.id.is_empty());
+        let uuid = uuid::Uuid::parse_str(&r1.id).expect("post generates a UUID id");
+        assert_eq!(uuid.get_version_num(), 4, "{}", r1.id);
+        // Written like CouchDB's ids: 32 hex digits, no hyphens.
+        assert_eq!(r1.id, uuid.simple().to_string());
 
         let r2 = db.post(serde_json::json!({"name": "Bob"})).await.unwrap();
         assert!(r2.ok);
@@ -1200,8 +1836,19 @@ mod tests {
         let r1 = db.put("doc1", serde_json::json!({"v": 1})).await.unwrap();
         let rev = r1.rev.unwrap();
 
-        // remove_attachment creates a new revision even though attachment
-        // tracking in the memory adapter is simplified
+        // Removing an attachment the document does not have is an error and
+        // writes nothing.
+        assert!(matches!(
+            db.remove_attachment("doc1", "photo.jpg", &rev).await,
+            Err(RouchError::NotFound(_))
+        ));
+
+        let rev = db
+            .put_attachment("doc1", "photo.jpg", &rev, vec![1, 2, 3], "image/jpeg")
+            .await
+            .unwrap()
+            .rev
+            .unwrap();
         let r2 = db
             .remove_attachment("doc1", "photo.jpg", &rev)
             .await
@@ -1209,6 +1856,11 @@ mod tests {
         assert!(r2.ok);
         assert!(r2.rev.is_some());
         assert_ne!(r2.rev.as_deref().unwrap(), rev);
+        assert!(matches!(
+            db.get_attachment("doc1", "photo.jpg").await,
+            Err(RouchError::NotFound(_))
+        ));
+        assert!(db.get("doc1").await.unwrap().attachments.is_empty());
     }
 
     #[tokio::test]
@@ -1252,11 +1904,17 @@ mod tests {
         let found = db
             .find(FindOptions {
                 selector: serde_json::json!({"age": {"$gte": 30}}),
+                sort: Some(vec![SortField::Simple("age".into())]),
                 ..Default::default()
             })
             .await
             .unwrap();
-        assert_eq!(found.docs.len(), 2);
+        let ids: Vec<&str> = found
+            .docs
+            .iter()
+            .map(|d| d["_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["alice", "charlie"]);
 
         // Verify get_indexes
         let indexes = db.get_indexes().await;
@@ -1265,7 +1923,14 @@ mod tests {
 
         // Delete index
         db.delete_index("idx-age").await.unwrap();
-        assert!(db.delete_index("nonexistent").await.is_err());
+        assert!(matches!(
+            db.delete_index("idx-age").await,
+            Err(RouchError::NotFound(_))
+        ));
+        assert!(matches!(
+            db.delete_index("nonexistent").await,
+            Err(RouchError::NotFound(_))
+        ));
 
         let indexes = db.get_indexes().await;
         assert!(indexes.is_empty());
@@ -1309,6 +1974,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replicate_to_with_events_does_not_stall_on_many_events() {
+        let local = Database::memory("local");
+        let remote = Database::memory("remote");
+        for i in 0..100 {
+            local
+                .put(&format!("doc{i:03}"), serde_json::json!({"i": i}))
+                .await
+                .unwrap();
+        }
+
+        // batch_size=1 produces more events than any fixed channel capacity.
+        let replication = local.replicate_to_with_events(
+            &remote,
+            ReplicationOptions {
+                batch_size: 1,
+                ..Default::default()
+            },
+        );
+        let (result, mut rx) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), replication)
+                .await
+                .expect("replicate_to_with_events stalled")
+                .unwrap();
+        assert!(result.ok);
+        assert_eq!(result.docs_written, 100);
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        let changes = events
+            .iter()
+            .filter(|e| matches!(e, ReplicationEvent::Change { .. }))
+            .count();
+        assert_eq!(changes, 100);
+        assert!(matches!(events.first(), Some(ReplicationEvent::Active)));
+        assert!(matches!(events.last(), Some(ReplicationEvent::Complete(_))));
+    }
+
+    /// Waits until `id` is readable on `db`, draining the replication
+    /// events meanwhile.
+    async fn wait_for_doc(
+        db: &Database,
+        id: &str,
+        rx: &mut tokio::sync::mpsc::Receiver<ReplicationEvent>,
+    ) -> Document {
+        let wait = async {
+            loop {
+                while rx.try_recv().is_ok() {}
+                if let Ok(doc) = db.get(id).await {
+                    return doc;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+            .await
+            .unwrap_or_else(|_| panic!("live replication did not copy {id}"))
+    }
+
+    #[tokio::test]
     async fn database_live_replication() {
         let local = Database::memory("local");
         let remote = Database::memory("remote");
@@ -1328,90 +2054,19 @@ mod tests {
             },
         );
 
-        // Wait for initial replication to complete
-        let mut got_complete = false;
-        let timeout = tokio::time::sleep(std::time::Duration::from_secs(2));
-        tokio::pin!(timeout);
-        loop {
-            tokio::select! {
-                event = rx.recv() => {
-                    match event {
-                        Some(ReplicationEvent::Complete(r)) => {
-                            if r.docs_written > 0 {
-                                got_complete = true;
-                                break;
-                            }
-                        }
-                        // No changes — check whether the doc was replicated.
-                        Some(ReplicationEvent::Paused) if remote.get("doc1").await.is_ok() => {
-                            got_complete = true;
-                            break;
-                        }
-                        None => break,
-                        _ => {}
-                    }
-                }
-                _ = &mut timeout => break,
-            }
-        }
+        // The existing document is copied, and so is one written while the
+        // replication is running.
+        let doc1 = wait_for_doc(&remote, "doc1", &mut rx).await;
+        assert_eq!(doc1.data, serde_json::json!({"v": 1}));
+        let r2 = local
+            .put("doc2", serde_json::json!({"v": 2}))
+            .await
+            .unwrap();
+        let doc2 = wait_for_doc(&remote, "doc2", &mut rx).await;
+        assert_eq!(doc2.rev.unwrap().to_string(), r2.rev.unwrap());
+        assert_eq!(doc2.data, serde_json::json!({"v": 2}));
 
         handle.cancel();
-        assert!(got_complete || remote.get("doc1").await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn database_changes_with_selector() {
-        let db = Database::memory("test");
-        db.put("alice", serde_json::json!({"type": "user", "age": 30}))
-            .await
-            .unwrap();
-        db.put(
-            "inv1",
-            serde_json::json!({"type": "invoice", "amount": 100}),
-        )
-        .await
-        .unwrap();
-        db.put("bob", serde_json::json!({"type": "user", "age": 25}))
-            .await
-            .unwrap();
-
-        let changes = db
-            .changes(ChangesOptions {
-                selector: Some(serde_json::json!({"type": "user"})),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(changes.results.len(), 2);
-        assert!(
-            changes
-                .results
-                .iter()
-                .all(|c| c.id == "alice" || c.id == "bob")
-        );
-        // Docs should NOT be included (user didn't ask for them)
-        assert!(changes.results[0].doc.is_none());
-    }
-
-    #[tokio::test]
-    async fn database_changes_with_selector_and_include_docs() {
-        let db = Database::memory("test");
-        db.put("a", serde_json::json!({"score": 10})).await.unwrap();
-        db.put("b", serde_json::json!({"score": 50})).await.unwrap();
-        db.put("c", serde_json::json!({"score": 90})).await.unwrap();
-
-        let changes = db
-            .changes(ChangesOptions {
-                selector: Some(serde_json::json!({"score": {"$gte": 50}})),
-                include_docs: true,
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(changes.results.len(), 2);
-        assert!(changes.results[0].doc.is_some());
     }
 
     #[tokio::test]
@@ -1486,12 +2141,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn database_compact() {
-        let db = Database::memory("test");
-        db.compact().await.unwrap();
-    }
-
-    #[tokio::test]
     async fn database_destroy() {
         let db = Database::memory("test");
         db.put("doc1", serde_json::json!({})).await.unwrap();
@@ -1519,7 +2168,12 @@ mod tests {
         let db = Database::memory("test").with_plugin(Arc::new(DropAllPlugin));
         // Must return an error rather than panicking on an empty results vec.
         let result = db.put("doc1", serde_json::json!({"v": 1})).await;
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(RouchError::DatabaseError(_))),
+            "{result:?}"
+        );
+        assert!(matches!(db.get("doc1").await, Err(RouchError::NotFound(_))));
+        assert_eq!(db.info().await.unwrap().update_seq, Seq::Num(0));
     }
 
     #[tokio::test]
@@ -1568,5 +2222,1096 @@ mod tests {
             .map(|d| d["address"]["city"].as_str().unwrap())
             .collect();
         assert_eq!(cities, vec!["Amsterdam", "Madrid", "Zurich"]);
+    }
+
+    /// Adapter wrapper that counts full `all_docs` scans.
+    struct CountingAdapter {
+        inner: MemoryAdapter,
+        full_scans: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for CountingAdapter {
+        async fn info(&self) -> Result<DbInfo> {
+            self.inner.info().await
+        }
+        async fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
+            self.inner.get(id, opts).await
+        }
+        async fn bulk_docs(
+            &self,
+            docs: Vec<Document>,
+            opts: BulkDocsOptions,
+        ) -> Result<Vec<DocResult>> {
+            self.inner.bulk_docs(docs, opts).await
+        }
+        async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
+            if opts.keys.is_none() && opts.key.is_none() {
+                self.full_scans
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.inner.all_docs(opts).await
+        }
+        async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
+            self.inner.changes(opts).await
+        }
+        async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
+            self.inner.revs_diff(revs).await
+        }
+        async fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
+            self.inner.bulk_get(docs).await
+        }
+        async fn put_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+            data: Vec<u8>,
+            content_type: &str,
+        ) -> Result<DocResult> {
+            self.inner
+                .put_attachment(doc_id, att_id, rev, data, content_type)
+                .await
+        }
+        async fn get_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            opts: GetAttachmentOptions,
+        ) -> Result<Vec<u8>> {
+            self.inner.get_attachment(doc_id, att_id, opts).await
+        }
+        async fn remove_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+        ) -> Result<DocResult> {
+            self.inner.remove_attachment(doc_id, att_id, rev).await
+        }
+        async fn get_local(&self, id: &str) -> Result<serde_json::Value> {
+            self.inner.get_local(id).await
+        }
+        async fn put_local(&self, id: &str, doc: serde_json::Value) -> Result<()> {
+            self.inner.put_local(id, doc).await
+        }
+        async fn remove_local(&self, id: &str) -> Result<()> {
+            self.inner.remove_local(id).await
+        }
+        async fn compact(&self) -> Result<()> {
+            self.inner.compact().await
+        }
+        async fn destroy(&self) -> Result<()> {
+            self.inner.destroy().await
+        }
+    }
+
+    #[tokio::test]
+    async fn indexed_find_updates_index_incrementally() {
+        // F47: an indexed find must not rebuild the index (a full scan of
+        // every document) on each query, and must still see every write.
+        let adapter = Arc::new(CountingAdapter {
+            inner: MemoryAdapter::new("test"),
+            full_scans: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let db = Database::from_adapter(adapter.clone());
+        for i in 0..20 {
+            db.put(&format!("d{i:02}"), serde_json::json!({"age": i}))
+                .await
+                .unwrap();
+        }
+        db.create_index(IndexDefinition {
+            name: String::new(),
+            fields: vec![SortField::Simple("age".into())],
+            ddoc: None,
+        })
+        .await
+        .unwrap();
+        let scans = || adapter.full_scans.load(std::sync::atomic::Ordering::SeqCst);
+        let before = scans();
+
+        let find = |selector: serde_json::Value| {
+            let db = &db;
+            async move {
+                let mut ids: Vec<String> = db
+                    .find(FindOptions {
+                        selector,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .docs
+                    .iter()
+                    .map(|d| d["_id"].as_str().unwrap().to_string())
+                    .collect();
+                ids.sort();
+                ids
+            }
+        };
+        assert_eq!(
+            find(serde_json::json!({"age": {"$gte": 18}})).await,
+            ["d18", "d19"]
+        );
+
+        // Writes after the index was built are picked up.
+        let rev = db.get("d19").await.unwrap().rev.unwrap().to_string();
+        db.update("d19", &rev, serde_json::json!({"age": 1}))
+            .await
+            .unwrap();
+        let rev = db.get("d18").await.unwrap().rev.unwrap().to_string();
+        db.remove("d18", &rev).await.unwrap();
+        db.put("new", serde_json::json!({"age": 50})).await.unwrap();
+        assert_eq!(
+            find(serde_json::json!({"age": {"$gte": 18}})).await,
+            ["new"]
+        );
+        assert_eq!(find(serde_json::json!({"age": 1})).await, ["d01", "d19"]);
+        assert_eq!(find(serde_json::json!({"age": {"$lt": 1}})).await, ["d00"]);
+
+        assert_eq!(
+            scans(),
+            before,
+            "indexed finds must not rescan every document"
+        );
+    }
+
+    #[tokio::test]
+    async fn indexed_find_matches_full_scan() {
+        // F47: the index only narrows candidates; results must be the same
+        // as a full scan for any selector touching the indexed field.
+        let db = Database::memory("test");
+        let values = [
+            serde_json::json!(null),
+            serde_json::json!(1),
+            serde_json::json!(2.5),
+            serde_json::json!(-3),
+            serde_json::json!("a"),
+            serde_json::json!("b"),
+            serde_json::json!([1, 2]),
+            serde_json::json!({"x": 1}),
+        ];
+        for (i, v) in values.iter().enumerate() {
+            db.put(&format!("v{i}"), serde_json::json!({"f": v, "g": i}))
+                .await
+                .unwrap();
+        }
+        db.put("missing", serde_json::json!({"g": 99}))
+            .await
+            .unwrap();
+        db.create_index(IndexDefinition {
+            name: "by-f".into(),
+            fields: vec![SortField::Simple("f".into())],
+            ddoc: None,
+        })
+        .await
+        .unwrap();
+
+        let mut selectors = vec![
+            serde_json::json!({"f": {"$exists": false}}),
+            serde_json::json!({"f": {"$ne": 1}}),
+            serde_json::json!({"f": {"$in": [1, "a"]}}),
+            serde_json::json!({"f": {"x": 1}}),
+            serde_json::json!({"f": {"$gt": 1, "$lt": "b"}}),
+            serde_json::json!({"f": {"$type": "array"}}),
+        ];
+        for v in &values {
+            for op in ["$eq", "$gt", "$gte", "$lt", "$lte"] {
+                selectors.push(serde_json::json!({"f": {op: v}}));
+            }
+            selectors.push(serde_json::json!({"f": v}));
+        }
+        for selector in selectors {
+            let opts = FindOptions {
+                selector: selector.clone(),
+                sort: Some(vec![SortField::Simple("g".into())]),
+                ..Default::default()
+            };
+            let indexed = db.find(opts.clone()).await.unwrap().docs;
+            let scanned = find(db.adapter(), opts).await.unwrap().docs;
+            assert_eq!(indexed, scanned, "{selector}");
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_indexed_finds_see_all_writes() {
+        let db = Arc::new(Database::memory("test"));
+        db.create_index(IndexDefinition {
+            name: String::new(),
+            fields: vec![SortField::Simple("n".into())],
+            ddoc: None,
+        })
+        .await
+        .unwrap();
+        let mut tasks = Vec::new();
+        for t in 0..4 {
+            let db = db.clone();
+            tasks.push(tokio::spawn(async move {
+                for i in 0..25 {
+                    db.put(&format!("t{t}-{i}"), serde_json::json!({"n": i}))
+                        .await
+                        .unwrap();
+                    db.find(FindOptions {
+                        selector: serde_json::json!({"n": {"$gte": 0}}),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let all = db
+            .find(FindOptions {
+                selector: serde_json::json!({"n": {"$gte": 0}}),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(all.docs.len(), 100);
+    }
+
+    #[tokio::test]
+    async fn changes_with_selector_applies_limit_after_filtering() {
+        // F58: limit counts matching changes, and last_seq is the seq of the
+        // last one returned.
+        let db = Database::memory("test");
+        for i in 0..10 {
+            db.put(&format!("b{i}"), serde_json::json!({"type": "b"}))
+                .await
+                .unwrap();
+        }
+        for i in 0..10 {
+            db.put(&format!("a{i}"), serde_json::json!({"type": "a"}))
+                .await
+                .unwrap();
+        }
+        let changes = db
+            .changes(ChangesOptions {
+                selector: Some(serde_json::json!({"type": "a"})),
+                limit: Some(5),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let ids: Vec<_> = changes.results.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["a0", "a1", "a2", "a3", "a4"]);
+        assert_eq!(changes.last_seq, Seq::Num(15));
+
+        // Continuing from last_seq returns the rest.
+        let rest = db
+            .changes(ChangesOptions {
+                since: changes.last_seq,
+                selector: Some(serde_json::json!({"type": "a"})),
+                limit: Some(100),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let ids: Vec<_> = rest.results.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["a5", "a6", "a7", "a8", "a9"]);
+        assert_eq!(rest.last_seq, Seq::Num(20));
+
+        // Invalid selectors are rejected.
+        let invalid = db
+            .changes(ChangesOptions {
+                selector: Some(serde_json::json!({"type": {"$regex": "["}})),
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            matches!(invalid, Err(RouchError::BadRequest(_))),
+            "{invalid:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn partition_all_docs_is_scoped_to_the_partition() {
+        // F60: descending, key/keys and astral ids stay inside the partition.
+        let db = Database::memory("test");
+        for id in [
+            "orders:1",
+            "users:1",
+            "users:2",
+            "users:\u{1F600}",
+            "usersx:1",
+        ] {
+            db.put(id, serde_json::json!({})).await.unwrap();
+        }
+        let users = db.partition("users");
+        let ids = |r: AllDocsResponse| r.rows.into_iter().map(|r| r.key).collect::<Vec<_>>();
+
+        let all = ids(users.all_docs(AllDocsOptions::new()).await.unwrap());
+        assert_eq!(all, ["users:1", "users:2", "users:\u{1F600}"]);
+
+        let desc = ids(users
+            .all_docs(AllDocsOptions {
+                descending: true,
+                ..AllDocsOptions::new()
+            })
+            .await
+            .unwrap());
+        assert_eq!(desc, ["users:\u{1F600}", "users:2", "users:1"]);
+
+        let keyed = ids(users
+            .all_docs(AllDocsOptions {
+                keys: Some(vec!["orders:1".into(), "users:2".into()]),
+                ..AllDocsOptions::new()
+            })
+            .await
+            .unwrap());
+        assert_eq!(keyed, ["users:2"]);
+
+        let foreign = ids(users
+            .all_docs(AllDocsOptions {
+                key: Some("orders:1".into()),
+                ..AllDocsOptions::new()
+            })
+            .await
+            .unwrap());
+        assert!(foreign.is_empty());
+
+        let own = ids(users
+            .all_docs(AllDocsOptions {
+                key: Some("users:2".into()),
+                ..AllDocsOptions::new()
+            })
+            .await
+            .unwrap());
+        assert_eq!(own, ["users:2"]);
+
+        // A range reaching outside the partition is clamped to it.
+        let clamped = ids(users
+            .all_docs(AllDocsOptions {
+                start_key: Some("a".into()),
+                end_key: Some("users:1".into()),
+                ..AllDocsOptions::new()
+            })
+            .await
+            .unwrap());
+        assert_eq!(clamped, ["users:1"]);
+    }
+
+    // -----------------------------------------------------------------
+    // Delegation to the adapter (with and without plugins)
+    // -----------------------------------------------------------------
+
+    /// Adapter that records the calls it receives (and the `changes`
+    /// options), delegating to a `MemoryAdapter`.
+    ///
+    /// Like CouchDB with a `validate_doc_update`, it answers documents listed
+    /// in `reject` with that per-document error, and with `failures_only` it
+    /// answers writes with only the failed documents (what CouchDB returns
+    /// for `new_edits=false`).
+    struct SpyAdapter {
+        inner: MemoryAdapter,
+        calls: std::sync::Mutex<Vec<&'static str>>,
+        changes_opts: std::sync::Mutex<Vec<ChangesOptions>>,
+        reject: HashMap<String, (Option<&'static str>, Option<&'static str>)>,
+        failures_only: bool,
+    }
+
+    impl SpyAdapter {
+        fn new() -> Self {
+            Self {
+                inner: MemoryAdapter::new("spy"),
+                calls: Default::default(),
+                changes_opts: Default::default(),
+                reject: HashMap::new(),
+                failures_only: false,
+            }
+        }
+
+        fn rejecting(
+            mut self,
+            id: &str,
+            error: Option<&'static str>,
+            reason: Option<&'static str>,
+        ) -> Self {
+            self.reject.insert(id.to_string(), (error, reason));
+            self
+        }
+
+        fn record(&self, call: &'static str) {
+            self.calls.lock().unwrap().push(call);
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for SpyAdapter {
+        async fn info(&self) -> Result<DbInfo> {
+            self.record("info");
+            self.inner.info().await
+        }
+        async fn id(&self) -> Result<String> {
+            self.record("id");
+            self.inner.id().await
+        }
+        async fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
+            self.record("get");
+            self.inner.get(id, opts).await
+        }
+        async fn bulk_docs(
+            &self,
+            docs: Vec<Document>,
+            opts: BulkDocsOptions,
+        ) -> Result<Vec<DocResult>> {
+            self.record("bulk_docs");
+            let mut results = Vec::new();
+            for doc in docs {
+                match self.reject.get(&doc.id) {
+                    Some((error, reason)) => {
+                        let mut result = DocResult::error(doc.id, "", "");
+                        result.error = error.map(str::to_string);
+                        result.reason = reason.map(str::to_string);
+                        results.push(result);
+                    }
+                    None => results.extend(self.inner.bulk_docs(vec![doc], opts.clone()).await?),
+                }
+            }
+            if self.failures_only {
+                results.retain(|r| !r.ok);
+            }
+            Ok(results)
+        }
+        async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
+            self.record("all_docs");
+            self.inner.all_docs(opts).await
+        }
+        async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
+            self.record("changes");
+            self.changes_opts.lock().unwrap().push(opts.clone());
+            self.inner.changes(opts).await
+        }
+        async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
+            self.record("revs_diff");
+            self.inner.revs_diff(revs).await
+        }
+        async fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
+            self.record("bulk_get");
+            self.inner.bulk_get(docs).await
+        }
+        async fn put_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+            data: Vec<u8>,
+            content_type: &str,
+        ) -> Result<DocResult> {
+            self.record("put_attachment");
+            self.inner
+                .put_attachment(doc_id, att_id, rev, data, content_type)
+                .await
+        }
+        async fn get_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            opts: GetAttachmentOptions,
+        ) -> Result<Vec<u8>> {
+            self.record("get_attachment");
+            self.inner.get_attachment(doc_id, att_id, opts).await
+        }
+        async fn remove_attachment(
+            &self,
+            doc_id: &str,
+            att_id: &str,
+            rev: &str,
+        ) -> Result<DocResult> {
+            self.record("remove_attachment");
+            self.inner.remove_attachment(doc_id, att_id, rev).await
+        }
+        async fn get_local(&self, id: &str) -> Result<serde_json::Value> {
+            self.record("get_local");
+            self.inner.get_local(id).await
+        }
+        async fn put_local(&self, id: &str, doc: serde_json::Value) -> Result<()> {
+            self.record("put_local");
+            self.inner.put_local(id, doc).await
+        }
+        async fn remove_local(&self, id: &str) -> Result<()> {
+            self.record("remove_local");
+            self.inner.remove_local(id).await
+        }
+        async fn compact(&self) -> Result<()> {
+            self.record("compact");
+            self.inner.compact().await
+        }
+        async fn destroy(&self) -> Result<()> {
+            self.record("destroy");
+            self.inner.destroy().await
+        }
+        async fn close(&self) -> Result<()> {
+            self.record("close");
+            self.inner.close().await
+        }
+        async fn purge(&self, req: HashMap<String, Vec<String>>) -> Result<PurgeResponse> {
+            self.record("purge");
+            self.inner.purge(req).await
+        }
+        async fn get_security(&self) -> Result<SecurityDocument> {
+            self.record("get_security");
+            self.inner.get_security().await
+        }
+        async fn put_security(&self, doc: SecurityDocument) -> Result<()> {
+            self.record("put_security");
+            self.inner.put_security(doc).await
+        }
+    }
+
+    fn new_doc(id: &str, rev: Option<&str>, data: serde_json::Value) -> Document {
+        Document {
+            id: id.into(),
+            rev: rev.map(|r| r.parse().unwrap()),
+            deleted: false,
+            data,
+            attachments: HashMap::new(),
+        }
+    }
+
+    fn security(admin: &str) -> SecurityDocument {
+        SecurityDocument {
+            admins: SecurityGroup {
+                names: vec![admin.into()],
+                roles: vec![],
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn database_delegates_to_the_given_adapter() {
+        let spy = Arc::new(SpyAdapter::new());
+        let db = Database::from_adapter(spy.clone());
+
+        // Writes through the database land in the given adapter, and
+        // `adapter()` is that adapter.
+        db.put("doc1", serde_json::json!({"v": 1})).await.unwrap();
+        assert_eq!(
+            spy.inner
+                .get("doc1", GetOptions::default())
+                .await
+                .unwrap()
+                .data["v"],
+            1
+        );
+        assert_eq!(db.adapter().info().await.unwrap().db_name, "spy");
+        assert_eq!(db.info().await.unwrap().doc_count, 1);
+
+        db.put_security(security("bob")).await.unwrap();
+        assert_eq!(
+            spy.inner.get_security().await.unwrap().admins.names,
+            ["bob"]
+        );
+        assert_eq!(db.get_security().await.unwrap().admins.names, ["bob"]);
+
+        spy.calls.lock().unwrap().clear();
+        db.compact().await.unwrap();
+        db.close().await.unwrap();
+        db.destroy().await.unwrap();
+        assert_eq!(spy.calls(), ["compact", "close", "destroy"]);
+        assert_eq!(spy.inner.info().await.unwrap().doc_count, 0);
+    }
+
+    struct NoopPlugin;
+
+    #[async_trait::async_trait]
+    impl Plugin for NoopPlugin {
+        fn name(&self) -> &str {
+            "noop"
+        }
+    }
+
+    fn plugin_adapter(spy: &Arc<SpyAdapter>, plugins: Vec<Arc<dyn Plugin>>) -> PluginAdapter {
+        PluginAdapter {
+            inner: spy.clone(),
+            plugins,
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_adapter_delegates_every_non_write_method() {
+        // Replication writes into a PluginAdapter: everything but the writes
+        // must reach the wrapped adapter unchanged.
+        let spy = Arc::new(SpyAdapter::new());
+        let pa = plugin_adapter(&spy, vec![Arc::new(NoopPlugin)]);
+        let inner = &spy.inner;
+
+        let r1 = inner
+            .bulk_docs(
+                vec![new_doc("d", None, serde_json::json!({"v": 1}))],
+                BulkDocsOptions::new(),
+            )
+            .await
+            .unwrap()[0]
+            .rev
+            .clone()
+            .unwrap();
+        let r2 = inner
+            .put_attachment("d", "a.txt", &r1, b"hello".to_vec(), "text/plain")
+            .await
+            .unwrap()
+            .rev
+            .unwrap();
+        inner
+            .put_local("cp", serde_json::json!({"seq": 1}))
+            .await
+            .unwrap();
+        inner.put_security(security("alice")).await.unwrap();
+        spy.calls.lock().unwrap().clear();
+
+        assert_eq!(pa.id().await.unwrap(), inner.id().await.unwrap());
+        assert_eq!(pa.info().await.unwrap().update_seq, Seq::Num(2));
+        assert_eq!(
+            pa.get("d", GetOptions::default())
+                .await
+                .unwrap()
+                .rev
+                .unwrap()
+                .to_string(),
+            r2
+        );
+        assert_eq!(
+            pa.get_attachment("d", "a.txt", GetAttachmentOptions::default())
+                .await
+                .unwrap(),
+            b"hello"
+        );
+        assert_eq!(pa.get_local("cp").await.unwrap()["seq"], 1);
+        assert_eq!(pa.get_security().await.unwrap().admins.names, ["alice"]);
+        assert_eq!(
+            pa.all_docs(AllDocsOptions::new()).await.unwrap().rows.len(),
+            1
+        );
+        assert_eq!(
+            pa.changes(ChangesOptions::default())
+                .await
+                .unwrap()
+                .last_seq,
+            Seq::Num(2)
+        );
+
+        pa.put_local("cp", serde_json::json!({"seq": 2}))
+            .await
+            .unwrap();
+        assert_eq!(inner.get_local("cp").await.unwrap()["seq"], 2);
+        pa.remove_local("cp").await.unwrap();
+        assert!(matches!(
+            inner.get_local("cp").await,
+            Err(RouchError::NotFound(_))
+        ));
+
+        pa.put_security(security("carol")).await.unwrap();
+        assert_eq!(inner.get_security().await.unwrap().admins.names, ["carol"]);
+
+        pa.compact().await.unwrap();
+        let old = inner
+            .get(
+                "d",
+                GetOptions {
+                    rev: Some(r1.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(matches!(old, Err(RouchError::NotFound(_))), "{old:?}");
+
+        pa.close().await.unwrap();
+        pa.destroy().await.unwrap();
+        assert_eq!(inner.info().await.unwrap().doc_count, 0);
+        assert_eq!(
+            spy.calls(),
+            [
+                "id",
+                "info",
+                "get",
+                "get_attachment",
+                "get_local",
+                "get_security",
+                "all_docs",
+                "changes",
+                "put_local",
+                "remove_local",
+                "put_security",
+                "compact",
+                "close",
+                "destroy",
+            ]
+        );
+    }
+
+    /// Records every `after_write` batch.
+    #[derive(Default)]
+    struct AfterWriteLog(std::sync::Mutex<Vec<Vec<DocResult>>>);
+
+    #[async_trait::async_trait]
+    impl Plugin for AfterWriteLog {
+        fn name(&self) -> &str {
+            "after-write-log"
+        }
+        async fn after_write(&self, results: &[DocResult]) -> Result<()> {
+            self.0.lock().unwrap().push(results.to_vec());
+            Ok(())
+        }
+    }
+
+    fn summary(results: &[DocResult]) -> Vec<(String, bool, Option<String>, Option<String>)> {
+        let mut summary: Vec<_> = results
+            .iter()
+            .map(|r| (r.id.clone(), r.ok, r.rev.clone(), r.error.clone()))
+            .collect();
+        summary.sort();
+        summary
+    }
+
+    #[tokio::test]
+    async fn plugin_adapter_reports_every_replicated_doc_to_after_write() {
+        // CouchDB answers new_edits=false writes with only the failures: the
+        // documents it does not list were written under their own revision,
+        // and after_write must see them as such.
+        let mut spy = SpyAdapter::new().rejecting("bad", Some("forbidden"), Some("no"));
+        spy.failures_only = true;
+        let spy = Arc::new(spy);
+        let log = Arc::new(AfterWriteLog::default());
+        let pa = plugin_adapter(&spy, vec![log.clone()]);
+
+        let results = pa
+            .bulk_docs(
+                vec![
+                    new_doc("a", Some("1-aaa"), serde_json::json!({})),
+                    new_doc("bad", Some("1-bbb"), serde_json::json!({})),
+                    new_doc("c", Some("1-ccc"), serde_json::json!({})),
+                ],
+                BulkDocsOptions::replication(),
+            )
+            .await
+            .unwrap();
+        let expected = vec![
+            ("a".to_string(), true, Some("1-aaa".to_string()), None),
+            (
+                "bad".to_string(),
+                false,
+                None,
+                Some("forbidden".to_string()),
+            ),
+            ("c".to_string(), true, Some("1-ccc".to_string()), None),
+        ];
+        assert_eq!(summary(&results), expected);
+        assert_eq!(log.0.lock().unwrap().len(), 1);
+        assert_eq!(summary(&log.0.lock().unwrap()[0]), expected);
+
+        // A new_edits=true write has no revision to report for an omitted
+        // document, so nothing is made up.
+        let results = pa
+            .bulk_docs(
+                vec![
+                    new_doc("d", None, serde_json::json!({})),
+                    new_doc("bad", None, serde_json::json!({})),
+                ],
+                BulkDocsOptions::new(),
+            )
+            .await
+            .unwrap();
+        let expected = vec![(
+            "bad".to_string(),
+            false,
+            None,
+            Some("forbidden".to_string()),
+        )];
+        assert_eq!(summary(&results), expected);
+        assert_eq!(summary(&log.0.lock().unwrap()[1]), expected);
+    }
+
+    /// Rejects documents by id: `u*` as unauthorized, `f*` as forbidden,
+    /// `b*` as a bad request, `e*` with an unrelated error, and drops `x*`.
+    struct GatePlugin;
+
+    #[async_trait::async_trait]
+    impl Plugin for GatePlugin {
+        fn name(&self) -> &str {
+            "gate"
+        }
+        async fn before_write(&self, docs: &mut Vec<Document>) -> Result<()> {
+            for doc in docs.iter_mut() {
+                match doc.id.chars().next() {
+                    Some('u') => return Err(RouchError::Unauthorized),
+                    Some('f') => return Err(RouchError::Forbidden("no f".into())),
+                    Some('b') => return Err(RouchError::BadRequest("no b".into())),
+                    Some('e') => return Err(RouchError::DatabaseError("broken".into())),
+                    _ => doc.data["changed_by_plugin"] = serde_json::json!(true),
+                }
+            }
+            docs.retain(|d| !d.id.starts_with('x'));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_adapter_denies_rejected_replicated_docs_one_by_one() {
+        let spy = Arc::new(SpyAdapter::new());
+        let pa = plugin_adapter(&spy, vec![Arc::new(GatePlugin)]);
+
+        let results = pa
+            .bulk_docs(
+                vec![
+                    new_doc("ok", Some("1-aaa"), serde_json::json!({"v": 1})),
+                    new_doc("u1", Some("1-aaa"), serde_json::json!({})),
+                    new_doc("f1", Some("1-aaa"), serde_json::json!({})),
+                    new_doc("b1", Some("1-aaa"), serde_json::json!({})),
+                    new_doc("x1", Some("1-aaa"), serde_json::json!({})),
+                ],
+                BulkDocsOptions::replication(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            summary(&results),
+            vec![
+                ("b1".to_string(), false, None, Some("forbidden".to_string())),
+                ("f1".to_string(), false, None, Some("forbidden".to_string())),
+                ("ok".to_string(), true, Some("1-aaa".to_string()), None),
+                (
+                    "u1".to_string(),
+                    false,
+                    None,
+                    Some("unauthorized".to_string())
+                ),
+                ("x1".to_string(), false, None, Some("forbidden".to_string())),
+            ]
+        );
+        let dropped = results.iter().find(|r| r.id == "x1").unwrap();
+        assert!(
+            dropped
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("dropped by plugin gate"),
+            "{dropped:?}"
+        );
+
+        // Only the accepted doc is stored, with the source's body.
+        let ids: Vec<String> = spy
+            .inner
+            .all_docs(AllDocsOptions::new())
+            .await
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|r| r.key)
+            .collect();
+        assert_eq!(ids, ["ok"]);
+        let stored = spy.inner.get("ok", GetOptions::default()).await.unwrap();
+        assert_eq!(stored.data, serde_json::json!({"v": 1}));
+
+        // Any other plugin error fails the whole write.
+        let failed = pa
+            .bulk_docs(
+                vec![
+                    new_doc("ok2", Some("1-aaa"), serde_json::json!({})),
+                    new_doc("e1", Some("1-aaa"), serde_json::json!({})),
+                ],
+                BulkDocsOptions::replication(),
+            )
+            .await;
+        assert!(
+            matches!(failed, Err(RouchError::DatabaseError(_))),
+            "{failed:?}"
+        );
+        assert!(matches!(
+            spy.inner.get("ok2", GetOptions::default()).await,
+            Err(RouchError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn single_doc_write_errors_keep_their_kind() {
+        // A per-document failure reported by the adapter becomes the
+        // matching error (what CouchDB's validate_doc_update produces).
+        let spy = SpyAdapter::new()
+            .rejecting("f", Some("forbidden"), Some("no f"))
+            .rejecting("u", Some("unauthorized"), Some("no u"))
+            .rejecting("n", Some("not_found"), Some("missing"))
+            .rejecting("c", Some("conflict"), Some("Document update conflict."))
+            .rejecting("o", Some("some_other_error"), Some("odd"))
+            .rejecting("r", Some("some_other_error"), None)
+            .rejecting("none", None, None);
+        let db = Database::from_adapter(Arc::new(spy));
+        let put = |id: &'static str| {
+            let db = &db;
+            async move { db.put(id, serde_json::json!({})).await }
+        };
+        let forbidden = put("f").await;
+        assert!(
+            matches!(&forbidden, Err(RouchError::Forbidden(reason)) if reason == "no f"),
+            "{forbidden:?}"
+        );
+        let unauthorized = put("u").await;
+        assert!(
+            matches!(unauthorized, Err(RouchError::Unauthorized)),
+            "{unauthorized:?}"
+        );
+        let not_found = put("n").await;
+        assert!(
+            matches!(&not_found, Err(RouchError::NotFound(id)) if id == "n"),
+            "{not_found:?}"
+        );
+        let conflict = put("c").await;
+        assert!(
+            matches!(conflict, Err(RouchError::Conflict)),
+            "{conflict:?}"
+        );
+        let other = put("o").await;
+        assert!(
+            matches!(&other, Err(RouchError::BadRequest(reason)) if reason == "odd"),
+            "{other:?}"
+        );
+        let no_reason = put("r").await;
+        assert!(
+            matches!(&no_reason, Err(RouchError::BadRequest(reason)) if reason == "some_other_error"),
+            "{no_reason:?}"
+        );
+        let nothing = put("none").await;
+        assert!(
+            matches!(&nothing, Err(RouchError::BadRequest(reason)) if reason == "document write failed"),
+            "{nothing:?}"
+        );
+        assert_eq!(db.info().await.unwrap().update_seq, Seq::Num(0));
+    }
+
+    // -----------------------------------------------------------------
+    // Changes filtered by a selector
+    // -----------------------------------------------------------------
+
+    /// A spied database with `n` documents `d0000`, `d0001`, ... (`{"n": i}`).
+    async fn numbered_docs(n: usize) -> (Arc<SpyAdapter>, Database) {
+        let spy = Arc::new(SpyAdapter::new());
+        let docs = (0..n)
+            .map(|i| new_doc(&format!("d{i:04}"), None, serde_json::json!({"n": i})))
+            .collect();
+        spy.inner
+            .bulk_docs(docs, BulkDocsOptions::new())
+            .await
+            .unwrap();
+        (spy.clone(), Database::from_adapter(spy))
+    }
+
+    #[tokio::test]
+    async fn indexed_find_reads_only_the_changes_since_the_index() {
+        // The index is brought up to date from where it left off, not by
+        // re-reading the whole changes feed on every query.
+        let (spy, db) = numbered_docs(3).await;
+        db.create_index(IndexDefinition {
+            name: String::new(),
+            fields: vec![SortField::Simple("n".into())],
+            ddoc: None,
+        })
+        .await
+        .unwrap();
+        let find = || {
+            let db = &db;
+            async move {
+                let docs = db
+                    .find(FindOptions {
+                        selector: serde_json::json!({"n": {"$gte": 1}}),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .docs;
+                docs.iter()
+                    .map(|d| d["_id"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+        let sinces = || {
+            std::mem::take(&mut *spy.changes_opts.lock().unwrap())
+                .into_iter()
+                .map(|o| o.since)
+                .collect::<Vec<_>>()
+        };
+        sinces();
+
+        assert_eq!(find().await, ["d0001", "d0002"]);
+        assert_eq!(sinces(), [Seq::Num(3)]);
+        db.put("d0003", serde_json::json!({"n": 3})).await.unwrap();
+        assert_eq!(find().await, ["d0001", "d0002", "d0003"]);
+        assert_eq!(sinces(), [Seq::Num(3)]);
+        assert_eq!(find().await, ["d0001", "d0002", "d0003"]);
+        assert_eq!(sinces(), [Seq::Num(4)]);
+    }
+
+    #[tokio::test]
+    async fn selector_changes_read_the_feed_in_batches() {
+        // The matching changes are past the first batches: the feed must be
+        // read on until `limit` matches are found.
+        let total = 2 * SELECTOR_CHANGES_BATCH as usize + 200;
+        let (spy, db) = numbered_docs(total).await;
+        let first = total - 150;
+        let changes = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            db.changes(ChangesOptions {
+                selector: Some(serde_json::json!({"n": {"$gte": first}})),
+                limit: Some(3),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("selector changes did not finish")
+        .unwrap();
+        let ids: Vec<&str> = changes.results.iter().map(|c| c.id.as_str()).collect();
+        let expected: Vec<String> = (first..first + 3).map(|i| format!("d{i:04}")).collect();
+        assert_eq!(ids, expected);
+        assert_eq!(changes.last_seq, Seq::Num(first as u64 + 3));
+        assert!(changes.results.iter().all(|c| c.doc.is_none()));
+
+        // The adapter is asked for unfiltered batches with the documents;
+        // the selector is applied here.
+        let opts = spy.changes_opts.lock().unwrap().clone();
+        assert_eq!(opts.len(), 3, "{opts:?}");
+        let sinces: Vec<Seq> = opts.iter().map(|o| o.since.clone()).collect();
+        let batch = SELECTOR_CHANGES_BATCH;
+        assert_eq!(sinces, [Seq::Num(0), Seq::Num(batch), Seq::Num(2 * batch)]);
+        for o in &opts {
+            assert!(o.selector.is_none(), "{o:?}");
+            assert!(o.include_docs, "{o:?}");
+            assert_eq!(o.limit, Some(batch), "{o:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn descending_selector_changes_read_the_feed_whole() {
+        // A descending feed cannot be resumed from a sequence, so it is read
+        // in one go and filtered from the newest change down.
+        let total = SELECTOR_CHANGES_BATCH as usize + 100;
+        let (spy, db) = numbered_docs(total).await;
+        let changes = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            db.changes(ChangesOptions {
+                selector: Some(serde_json::json!({"n": {"$lt": 3}})),
+                descending: true,
+                limit: Some(2),
+                include_docs: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("descending selector changes did not finish")
+        .unwrap();
+        let ids: Vec<&str> = changes.results.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["d0002", "d0001"]);
+        assert_eq!(changes.last_seq, Seq::Num(2));
+        assert_eq!(changes.results[0].doc.as_ref().unwrap()["n"], 2);
+
+        let opts = spy.changes_opts.lock().unwrap().clone();
+        assert_eq!(opts.len(), 1, "{opts:?}");
+        assert!(opts[0].descending);
+        assert_eq!(opts[0].limit, None);
+        assert!(opts[0].selector.is_none());
     }
 }

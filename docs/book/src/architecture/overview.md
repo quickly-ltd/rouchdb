@@ -131,7 +131,7 @@ Mango selectors (`$eq`, `$gt`, `$in`, `$regex`, etc.) and map/reduce view
 support. Evaluates selectors against `serde_json::Value` documents using
 CouchDB collation order.
 
-Dependencies: `rouchdb-core`, `regex`, `serde`, `serde_json`.
+Dependencies: `rouchdb-core`, `fancy-regex`, `serde`, `serde_json`.
 
 ### 8. `rouchdb-views`
 
@@ -156,7 +156,7 @@ any CouchDB client can connect to. Serves the Fauxton web dashboard via
 `rust-embed` for embedded static files.
 
 Dependencies: `rouchdb`, `rouchdb-core`, `axum`, `tower-http`, `rust-embed`,
-`clap`, `serde`, `serde_json`, `tokio`, `uuid`.
+`clap`, `serde`, `serde_json`, `tokio`, `uuid`, `md-5`.
 
 ### 11. `rouchdb-cli`
 

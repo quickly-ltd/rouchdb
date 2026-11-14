@@ -8,6 +8,10 @@
 - [Quickstart](./getting-started/quickstart.md)
 - [Core Concepts](./getting-started/concepts.md)
 
+# Upgrading
+
+- [Migrating from 0.4 to 0.5](./upgrading/0.4-to-0.5.md)
+
 # Guides
 
 - [CRUD Operations](./guides/crud.md)
@@ -28,6 +32,8 @@
 - [Adapter Trait](./reference/adapter-trait.md)
 - [Core Types](./reference/core-types.md)
 - [Error Handling](./reference/error-handling.md)
+- [API Stability](./reference/api-stability.md)
+- [Differences from CouchDB](./reference/differences.md)
 
 # Architecture
 

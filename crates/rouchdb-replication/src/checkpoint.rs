@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +33,14 @@ pub struct CheckpointHistory {
 pub struct Checkpointer {
     replication_id: String,
     session_id: String,
+    /// Set once the source refused a `_local` write (a read-only source):
+    /// from then on only the target's checkpoint is read and written.
+    read_only_source: AtomicBool,
+}
+
+/// Errors meaning the adapter will never accept the write.
+fn is_forbidden(e: &RouchError) -> bool {
+    matches!(e, RouchError::Forbidden(_) | RouchError::Unauthorized)
 }
 
 impl Checkpointer {
@@ -45,6 +55,7 @@ impl Checkpointer {
         Self {
             replication_id,
             session_id,
+            read_only_source: AtomicBool::new(false),
         }
     }
 
@@ -66,33 +77,63 @@ impl Checkpointer {
             }
         };
 
-        let source_cp = to_opt(self.read_from(source).await)?;
-        let target_cp = to_opt(self.read_from(target).await)?;
+        let Some(target_cp) = to_opt(self.read_from(target).await)? else {
+            return Ok(Seq::zero()); // never checkpointed on the target
+        };
+        if self.read_only_source.load(Ordering::Relaxed) {
+            return Ok(target_cp.last_seq);
+        }
 
-        match (source_cp, target_cp) {
-            (Some(s), Some(t)) => Ok(compare_checkpoints(&s, &t)),
-            _ => Ok(Seq::zero()), // at least one side has never been checkpointed
+        match to_opt(self.read_from(source).await)? {
+            Some(source_cp) => Ok(compare_checkpoints(&source_cp, &target_cp)),
+            None => {
+                // The target knows this replication but the source does not:
+                // either the source was replaced (start over) or it cannot
+                // store checkpoints at all. Probe with a write, as PouchDB
+                // does, and trust the target alone for a read-only source.
+                let probe = self.build_checkpoint_doc(Seq::zero(), Vec::new());
+                match source
+                    .put_local(&self.replication_id, serde_json::to_value(&probe)?)
+                    .await
+                {
+                    Err(e) if is_forbidden(&e) => {
+                        self.read_only_source.store(true, Ordering::Relaxed);
+                        Ok(target_cp.last_seq)
+                    }
+                    _ => Ok(Seq::zero()),
+                }
+            }
         }
     }
 
-    /// Write the checkpoint to both source and target.
+    /// Write the checkpoint to the target, then to the source. A source that
+    /// refuses the write (read-only) is remembered and skipped from then on.
     pub async fn write_checkpoint(
         &self,
         source: &dyn Adapter,
         target: &dyn Adapter,
         last_seq: Seq,
     ) -> Result<()> {
+        let read_only_source = self.read_only_source.load(Ordering::Relaxed);
+
         // Carry forward existing history so cross-session divergence recovery
         // works (each side keeps its own _rev, so write them independently).
         let prior_history = self
-            .read_from(source)
+            .read_from(if read_only_source { target } else { source })
             .await
             .map(|cp| cp.history)
             .unwrap_or_default();
 
-        self.write_one(source, last_seq.clone(), &prior_history)
+        self.write_one(target, last_seq.clone(), &prior_history)
             .await?;
-        self.write_one(target, last_seq, &prior_history).await?;
+        if !read_only_source {
+            match self.write_one(source, last_seq, &prior_history).await {
+                Err(e) if is_forbidden(&e) => {
+                    self.read_only_source.store(true, Ordering::Relaxed);
+                }
+                other => other?,
+            }
+        }
         Ok(())
     }
 
@@ -285,6 +326,127 @@ mod tests {
         let source = cp(50, "a", vec![]);
         let target = cp(40, "b", vec![]);
         assert_eq!(compare_checkpoints(&source, &target).as_num(), 0);
+    }
+
+    #[test]
+    fn compare_same_session_takes_the_smaller_seq_on_either_side() {
+        // The target was restored from a backup taken mid-session.
+        let ahead = cp(6, "s", vec![hist(6, "s")]);
+        let behind = cp(2, "s", vec![hist(2, "s")]);
+        assert_eq!(compare_checkpoints(&ahead, &behind), Seq::Num(2));
+        assert_eq!(compare_checkpoints(&behind, &ahead), Seq::Num(2));
+    }
+
+    #[test]
+    fn compare_uses_the_newest_common_session_and_its_smaller_seq() {
+        // Histories are newest first. s2 is the newest session both sides
+        // know, and each side recorded a different seq for it.
+        let source = cp(
+            50,
+            "s3",
+            vec![hist(50, "s3"), hist(40, "s2"), hist(30, "s1")],
+        );
+        let target = cp(
+            45,
+            "s4",
+            vec![hist(45, "s4"), hist(35, "s2"), hist(30, "s1")],
+        );
+        assert_eq!(compare_checkpoints(&source, &target), Seq::Num(35));
+        assert_eq!(compare_checkpoints(&target, &source), Seq::Num(35));
+    }
+
+    #[test]
+    fn pick_common_takes_the_smaller_numeric_seq_in_either_order() {
+        assert_eq!(pick_common(&Seq::Num(3), &Seq::Num(5)), Seq::Num(3));
+        assert_eq!(pick_common(&Seq::Num(5), &Seq::Num(3)), Seq::Num(3));
+        assert_eq!(pick_common(&Seq::Num(4), &Seq::Num(4)), Seq::Num(4));
+    }
+
+    #[test]
+    fn pick_common_takes_the_smaller_opaque_seq_in_either_order() {
+        // 3 < 12 by numeric prefix, though "12-..." sorts first as text.
+        let low = Seq::Str("3-g1AAAAB".into());
+        let high = Seq::Str("12-g1AAAAC".into());
+        assert_eq!(pick_common(&low, &high), low);
+        assert_eq!(pick_common(&high, &low), low);
+        // A numeric seq against an opaque one.
+        let opaque = Seq::Str("5-g1AAAAD".into());
+        assert_eq!(pick_common(&Seq::Num(7), &opaque), opaque);
+        assert_eq!(pick_common(&opaque, &Seq::Num(7)), opaque);
+        assert_eq!(pick_common(&Seq::Num(2), &opaque), Seq::Num(2));
+    }
+
+    #[test]
+    fn only_permission_errors_mark_a_source_read_only() {
+        assert!(is_forbidden(&RouchError::Forbidden("read only".into())));
+        assert!(is_forbidden(&RouchError::Unauthorized));
+        for transient in [
+            RouchError::DatabaseError("connection reset".into()),
+            RouchError::Conflict,
+            RouchError::NotFound("_local/x".into()),
+            RouchError::BadRequest("Invalid rev format".into()),
+        ] {
+            assert!(!is_forbidden(&transient), "{transient:?}");
+        }
+    }
+
+    fn history_of(doc: &serde_json::Value) -> Vec<(u64, String)> {
+        let doc: CheckpointDoc = serde_json::from_value(doc.clone()).unwrap();
+        doc.history
+            .into_iter()
+            .map(|h| (h.last_seq.as_num(), h.session_id))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn history_keeps_earlier_sessions_newest_first() {
+        use rouchdb_adapter_memory::MemoryAdapter;
+        let source = MemoryAdapter::new("a");
+        let target = MemoryAdapter::new("b");
+
+        let first = Checkpointer::new("a", "b", "nofilter");
+        first
+            .write_checkpoint(&source, &target, Seq::Num(3))
+            .await
+            .unwrap();
+        let second = Checkpointer::new("a", "b", "nofilter");
+        second
+            .write_checkpoint(&source, &target, Seq::Num(5))
+            .await
+            .unwrap();
+        // A later write in the same session replaces its own entry.
+        second
+            .write_checkpoint(&source, &target, Seq::Num(7))
+            .await
+            .unwrap();
+
+        let expected = vec![
+            (7, second.session_id.clone()),
+            (3, first.session_id.clone()),
+        ];
+        for side in [&source, &target] {
+            let doc = side.get_local(first.replication_id()).await.unwrap();
+            assert_eq!(doc["last_seq"], 7);
+            assert_eq!(doc["session_id"], second.session_id.as_str());
+            assert_eq!(doc["replicator"], "rouchdb");
+            assert_eq!(history_of(&doc), expected);
+        }
+    }
+
+    #[test]
+    fn history_is_capped() {
+        let checkpointer = Checkpointer::new("a", "b", "nofilter");
+        let prior: Vec<_> = (0..MAX_HISTORY as u64)
+            .map(|i| hist(i, &format!("old{i}")))
+            .collect();
+        let doc = checkpointer.build_checkpoint_doc(Seq::Num(99), prior);
+        assert_eq!(doc.history.len(), MAX_HISTORY);
+        assert_eq!(doc.history[0].session_id, checkpointer.session_id);
+        assert_eq!(doc.history[1].session_id, "old0");
+        assert_eq!(
+            doc.history[MAX_HISTORY - 1].session_id,
+            format!("old{}", MAX_HISTORY - 2)
+        );
     }
 
     #[test]

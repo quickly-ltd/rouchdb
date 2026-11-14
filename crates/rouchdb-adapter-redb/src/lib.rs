@@ -3,22 +3,42 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use md5::{Digest, Md5};
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
-use rouchdb_core::adapter::Adapter;
+use rouchdb_core::adapter::{Adapter, ChangeNotice};
 use rouchdb_core::document::*;
 use rouchdb_core::error::{Result, RouchError};
-use rouchdb_core::merge::{collect_conflicts, is_deleted, merge_tree, winning_rev};
+use rouchdb_core::json::MAX_NESTING_DEPTH;
+use rouchdb_core::merge::{
+    collect_conflicts, is_deleted, latest_leaf, remove_leaves, revs_diff_one, winning_rev,
+};
 use rouchdb_core::rev_tree::{
-    NodeOpts, RevNode, RevPath, RevStatus, RevTree, build_path_from_revs, collect_leaves,
-    find_rev_ancestry, rev_exists,
+    NodeOpts, RevNode, RevPath, RevStatus, RevTree, collect_leaves, find_rev_ancestry, rev_exists,
+    revs_info, traverse_rev_tree,
+};
+use rouchdb_core::write::{
+    LocalWrite, PlannedWrite, ReplicatedWrite, edit_parent, error_result, local_doc_id,
+    local_document, ok_result, plan_local_write, plan_new_edit, plan_replicated_edit,
 };
 
-const DEFAULT_REV_LIMIT: u64 = 1000;
+/// Revisions kept per branch unless configured otherwise (CouchDB's
+/// default `_revs_limit`).
+pub const DEFAULT_REV_LIMIT: u64 = 1000;
+
+macro_rules! db_err {
+    ($e:expr) => {
+        $e.map_err(|e| RouchError::DatabaseError(e.to_string()))
+    };
+}
+
+// After `db_err!`, which it uses.
+mod upgrade;
+pub use upgrade::{
+    DiscardedRevision, OpenOptions, REPORT_SAMPLE, StoredFormat, UpgradePolicy, UpgradeReport,
+};
 
 // ---------------------------------------------------------------------------
 // Table definitions for redb
@@ -36,18 +56,47 @@ const CHANGES_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("changes
 /// Local documents: local_id -> serialized JSON
 const LOCAL_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("local_docs");
 
-/// Attachments: digest -> raw bytes
+/// Attachments: digest -> raw bytes (content-addressed, shared by every
+/// revision and document that references the same content)
 const ATTACHMENT_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("attachments");
 
-/// Metadata table: key -> value
-const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
+/// Metadata table: key -> value (the metadata record, the security
+/// document). Files written by rouchdb <= 0.4 kept these in `metadata`,
+/// which is now the format guard (see the `upgrade` module).
+const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("rouchdb_meta");
 
 // ---------------------------------------------------------------------------
 // Serializable records
 // ---------------------------------------------------------------------------
 
+/// Document metadata record: the revision tree stored as a flat node list
+/// (pre-order, each node pointing at its parent's index) plus the doc's
+/// current sequence. Flat storage keeps (de)serialization depth constant no
+/// matter how long the history is.
 #[derive(Debug, Serialize, Deserialize)]
 struct DocRecord {
+    revs: Vec<FlatRevNode>,
+    seq: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FlatRevNode {
+    pos: u64,
+    hash: String,
+    /// Index of the parent node; `None` for a root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    missing: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    deleted: bool,
+}
+
+/// Document record written by rouchdb <= 0.4: a nested tree with two JSON
+/// levels per generation. Still read (and rewritten flat on the next write
+/// of the document); never written.
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyDocRecord {
     rev_tree: Vec<SerializedRevPath>,
     seq: u64,
 }
@@ -66,42 +115,6 @@ struct SerializedRevNode {
     children: Vec<SerializedRevNode>,
 }
 
-/// Deserializes a `DocRecord` from its stored JSON bytes.
-///
-/// `DocRecord.rev_tree` embeds `SerializedRevNode.children`, a
-/// self-referential tree. A document that is updated repeatedly with no
-/// conflicts (no branching) accumulates a purely linear chain — nesting
-/// depth grows by one for every revision, forever, because RouchDB does not
-/// stem/prune old tree nodes. Verified against a live production CouchDB: a
-/// single frequently-toggled record reached revision 321 with zero
-/// branching. `serde_json::from_slice`'s default recursion guard (128
-/// levels — a deliberate anti-DoS limit for *untrusted* input, not a real
-/// Rust call-stack constraint; see
-/// <https://github.com/serde-rs/json/issues/334>) rejects that document
-/// outright with "recursion limit exceeded", and because every accessor in
-/// this file (`get`, `info`, `all_docs`, attachments, ...) deserializes the
-/// full `DocRecord` to do its job, a single such document turns EVERY read
-/// path that touches it into a hard failure — not just the one deep
-/// document, but any endpoint that has to scan or list past it too (e.g.
-/// `GET /{db}` info, which must open every record to count non-deleted
-/// docs).
-///
-/// Fix: disable serde_json's checked-depth counter and grow the real call
-/// stack dynamically instead via `serde_stacker`, the crate designed for
-/// exactly this situation
-/// (<https://docs.rs/serde_json/latest/serde_json/struct.Deserializer.html#method.disable_recursion_limit>).
-/// This only changes how already-stored bytes are *read*; the on-disk JSON
-/// shape is unchanged, so no migration is needed and existing databases
-/// keep working. ALL `DocRecord` deserialization must go through this
-/// helper — a stray direct `serde_json::from_slice::<DocRecord>` call would
-/// silently reintroduce the bug for that one call site.
-fn deserialize_doc_record(bytes: &[u8]) -> std::result::Result<DocRecord, serde_json::Error> {
-    let mut de = serde_json::Deserializer::from_slice(bytes);
-    de.disable_recursion_limit();
-    let de = serde_stacker::Deserializer::new(&mut de);
-    DocRecord::deserialize(de)
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct RevDataRecord {
     data: serde_json::Value,
@@ -110,11 +123,31 @@ struct RevDataRecord {
     attachments: HashMap<String, AttachmentRecord>,
 }
 
+/// The attachment metadata of a stored revision, decoded without its body
+/// (which is skipped without recursion, whatever its depth).
+#[derive(Debug, Deserialize)]
+struct RevAttachmentsRecord {
+    #[serde(default)]
+    attachments: HashMap<String, AttachmentRecord>,
+}
+
+/// Stored attachment metadata. The members added in 0.5 default when a
+/// record written by an earlier version is read.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct AttachmentRecord {
     content_type: String,
     digest: String,
     length: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    revpos: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encoding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encoded_length: Option<u64>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -127,13 +160,27 @@ struct ChangeRecord {
 struct MetaRecord {
     update_seq: u64,
     db_uuid: String,
+    /// On-disk layout version (absent in files written by rouchdb <= 0.4).
+    #[serde(default)]
+    schema: u32,
+    /// Number of purge requests applied.
+    #[serde(default)]
+    purge_seq: u64,
+    /// Live / deleted document counts, maintained on every write so `info()`
+    /// and `total_rows` do not scan the database (schema >= 2).
+    #[serde(default)]
+    doc_count: u64,
+    #[serde(default)]
+    doc_del_count: u64,
 }
 
 // ---------------------------------------------------------------------------
 // Conversion helpers (RevTree <-> Serializable)
 // ---------------------------------------------------------------------------
 
-fn rev_tree_to_serialized(tree: &RevTree) -> Vec<SerializedRevPath> {
+/// Legacy nested encoding (only used by tests to fabricate old records).
+#[cfg(test)]
+fn legacy_tree_to_serialized(tree: &RevTree) -> Vec<SerializedRevPath> {
     tree.iter()
         .map(|path| SerializedRevPath {
             pos: path.pos,
@@ -142,6 +189,7 @@ fn rev_tree_to_serialized(tree: &RevTree) -> Vec<SerializedRevPath> {
         .collect()
 }
 
+#[cfg(test)]
 fn rev_node_to_serialized(node: &RevNode) -> SerializedRevNode {
     SerializedRevNode {
         hash: node.hash.clone(),
@@ -179,8 +227,149 @@ fn serialized_to_rev_node(node: &SerializedRevNode) -> RevNode {
     }
 }
 
+/// Serialize a document's revision tree and sequence (flat format).
+fn encode_doc_record(tree: &RevTree, seq: u64) -> Result<Vec<u8>> {
+    let mut revs = Vec::new();
+    for path in tree {
+        // Iterative pre-order walk; children are pushed in reverse so they
+        // are emitted in order.
+        let mut stack: Vec<(&RevNode, u64, Option<u32>)> = vec![(&path.tree, path.pos, None)];
+        while let Some((node, pos, parent)) = stack.pop() {
+            let idx = revs.len() as u32;
+            revs.push(FlatRevNode {
+                pos,
+                hash: node.hash.clone(),
+                parent,
+                missing: node.status == RevStatus::Missing,
+                deleted: node.opts.deleted,
+            });
+            for child in node.children.iter().rev() {
+                stack.push((child, pos + 1, Some(idx)));
+            }
+        }
+    }
+    Ok(serde_json::to_vec(&DocRecord { revs, seq })?)
+}
+
+/// Deserialize a document record, accepting both the current flat format
+/// and the legacy nested one. Errors are always propagated: a record that
+/// cannot be decoded must never be mistaken for a missing document.
+fn decode_doc_record(bytes: &[u8]) -> Result<(RevTree, u64)> {
+    if bytes.starts_with(b"{\"rev_tree\"") {
+        return decode_legacy_doc_record(bytes);
+    }
+    let record: DocRecord = serde_json::from_slice(bytes)
+        .map_err(|e| RouchError::DatabaseError(format!("corrupt document record: {}", e)))?;
+
+    // Nodes are in pre-order, so every child comes after its parent: attach
+    // them back to front, then restore each node's child order.
+    let mut built: Vec<Option<RevNode>> = record
+        .revs
+        .iter()
+        .map(|n| {
+            Some(RevNode {
+                hash: n.hash.clone(),
+                status: if n.missing {
+                    RevStatus::Missing
+                } else {
+                    RevStatus::Available
+                },
+                opts: NodeOpts { deleted: n.deleted },
+                children: Vec::new(),
+            })
+        })
+        .collect();
+    let corrupt = || RouchError::DatabaseError("corrupt document record: bad parent index".into());
+    let mut roots = Vec::new();
+    for (i, flat) in record.revs.iter().enumerate().rev() {
+        let mut node = built[i].take().ok_or_else(corrupt)?;
+        node.children.reverse();
+        match flat.parent {
+            None => roots.push(RevPath {
+                pos: flat.pos,
+                tree: node,
+            }),
+            Some(p) if (p as usize) < i => built[p as usize]
+                .as_mut()
+                .ok_or_else(corrupt)?
+                .children
+                .push(node),
+            Some(_) => return Err(corrupt()),
+        }
+    }
+    roots.reverse();
+    Ok((roots, record.seq))
+}
+
+/// Decode a legacy nested record. Histories longer than ~60 revisions
+/// exceed serde_json's recursion limit, so those are decoded on a thread
+/// with a large stack and the limit disabled.
+fn decode_legacy_doc_record(bytes: &[u8]) -> Result<(RevTree, u64)> {
+    fn convert(record: LegacyDocRecord) -> (RevTree, u64) {
+        (serialized_to_rev_tree(&record.rev_tree), record.seq)
+    }
+
+    if let Ok(record) = serde_json::from_slice::<LegacyDocRecord>(bytes) {
+        return Ok(convert(record));
+    }
+
+    let owned = bytes.to_vec();
+    std::thread::Builder::new()
+        .name("rouchdb-legacy-decode".into())
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || -> Result<(RevTree, u64)> {
+            use serde::Deserialize as _;
+            let mut de = serde_json::Deserializer::from_slice(&owned);
+            de.disable_recursion_limit();
+            let record = LegacyDocRecord::deserialize(&mut de).map_err(|e| {
+                RouchError::DatabaseError(format!("corrupt document record: {}", e))
+            })?;
+            Ok(convert(record))
+        })
+        .map_err(|e| RouchError::DatabaseError(e.to_string()))?
+        .join()
+        .map_err(|_| RouchError::DatabaseError("legacy record decoding panicked".into()))?
+}
+
+/// Load and decode a document's record, if it exists.
+fn load_doc_record<T>(table: &T, doc_id: &str) -> Result<Option<(RevTree, u64)>>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
+    match db_err!(table.get(doc_id))? {
+        Some(guard) => decode_doc_record(guard.value()).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Key of a stored revision body: `doc_id\0rev`. Revision ids never
+/// contain NUL (`Revision` rejects it), so the key is unambiguous even for
+/// ids that contain NUL; see [`rev_data_keys`].
 fn rev_data_key(doc_id: &str, rev_str: &str) -> String {
     format!("{}\0{}", doc_id, rev_str)
+}
+
+/// Decode a stored document body (or local document), which may be nested
+/// up to [`MAX_NESTING_DEPTH`] levels (one more for the record around it).
+fn decode_body<T>(bytes: &[u8]) -> Result<T>
+where
+    T: serde::de::DeserializeOwned + Send + 'static,
+{
+    Ok(rouchdb_core::json::from_slice(
+        bytes,
+        MAX_NESTING_DEPTH + 1,
+    )?)
+}
+
+/// The canonical form of a revision string (`InvalidRev` if malformed).
+fn canonical_rev(rev_str: &str) -> Result<String> {
+    Ok(rev_str.parse::<Revision>()?.to_string())
+}
+
+/// Whether `rev` (canonical) names a revision of `tree`: a stored body of a
+/// revision that is not in the tree (stemmed by an older version) is gone.
+fn in_tree(tree: &RevTree, rev: &str) -> bool {
+    parse_rev(rev).is_ok_and(|(pos, hash)| rev_exists(tree, pos, &hash))
 }
 
 // ---------------------------------------------------------------------------
@@ -188,229 +377,488 @@ fn rev_data_key(doc_id: &str, rev_str: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Persistent adapter backed by `redb`.
+///
+/// redb is a synchronous engine (commits fsync), so every operation runs on
+/// Tokio's blocking thread pool instead of an async worker thread.
 pub struct RedbAdapter {
-    db: Arc<Database>,
-    name: String,
-    /// Lock for write serialization (redb handles transactions, but we need
-    /// to serialize our read-modify-write sequences).
-    write_lock: Arc<RwLock<()>>,
+    inner: Arc<Inner>,
+    rev_limit: u64,
+    upgrade_report: Option<Arc<UpgradeReport>>,
 }
+
+struct Inner {
+    db: Database,
+    name: String,
+    /// Hex MD5 of the file's canonical path when it was opened: part of
+    /// [`Adapter::id`], so a copy of the file (same persisted uuid) is a
+    /// different database for replication.
+    location: String,
+    /// Serializes writers before they reach redb (which would otherwise park
+    /// one blocking thread per waiting writer).
+    write_lock: Mutex<()>,
+    /// Change notifications, sent once a write is committed.
+    notices: broadcast::Sender<ChangeNotice>,
+}
+
+/// Hex MD5 of the canonical form of `path` (symlinks and `..` resolved), or
+/// of its absolute form if it cannot be canonicalized.
+fn location_hash(path: &Path) -> String {
+    use md5::{Digest, Md5};
+    let resolved = std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf());
+    format!("{:x}", Md5::digest(resolved.as_os_str().as_encoded_bytes()))
+}
+
+/// Change notices buffered per subscriber before it lags (and re-reads the
+/// changes feed).
+const NOTICE_CAPACITY: usize = 1024;
 
 impl RedbAdapter {
     /// Open or create a database at the given path.
+    ///
+    /// # Files written by rouchdb 0.4 or earlier
+    ///
+    /// The on-disk format changed in 0.5, and a file cannot be read by
+    /// both versions. `open` never converts a file written by rouchdb <= 0.4:
+    /// it returns [`RouchError::UpgradeRequired`] and leaves the file
+    /// untouched. Upgrade it once, keeping a backup, with the CLI
+    /// (`rouchdb migrate <path>`), with [`RedbAdapter::upgrade`], or by
+    /// opening it with [`RedbAdapter::open_with`] and
+    /// [`UpgradePolicy::WithBackup`]. After the upgrade rouchdb 0.4 refuses
+    /// the file (it fails to open it, with an error saying the file requires
+    /// rouchdb >= 0.5), and so it does files created by 0.5.
+    ///
+    /// Files written by unreleased 0.5 development builds (which 0.4 cannot
+    /// open either) are upgraded automatically, after a verified backup to
+    /// `<file>.rouchdb-0.5-pre.bak`. A file written by a newer rouchdb (an
+    /// unknown on-disk format) is refused rather than misread. Opening a file
+    /// that is already current writes nothing.
     pub fn open(path: impl AsRef<Path>, name: &str) -> Result<Self> {
-        let db = Database::create(path.as_ref())
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+        Self::open_with(path, name, OpenOptions::default())
+    }
 
-        // Initialize tables
-        {
-            let write_txn = db
-                .begin_write()
-                .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
-            // Opening tables in a write transaction creates them if they don't exist
-            {
-                write_txn
-                    .open_table(DOC_TABLE)
-                    .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
-                write_txn
-                    .open_table(REV_DATA_TABLE)
-                    .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
-                write_txn
-                    .open_table(CHANGES_TABLE)
-                    .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
-                write_txn
-                    .open_table(LOCAL_TABLE)
-                    .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
-                write_txn
-                    .open_table(ATTACHMENT_TABLE)
-                    .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
-            }
-            {
-                let mut meta = write_txn
-                    .open_table(META_TABLE)
-                    .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
-                if meta
-                    .get("meta")
-                    .map_err(|e| RouchError::DatabaseError(e.to_string()))?
-                    .is_none()
-                {
-                    let record = MetaRecord {
-                        update_seq: 0,
-                        db_uuid: Uuid::new_v4().to_string(),
-                    };
-                    let bytes = serde_json::to_vec(&record)?;
-                    meta.insert("meta", bytes.as_slice())
-                        .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
-                }
-            }
-            write_txn
-                .commit()
-                .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
-        }
-
+    /// Open or create a database at the given path, choosing what happens to
+    /// a file written by rouchdb <= 0.4 ([`OpenOptions::upgrade`]):
+    ///
+    /// ```no_run
+    /// use rouchdb_adapter_redb::{OpenOptions, RedbAdapter, UpgradePolicy};
+    ///
+    /// // Upgrades a 0.4 file after writing a verified backup of it to
+    /// // `app.redb.rouchdb-0.4.bak`.
+    /// let db = RedbAdapter::open_with(
+    ///     "app.redb",
+    ///     "app",
+    ///     OpenOptions::new().upgrade(UpgradePolicy::WithBackup(None)),
+    /// )?;
+    /// if let Some(report) = db.upgrade_report() {
+    ///     eprintln!("{report}");
+    /// }
+    /// # Ok::<(), rouchdb_core::error::RouchError>(())
+    /// ```
+    ///
+    /// The upgrade is one atomic transaction: the file is upgraded
+    /// completely or not at all (see [`RedbAdapter::upgrade`] about what an
+    /// error leaves behind). **Read [`RedbAdapter::upgrade`] about the first
+    /// compaction afterwards.**
+    pub fn open_with(path: impl AsRef<Path>, name: &str, options: OpenOptions) -> Result<Self> {
+        let (db, upgrade_report) = upgrade::open_database(path.as_ref(), &options)?;
         Ok(Self {
-            db: Arc::new(db),
-            name: name.to_string(),
-            write_lock: Arc::new(RwLock::new(())),
+            inner: Arc::new(Inner {
+                db,
+                name: name.to_string(),
+                location: location_hash(path.as_ref()),
+                write_lock: Mutex::new(()),
+                notices: broadcast::channel(NOTICE_CAPACITY).0,
+            }),
+            rev_limit: DEFAULT_REV_LIMIT,
+            upgrade_report: upgrade_report.map(Arc::new),
         })
     }
-}
 
-fn generate_rev_hash(
-    doc_data: &serde_json::Value,
-    deleted: bool,
-    prev_rev: Option<&str>,
-) -> String {
-    let mut hasher = Md5::new();
-    if let Some(prev) = prev_rev {
-        hasher.update(prev.as_bytes());
+    /// Upgrade a file written by an older rouchdb to the current format,
+    /// without opening it as a database (what `rouchdb migrate` does). The
+    /// file must exist and no program may have it open. `policy` is
+    /// [`UpgradePolicy::WithBackup`] or [`UpgradePolicy::InPlaceNoBackup`];
+    /// a file that already is current is left alone.
+    ///
+    /// The upgrade, in one atomic transaction: re-keys attachment bytes by
+    /// digest, moves `_local/` documents that 0.4 stored as ordinary
+    /// documents to the local document store, lower-cases upper-case
+    /// revision ids, counts the documents, moves the metadata to its new
+    /// table and installs the format guard that makes rouchdb 0.4 refuse the
+    /// file. A record it cannot decode stops it with an error naming the
+    /// record (nothing is skipped, nothing is changed); so does a file it
+    /// cannot represent (a `_local/` document stored under two names, or one
+    /// named just `_local/`), before any backup is written.
+    ///
+    /// Lower-casing revision ids can merge two spellings of one revision
+    /// (`2-ABC…` and `2-abc…`) and can change which conflicting revision
+    /// wins: the report lists both
+    /// ([`UpgradeReport::case_duplicate_bodies_discarded`],
+    /// [`UpgradeReport::docs_with_changed_winner`]).
+    ///
+    /// # Errors
+    ///
+    /// The transaction is committed with two-phase commit, so the file is
+    /// upgraded completely or not at all. An error **before the commit**
+    /// (while writing the backup or applying the upgrade) leaves the file
+    /// exactly as it was, and the backup made for that attempt is removed.
+    /// If **the commit itself** fails, the backup is kept and the error says
+    /// so: if the file still needs upgrading it was not changed (move the
+    /// backup elsewhere, or choose another backup path, before retrying);
+    /// otherwise the upgrade was committed and the backup is the copy of
+    /// the old file.
+    ///
+    /// # Disk space and memory
+    ///
+    /// The upgrade needs about twice the file size of free disk space (redb
+    /// copies every page it changes and commits in two phases), and the
+    /// backup about the file size again: about three times the file size
+    /// when backing up. Memory stays small whatever the file size: records
+    /// and attachments are processed one at a time, with a small page cache.
+    ///
+    /// # The first compaction after upgrading deletes old data
+    ///
+    /// rouchdb 0.4's `compact()` did nothing, so an upgraded file still holds
+    /// the bodies of every old revision. The first
+    /// [`compact`](Adapter::compact) deletes them, together with attachment
+    /// bytes that only old revisions reference (0.4 dropped the attachments
+    /// of a document whose body was updated without them, so such bytes are
+    /// often reachable only from an old revision). The report counts both;
+    /// keep the backup until you have checked it.
+    pub fn upgrade(path: impl AsRef<Path>, policy: UpgradePolicy) -> Result<UpgradeReport> {
+        upgrade::upgrade_file(path.as_ref(), &policy, false)
     }
-    hasher.update(if deleted { b"1" } else { b"0" });
-    let serialized = serde_json::to_string(doc_data).unwrap_or_default();
-    hasher.update(serialized.as_bytes());
-    format!("{:x}", hasher.finalize())
+
+    /// Report what [`RedbAdapter::upgrade`] would do to a file, without
+    /// changing it: the file is only read (read transactions), so not a
+    /// byte of it changes and no disk space is used.
+    ///
+    /// It runs the upgrade's analysis: it validates every record and
+    /// computes the plan, so it refuses a file the upgrade would refuse for
+    /// its content, with the same error, and reports the same counts. It
+    /// does not exercise the rest of the upgrade (the backup path, writing
+    /// and verifying the backup, free disk space, writing and committing the
+    /// upgrade), which can therefore still fail.
+    pub fn inspect_upgrade(path: impl AsRef<Path>) -> Result<UpgradeReport> {
+        upgrade::upgrade_file(path.as_ref(), &UpgradePolicy::Refuse, true)
+    }
+
+    /// What was done to the file when it was opened, if it was upgraded.
+    pub fn upgrade_report(&self) -> Option<&UpgradeReport> {
+        self.upgrade_report.as_deref()
+    }
+
+    /// Keep at most `limit` revisions per branch of a document's history
+    /// (PouchDB's `revs_limit`, CouchDB's `_revs_limit`; 0 means no limit).
+    /// Older revisions are stemmed away on the next write of the document
+    /// and are no longer readable. The limit is a property of this handle,
+    /// not of the file.
+    pub fn with_rev_limit(mut self, limit: u64) -> Self {
+        self.rev_limit = limit;
+        self
+    }
+
+    /// Run storage work on the blocking thread pool (or inline when called
+    /// outside a Tokio runtime).
+    async fn run<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Inner) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let inner = self.inner.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle
+                .spawn_blocking(move || f(&inner))
+                .await
+                .map_err(|e| RouchError::DatabaseError(format!("storage task failed: {}", e)))?,
+            Err(_) => f(&inner),
+        }
+    }
+
+    /// Like `run`, for operations that write: writers queue on an async
+    /// lock first.
+    async fn run_write<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Inner) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let _guard = self.inner.write_lock.lock().await;
+        self.run(f).await
+    }
 }
 
-fn attachment_key(doc_id: &str, att_id: &str) -> String {
-    format!("{}\0{}", doc_id, att_id)
+/// Current on-disk layout version stored in `MetaRecord::schema`.
+///
+/// - 0: rouchdb <= 0.4 (attachment bytes keyed by `doc_id\0name`).
+/// - 1: attachment bytes keyed by digest (content-addressed, shared).
+/// - 2: document counts maintained in the metadata record.
+///
+/// Released files of schema 2 keep the metadata in `rouchdb_meta` and carry
+/// the format guard; files of schema 1 or 2 with the metadata still in
+/// `metadata` were written by unreleased 0.5 development builds (see the
+/// `upgrade` module).
+const SCHEMA_VERSION: u32 = 2;
+
+const META_KEY: &str = "meta";
+const SECURITY_KEY: &str = "security";
+
+impl MetaRecord {
+    fn new() -> Self {
+        MetaRecord {
+            update_seq: 0,
+            db_uuid: Uuid::new_v4().to_string(),
+            schema: SCHEMA_VERSION,
+            purge_seq: 0,
+            doc_count: 0,
+            doc_del_count: 0,
+        }
+    }
+
+    /// Account for a document going from `before` to `after`
+    /// (`Some(deleted)`, or `None` when it does not exist).
+    fn adjust_counts(&mut self, before: Option<bool>, after: Option<bool>) {
+        match before {
+            Some(true) => self.doc_del_count = self.doc_del_count.saturating_sub(1),
+            Some(false) => self.doc_count = self.doc_count.saturating_sub(1),
+            None => {}
+        }
+        match after {
+            Some(true) => self.doc_del_count += 1,
+            Some(false) => self.doc_count += 1,
+            None => {}
+        }
+    }
 }
 
-fn compute_attachment_digest(data: &[u8]) -> String {
-    let mut hasher = Md5::new();
-    hasher.update(data);
-    let hash = hasher.finalize();
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(hash);
-    format!("md5-{}", b64)
+fn create_tables(txn: &redb::WriteTransaction) -> Result<()> {
+    db_err!(txn.open_table(DOC_TABLE))?;
+    db_err!(txn.open_table(REV_DATA_TABLE))?;
+    db_err!(txn.open_table(CHANGES_TABLE))?;
+    db_err!(txn.open_table(LOCAL_TABLE))?;
+    db_err!(txn.open_table(ATTACHMENT_TABLE))?;
+    db_err!(txn.open_table(META_TABLE))?;
+    Ok(())
 }
 
+fn read_meta<T>(table: &T) -> Result<MetaRecord>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
+    let guard = db_err!(table.get(META_KEY))?
+        .ok_or_else(|| RouchError::DatabaseError("missing metadata".into()))?;
+    Ok(serde_json::from_slice(guard.value())?)
+}
+
+fn write_meta(table: &mut redb::Table<&str, &[u8]>, meta: &MetaRecord) -> Result<()> {
+    let bytes = serde_json::to_vec(meta)?;
+    db_err!(table.insert(META_KEY, bytes.as_slice()))?;
+    Ok(())
+}
+
+/// Parse (and normalize) a revision string.
 fn parse_rev(rev_str: &str) -> Result<(u64, String)> {
-    let (pos_str, hash) = rev_str
-        .split_once('-')
-        .ok_or_else(|| RouchError::InvalidRev(rev_str.to_string()))?;
-    let pos: u64 = pos_str
-        .parse()
-        .map_err(|_| RouchError::InvalidRev(rev_str.to_string()))?;
-    Ok((pos, hash.to_string()))
+    let rev: Revision = rev_str.parse()?;
+    Ok((rev.pos, rev.hash))
 }
 
-macro_rules! db_err {
-    ($e:expr) => {
-        $e.map_err(|e| RouchError::DatabaseError(e.to_string()))
+/// Load one revision's stored body and attachment metadata.
+fn load_rev_data<T>(table: &T, doc_id: &str, rev: &str) -> Result<Option<RevDataRecord>>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
+    match db_err!(table.get(rev_data_key(doc_id, rev).as_str()))? {
+        Some(guard) => Ok(Some(decode_body(guard.value())?)),
+        None => Ok(None),
+    }
+}
+
+/// Load one revision's attachment metadata only (not its body).
+fn load_rev_attachments<T>(
+    table: &T,
+    doc_id: &str,
+    rev: &str,
+) -> Result<Option<HashMap<String, AttachmentRecord>>>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
+    match db_err!(table.get(rev_data_key(doc_id, rev).as_str()))? {
+        Some(guard) => {
+            let record: RevAttachmentsRecord = serde_json::from_slice(guard.value())?;
+            Ok(Some(record.attachments))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Load attachment bytes by digest.
+fn load_blob<T>(table: &T, digest: &str) -> Result<Option<Vec<u8>>>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
+    Ok(db_err!(table.get(digest))?.map(|g| g.value().to_vec()))
+}
+
+fn records_to_meta(records: &HashMap<String, AttachmentRecord>) -> HashMap<String, AttachmentMeta> {
+    records
+        .iter()
+        .map(|(name, r)| {
+            (
+                name.clone(),
+                AttachmentMeta {
+                    content_type: r.content_type.clone(),
+                    revpos: r.revpos,
+                    digest: r.digest.clone(),
+                    length: r.length,
+                    stub: true,
+                    encoding: r.encoding.clone(),
+                    encoded_length: r.encoded_length,
+                    data: None,
+                },
+            )
+        })
+        .collect()
+}
+
+fn meta_to_records(atts: &HashMap<String, AttachmentMeta>) -> HashMap<String, AttachmentRecord> {
+    atts.iter()
+        .map(|(name, m)| {
+            (
+                name.clone(),
+                AttachmentRecord {
+                    content_type: m.content_type.clone(),
+                    digest: m.digest.clone(),
+                    length: m.length,
+                    revpos: m.revpos,
+                    encoding: m.encoding.clone(),
+                    encoded_length: m.encoded_length,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Keys of every stored revision body of `doc_id` (`doc_id\0rev`).
+///
+/// The key range of `doc_id` also holds the keys of longer ids that start
+/// with `doc_id\0` (`a\0b\0rev` sorts among the keys of `a`). Revision ids
+/// contain no NUL, so a key whose remainder does belongs to such an id and
+/// is skipped: compacting or purging `a` must never touch `a\0b`.
+fn rev_data_keys<T>(table: &T, doc_id: &str) -> Result<Vec<String>>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
+    let start = format!("{}\0", doc_id);
+    let end = format!("{}\u{1}", doc_id);
+    let mut keys = Vec::new();
+    for entry in db_err!(table.range(start.as_str()..end.as_str()))? {
+        let (key, _) = db_err!(entry)?;
+        let key = key.value();
+        if !key[start.len()..].contains('\0') {
+            keys.push(key.to_string());
+        }
+    }
+    Ok(keys)
+}
+
+/// Delete stored bodies of `doc_id` whose revision is not in `keep`.
+fn drop_rev_data_except(
+    table: &mut redb::Table<&str, &[u8]>,
+    doc_id: &str,
+    keep: &std::collections::HashSet<String>,
+) -> Result<()> {
+    let prefix_len = doc_id.len() + 1;
+    for key in rev_data_keys(table, doc_id)? {
+        if !keep.contains(&key[prefix_len..]) {
+            db_err!(table.remove(key.as_str()))?;
+        }
+    }
+    Ok(())
+}
+
+/// All revisions (`pos-hash`) present in a tree.
+fn tree_revs(tree: &RevTree) -> std::collections::HashSet<String> {
+    let mut revs = std::collections::HashSet::new();
+    traverse_rev_tree(tree, |pos, node, _| {
+        revs.insert(format!("{}-{}", pos, node.hash));
+    });
+    revs
+}
+
+/// Mark every non-leaf node as `Missing`. Returns whether anything changed.
+fn mark_non_leaves_missing(tree: &mut RevTree) -> bool {
+    fn walk(node: &mut RevNode, changed: &mut bool) {
+        if !node.children.is_empty() {
+            if node.status != RevStatus::Missing {
+                node.status = RevStatus::Missing;
+                *changed = true;
+            }
+            for child in node.children.iter_mut() {
+                walk(child, changed);
+            }
+        }
+    }
+    let mut changed = false;
+    for path in tree.iter_mut() {
+        walk(&mut path.tree, &mut changed);
+    }
+    changed
+}
+
+/// Map a failed attachment edit to the error the attachment APIs return.
+fn attachment_edit_error(result: DocResult) -> RouchError {
+    match result.error.as_deref() {
+        Some("conflict") => RouchError::Conflict,
+        Some("not_found") => RouchError::NotFound(result.reason.unwrap_or_default()),
+        _ => RouchError::BadRequest(result.reason.unwrap_or_default()),
+    }
+}
+
+/// Build a document JSON body (`_id`, `_rev`, ...) from a stored revision.
+fn stored_doc_json(
+    doc_id: &str,
+    rev_str: &str,
+    rd: RevDataRecord,
+    winner_deleted: bool,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut obj = match rd.data {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
     };
+    obj.insert("_id".into(), serde_json::Value::String(doc_id.to_string()));
+    obj.insert(
+        "_rev".into(),
+        serde_json::Value::String(rev_str.to_string()),
+    );
+    if winner_deleted {
+        obj.insert("_deleted".into(), serde_json::Value::Bool(true));
+    }
+    obj
 }
 
 #[async_trait]
 impl Adapter for RedbAdapter {
     async fn info(&self) -> Result<DbInfo> {
-        // Read metadata and document data from a SINGLE read transaction so
-        // update_seq and the doc snapshot reflect the same committed state.
-        let read_txn = db_err!(self.db.begin_read())?;
-        let meta_table = db_err!(read_txn.open_table(META_TABLE))?;
-        let meta: MetaRecord = serde_json::from_slice(
-            db_err!(meta_table.get("meta"))?
-                .ok_or_else(|| RouchError::DatabaseError("missing metadata".into()))?
-                .value(),
-        )?;
-        let table = db_err!(read_txn.open_table(DOC_TABLE))?;
+        self.run(|db| db.info()).await
+    }
 
-        let mut doc_count = 0u64;
-        let mut doc_del_count = 0u64;
-        let iter = db_err!(table.iter())?;
-        for entry in iter {
-            let entry = db_err!(entry)?;
-            let record: DocRecord = deserialize_doc_record(entry.1.value())?;
-            let tree = serialized_to_rev_tree(&record.rev_tree);
-            if is_deleted(&tree) {
-                doc_del_count += 1;
-            } else {
-                doc_count += 1;
-            }
-        }
-
-        Ok(DbInfo {
-            db_name: self.name.clone(),
-            doc_count,
-            doc_del_count,
-            update_seq: Seq::Num(meta.update_seq),
-        })
+    /// The uuid stored in the file when the database was created (or last
+    /// destroyed), not its name, combined with a hash of the file's
+    /// canonical path: two files opened under the same name, one file
+    /// before and after `destroy()`, or a file and a copy of it (which
+    /// holds the same uuid) never share replication checkpoints, while
+    /// reopening a file at the same path (directly or through a symlink)
+    /// keeps its checkpoints. Copying or moving a file therefore makes its
+    /// next replication with each peer rescan the changes feed once; no
+    /// document is transferred again.
+    async fn id(&self) -> Result<String> {
+        self.run(|db| db.id()).await
     }
 
     async fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
-        let read_txn = db_err!(self.db.begin_read())?;
-        let doc_table = db_err!(read_txn.open_table(DOC_TABLE))?;
-        let rev_table = db_err!(read_txn.open_table(REV_DATA_TABLE))?;
-
-        let guard =
-            db_err!(doc_table.get(id))?.ok_or_else(|| RouchError::NotFound(id.to_string()))?;
-        let record: DocRecord = deserialize_doc_record(guard.value())?;
-        let tree = serialized_to_rev_tree(&record.rev_tree);
-
-        let target_rev = if let Some(ref rev_str) = opts.rev {
-            rev_str.clone()
-        } else {
-            winning_rev(&tree)
-                .ok_or_else(|| RouchError::NotFound(id.to_string()))?
-                .to_string()
-        };
-
-        let key = rev_data_key(id, &target_rev);
-        let rev_guard = db_err!(rev_table.get(key.as_str()))?;
-
-        let (data, deleted, att_records) = if let Some(guard) = rev_guard {
-            let rd: RevDataRecord = serde_json::from_slice(guard.value())?;
-            (rd.data, rd.deleted, rd.attachments)
-        } else {
-            (
-                serde_json::Value::Object(serde_json::Map::new()),
-                false,
-                HashMap::new(),
-            )
-        };
-
-        if deleted && opts.rev.is_none() {
-            return Err(RouchError::NotFound(id.to_string()));
-        }
-
-        let (pos, hash) = parse_rev(&target_rev)?;
-
-        let mut doc = Document {
-            id: id.to_string(),
-            rev: Some(Revision::new(pos, hash)),
-            deleted,
-            data,
-            attachments: HashMap::new(),
-        };
-
-        // Surface stored attachment metadata (content type, digest, length) so
-        // callers can read it without a separate attachment fetch.
-        for (name, rec) in att_records {
-            doc.attachments.insert(
-                name,
-                AttachmentMeta {
-                    content_type: rec.content_type,
-                    digest: rec.digest,
-                    length: rec.length,
-                    stub: true,
-                    data: None,
-                },
-            );
-        }
-
-        if opts.conflicts {
-            let conflicts = collect_conflicts(&tree);
-            if !conflicts.is_empty() {
-                let conflict_list: Vec<serde_json::Value> = conflicts
-                    .iter()
-                    .map(|c| serde_json::Value::String(c.to_string()))
-                    .collect();
-                if let serde_json::Value::Object(ref mut map) = doc.data {
-                    map.insert("_conflicts".into(), serde_json::Value::Array(conflict_list));
-                }
-            }
-        }
-
-        Ok(doc)
+        let id = id.to_string();
+        self.run(move |db| db.get(&id, opts)).await
     }
 
     async fn bulk_docs(
@@ -418,130 +866,312 @@ impl Adapter for RedbAdapter {
         docs: Vec<Document>,
         opts: BulkDocsOptions,
     ) -> Result<Vec<DocResult>> {
-        let _lock = self.write_lock.write().await;
+        let rev_limit = self.rev_limit;
+        self.run_write(move |db| db.bulk_docs(docs, opts, rev_limit))
+            .await
+    }
+
+    async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
+        self.run(move |db| db.all_docs(opts)).await
+    }
+
+    async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
+        self.run(move |db| db.changes(opts)).await
+    }
+
+    async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
+        self.run(move |db| db.revs_diff(revs)).await
+    }
+
+    async fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
+        self.run(move |db| db.bulk_get(docs)).await
+    }
+
+    async fn put_attachment(
+        &self,
+        doc_id: &str,
+        att_id: &str,
+        rev: &str,
+        data: Vec<u8>,
+        content_type: &str,
+    ) -> Result<DocResult> {
+        let (doc_id, att_id, rev, content_type) = (
+            doc_id.to_string(),
+            att_id.to_string(),
+            rev.to_string(),
+            content_type.to_string(),
+        );
+        let rev_limit = self.rev_limit;
+        self.run_write(move |db| {
+            db.put_attachment(&doc_id, &att_id, &rev, data, &content_type, rev_limit)
+        })
+        .await
+    }
+
+    async fn get_attachment(
+        &self,
+        doc_id: &str,
+        att_id: &str,
+        opts: GetAttachmentOptions,
+    ) -> Result<Vec<u8>> {
+        let (doc_id, att_id) = (doc_id.to_string(), att_id.to_string());
+        self.run(move |db| db.get_attachment(&doc_id, &att_id, opts))
+            .await
+    }
+
+    async fn remove_attachment(&self, doc_id: &str, att_id: &str, rev: &str) -> Result<DocResult> {
+        let (doc_id, att_id, rev) = (doc_id.to_string(), att_id.to_string(), rev.to_string());
+        let rev_limit = self.rev_limit;
+        self.run_write(move |db| db.remove_attachment(&doc_id, &att_id, &rev, rev_limit))
+            .await
+    }
+
+    async fn get_local(&self, id: &str) -> Result<serde_json::Value> {
+        let id = id.to_string();
+        self.run(move |db| db.get_local(&id)).await
+    }
+
+    async fn put_local(&self, id: &str, doc: serde_json::Value) -> Result<()> {
+        let id = id.to_string();
+        self.run_write(move |db| db.put_local(&id, doc)).await
+    }
+
+    async fn remove_local(&self, id: &str) -> Result<()> {
+        let id = id.to_string();
+        self.run_write(move |db| db.remove_local(&id)).await
+    }
+
+    async fn compact(&self) -> Result<()> {
+        self.run_write(|db| db.compact()).await
+    }
+
+    async fn destroy(&self) -> Result<()> {
+        self.run_write(|db| db.destroy()).await
+    }
+
+    async fn purge(&self, req: HashMap<String, Vec<String>>) -> Result<PurgeResponse> {
+        self.run_write(move |db| db.purge(req)).await
+    }
+
+    fn subscribe(&self) -> Option<broadcast::Receiver<ChangeNotice>> {
+        Some(self.inner.notices.subscribe())
+    }
+
+    async fn get_security(&self) -> Result<SecurityDocument> {
+        self.run(|db| db.get_security()).await
+    }
+
+    async fn put_security(&self, doc: SecurityDocument) -> Result<()> {
+        self.run_write(move |db| db.put_security(doc)).await
+    }
+}
+
+/// The storage operations, run synchronously (see `RedbAdapter::run`).
+impl Inner {
+    /// Commit a write transaction, then announce the changes it recorded
+    /// after sequence `since` to the subscribers (read from the transaction
+    /// before it commits, only when someone listens).
+    fn commit_announcing(&self, txn: redb::WriteTransaction, since: u64) -> Result<()> {
+        let mut notices = Vec::new();
+        if self.notices.receiver_count() > 0 {
+            let changes = db_err!(txn.open_table(CHANGES_TABLE))?;
+            for entry in db_err!(changes.range(since + 1..))? {
+                let (seq, record) = db_err!(entry)?;
+                let record: ChangeRecord = serde_json::from_slice(record.value())?;
+                notices.push(ChangeNotice::new(seq.value(), record.doc_id));
+            }
+        }
+        db_err!(txn.commit())?;
+        for notice in notices {
+            let _ = self.notices.send(notice);
+        }
+        Ok(())
+    }
+    fn info(&self) -> Result<DbInfo> {
+        // Counts and update_seq live in one metadata record, so they always
+        // reflect the same committed state without scanning documents.
+        let read_txn = db_err!(self.db.begin_read())?;
+        let meta = read_meta(&db_err!(read_txn.open_table(META_TABLE))?)?;
+
+        Ok(DbInfo::new(
+            self.name.clone(),
+            meta.doc_count,
+            meta.doc_del_count,
+            meta.update_seq,
+        ))
+    }
+
+    /// The database's persisted uuid (renewed by `destroy()`) and the hash
+    /// of its location.
+    fn id(&self) -> Result<String> {
+        let read_txn = db_err!(self.db.begin_read())?;
+        let uuid = read_meta(&db_err!(read_txn.open_table(META_TABLE))?)?.db_uuid;
+        Ok(format!("{uuid}-{}", self.location))
+    }
+
+    fn get(&self, id: &str, opts: GetOptions) -> Result<Document> {
+        if opts.open_revs.is_some() {
+            return Err(RouchError::BadRequest(
+                "open_revs is not supported by get(); use bulk_get".into(),
+            ));
+        }
+
+        let requested = opts.rev.as_deref().map(canonical_rev).transpose()?;
+        let read_txn = db_err!(self.db.begin_read())?;
+        if let Some(local) = local_doc_id(id) {
+            let table = db_err!(read_txn.open_table(LOCAL_TABLE))?;
+            return match db_err!(table.get(local))? {
+                Some(guard) => Ok(local_document(local, decode_body(guard.value())?)),
+                None => Err(RouchError::NotFound("missing".into())),
+            };
+        }
+        let doc_table = db_err!(read_txn.open_table(DOC_TABLE))?;
+        let rev_table = db_err!(read_txn.open_table(REV_DATA_TABLE))?;
+
+        let (tree, _) =
+            load_doc_record(&doc_table, id)?.ok_or_else(|| RouchError::NotFound(id.to_string()))?;
+
+        let mut target_rev = if let Some(rev_str) = requested {
+            rev_str
+        } else {
+            winning_rev(&tree)
+                .ok_or_else(|| RouchError::NotFound(id.to_string()))?
+                .to_string()
+        };
+
+        // latest: walk the requested rev's own branch down to its leaf.
+        if opts.latest
+            && opts.rev.is_some()
+            && let Ok((pos, hash)) = parse_rev(&target_rev)
+            && let Some(rev) = latest_leaf(&tree, pos, &hash)
+        {
+            target_rev = rev.to_string();
+        }
+
+        // An unknown, stemmed, compacted or otherwise body-less revision is
+        // missing, never an empty document.
+        if !in_tree(&tree, &target_rev) {
+            return Err(RouchError::NotFound("missing".into()));
+        }
+        let rd = load_rev_data(&rev_table, id, &target_rev)?
+            .ok_or_else(|| RouchError::NotFound("missing".into()))?;
+
+        if rd.deleted && opts.rev.is_none() {
+            return Err(RouchError::NotFound(id.to_string()));
+        }
+
+        let (pos, hash) = parse_rev(&target_rev)?;
+
+        let mut doc = Document {
+            id: id.to_string(),
+            rev: Some(Revision::new(pos, hash.clone())),
+            deleted: rd.deleted,
+            data: rd.data,
+            attachments: records_to_meta(&rd.attachments),
+        };
+
+        // Inline the attachment bytes only when explicitly requested.
+        if opts.attachments && !doc.attachments.is_empty() {
+            let att_table = db_err!(read_txn.open_table(ATTACHMENT_TABLE))?;
+            for meta in doc.attachments.values_mut() {
+                meta.data = load_blob(&att_table, &meta.digest)?;
+                meta.stub = meta.data.is_none();
+            }
+        }
+
+        if let serde_json::Value::Object(ref mut map) = doc.data {
+            if opts.conflicts {
+                let conflicts = collect_conflicts(&tree);
+                if !conflicts.is_empty() {
+                    let conflict_list: Vec<serde_json::Value> = conflicts
+                        .iter()
+                        .map(|c| serde_json::Value::String(c.to_string()))
+                        .collect();
+                    map.insert("_conflicts".into(), serde_json::Value::Array(conflict_list));
+                }
+            }
+            if opts.revs
+                && let Some(ids) = find_rev_ancestry(&tree, pos, &hash)
+            {
+                map.insert(
+                    "_revisions".into(),
+                    serde_json::json!({"start": pos, "ids": ids}),
+                );
+            }
+            if opts.revs_info
+                && let Some(info) = revs_info(&tree, pos, &hash)
+            {
+                map.insert("_revs_info".into(), serde_json::to_value(&info)?);
+            }
+        }
+
+        Ok(doc)
+    }
+
+    fn bulk_docs(
+        &self,
+        docs: Vec<Document>,
+        opts: BulkDocsOptions,
+        rev_limit: u64,
+    ) -> Result<Vec<DocResult>> {
         let write_txn = db_err!(self.db.begin_write())?;
 
         let mut results = Vec::with_capacity(docs.len());
 
         // Read current metadata
-        let mut meta = {
-            let meta_table = db_err!(write_txn.open_table(META_TABLE))?;
-            let guard = db_err!(meta_table.get("meta"))?.unwrap();
-            serde_json::from_slice::<MetaRecord>(guard.value())?
-        };
+        let mut meta = read_meta(&db_err!(write_txn.open_table(META_TABLE))?)?;
+        let since = meta.update_seq;
 
         {
-            let mut doc_table = db_err!(write_txn.open_table(DOC_TABLE))?;
-            let mut rev_table = db_err!(write_txn.open_table(REV_DATA_TABLE))?;
-            let mut changes_table = db_err!(write_txn.open_table(CHANGES_TABLE))?;
-
+            let mut tables = WriteTables::open(&write_txn)?;
             for doc in docs {
-                let result = process_doc(
-                    &mut doc_table,
-                    &mut rev_table,
-                    &mut changes_table,
-                    &mut meta,
-                    doc,
-                    opts.new_edits,
-                )?;
+                let result = if opts.new_edits {
+                    write_new_edit(&mut tables, &mut meta, doc, rev_limit)?
+                } else {
+                    write_replicated(&mut tables, &mut meta, doc, rev_limit)?
+                };
                 results.push(result);
             }
         }
 
         // Write updated metadata
-        {
-            let mut meta_table = db_err!(write_txn.open_table(META_TABLE))?;
-            let meta_bytes = serde_json::to_vec(&meta)?;
-            db_err!(meta_table.insert("meta", meta_bytes.as_slice()))?;
-        }
+        write_meta(&mut db_err!(write_txn.open_table(META_TABLE))?, &meta)?;
 
-        db_err!(write_txn.commit())?;
+        self.commit_announcing(write_txn, since)?;
 
         Ok(results)
     }
 
-    async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
+    fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
         let read_txn = db_err!(self.db.begin_read())?;
         let doc_table = db_err!(read_txn.open_table(DOC_TABLE))?;
         let rev_table = db_err!(read_txn.open_table(REV_DATA_TABLE))?;
 
         let mut rows = Vec::new();
-        let mut total_count = 0u64;
+        let meta = read_meta(&db_err!(read_txn.open_table(META_TABLE))?)?;
+        let skip = opts.skip as usize;
+        let limit = opts.limit.map(|l| l as usize).unwrap_or(usize::MAX);
 
-        let iter = db_err!(doc_table.iter())?;
-        for entry in iter {
-            let entry = db_err!(entry)?;
-            let doc_id = entry.0.value().to_string();
-            let record: DocRecord = deserialize_doc_record(entry.1.value())?;
-            let tree = serialized_to_rev_tree(&record.rev_tree);
-
-            let winner = match winning_rev(&tree) {
+        // Build one row for a document, or None for a deleted one that is not
+        // explicitly requested.
+        let make_row = |doc_id: &str, tree: &RevTree, by_key: bool| -> Result<Option<AllDocsRow>> {
+            let winner = match winning_rev(tree) {
                 Some(w) => w,
-                None => continue,
+                None => return Ok(None),
             };
-            let deleted = is_deleted(&tree);
-
-            // total_rows is the count of non-deleted documents in the whole
-            // database, independent of any range / key / skip / limit filters.
-            if !deleted {
-                total_count += 1;
+            let deleted = is_deleted(tree);
+            if deleted && !by_key {
+                return Ok(None);
             }
-
-            if deleted && opts.keys.is_none() {
-                continue;
-            }
-
-            // Apply key range filters (descending flips startkey/endkey meaning)
-            if opts.keys.is_none() && opts.key.is_none() {
-                if let Some(ref start) = opts.start_key
-                    && ((!opts.descending && doc_id.as_str() < start.as_str())
-                        || (opts.descending && doc_id.as_str() > start.as_str()))
-                {
-                    continue;
-                }
-                if let Some(ref end) = opts.end_key {
-                    if opts.inclusive_end {
-                        if (!opts.descending && doc_id.as_str() > end.as_str())
-                            || (opts.descending && doc_id.as_str() < end.as_str())
-                        {
-                            continue;
-                        }
-                    } else if (!opts.descending && doc_id.as_str() >= end.as_str())
-                        || (opts.descending && doc_id.as_str() <= end.as_str())
-                    {
-                        continue;
-                    }
-                }
-            }
-
-            if let Some(ref key) = opts.key
-                && &doc_id != key
-            {
-                continue;
-            }
-
-            if let Some(ref keys) = opts.keys
-                && !keys.contains(&doc_id)
-            {
-                continue;
-            }
-
             let doc_json = if opts.include_docs && !deleted {
                 let rev_str = winner.to_string();
-                let key = rev_data_key(&doc_id, &rev_str);
-                match db_err!(rev_table.get(key.as_str()))? {
-                    Some(guard) => {
-                        let rd: RevDataRecord = serde_json::from_slice(guard.value())?;
-                        let mut obj = match rd.data {
-                            serde_json::Value::Object(m) => m,
-                            _ => serde_json::Map::new(),
-                        };
-                        obj.insert("_id".into(), serde_json::Value::String(doc_id.clone()));
-                        obj.insert("_rev".into(), serde_json::Value::String(rev_str));
+                match load_rev_data(&rev_table, doc_id, &rev_str)? {
+                    Some(rd) => {
+                        let mut obj = stored_doc_json(doc_id, &rev_str, rd, false);
                         // Embed _conflicts when requested, matching the memory
                         // adapter and CouchDB.
                         if opts.conflicts {
-                            let conflicts = collect_conflicts(&tree);
+                            let conflicts = collect_conflicts(tree);
                             if !conflicts.is_empty() {
                                 let conflict_list: Vec<serde_json::Value> = conflicts
                                     .iter()
@@ -560,108 +1190,111 @@ impl Adapter for RedbAdapter {
             } else {
                 None
             };
+            Ok(Some(
+                AllDocsRow::document(doc_id, AllDocsRowValue::new(winner.to_string(), deleted))
+                    .with_doc(doc_json),
+            ))
+        };
 
-            rows.push(AllDocsRow {
-                id: doc_id.clone(),
-                key: doc_id,
-                value: AllDocsRowValue {
-                    rev: winner.to_string(),
-                    deleted: if deleted { Some(true) } else { None },
-                },
-                doc: doc_json,
-            });
-        }
-
-        let includes_local = opts.start_key.as_deref().is_some_and(|k| k.starts_with("_local/"))
-            || opts.end_key.as_deref().is_some_and(|k| k.starts_with("_local/"))
-            || opts.key.as_deref().is_some_and(|k| k.starts_with("_local/"))
-            || opts.keys.as_ref().is_some_and(|keys| keys.iter().any(|k| k.starts_with("_local/")));
-
-        if includes_local {
-            let local_table = db_err!(read_txn.open_table(LOCAL_TABLE))?;
-            for entry in db_err!(local_table.iter())? {
-                let entry = db_err!(entry)?;
-                let clean_id = entry.0.value();
-                let doc_id = format!("_local/{}", clean_id);
-
-                if let Some(ref start) = opts.start_key
-                    && ((!opts.descending && doc_id.as_str() < start.as_str())
-                        || (opts.descending && doc_id.as_str() > start.as_str()))
-                {
-                    continue;
-                }
-                if let Some(ref end) = opts.end_key {
-                    if opts.inclusive_end {
-                        if (!opts.descending && doc_id.as_str() > end.as_str())
-                            || (opts.descending && doc_id.as_str() < end.as_str())
-                        {
+        if let Some(ref keys) = opts.keys {
+            // One row per requested key, in request order (reversed for
+            // descending), duplicates included; an unknown key gets a
+            // `not_found` row (CouchDB).
+            let ordered: Vec<&String> = if opts.descending {
+                keys.iter().rev().collect()
+            } else {
+                keys.iter().collect()
+            };
+            for key in ordered {
+                let row = match load_doc_record(&doc_table, key)? {
+                    Some((tree, _)) => make_row(key, &tree, true)?,
+                    None => None,
+                };
+                rows.push(row.unwrap_or_else(|| AllDocsRow::not_found(key.as_str())));
+            }
+            rows = rows.into_iter().skip(skip).take(limit).collect();
+        } else if let Some(ref key) = opts.key {
+            // A single key is a direct lookup; a deleted doc yields no row.
+            if skip == 0
+                && limit > 0
+                && let Some((tree, _)) = load_doc_record(&doc_table, key)?
+                && let Some(row) = make_row(key, &tree, false)?
+            {
+                rows.push(row);
+            }
+        } else {
+            // Key range scan in the requested direction, stopping as soon as
+            // the page is full. Descending swaps the meaning of start/end.
+            use std::ops::Bound;
+            let (low, high) = if opts.descending {
+                (opts.end_key.as_deref(), opts.start_key.as_deref())
+            } else {
+                (opts.start_key.as_deref(), opts.end_key.as_deref())
+            };
+            let lower = match low {
+                None => Bound::Unbounded,
+                Some(k) if opts.descending && !opts.inclusive_end => Bound::Excluded(k),
+                Some(k) => Bound::Included(k),
+            };
+            let upper = match high {
+                None => Bound::Unbounded,
+                Some(k) if !opts.descending && !opts.inclusive_end => Bound::Excluded(k),
+                Some(k) => Bound::Included(k),
+            };
+            // An inverted range matches nothing.
+            let inverted = matches!((low, high), (Some(l), Some(h)) if l > h);
+            if !inverted && limit > 0 {
+                let range = db_err!(doc_table.range::<&str>((lower, upper)))?;
+                let iter: Box<dyn Iterator<Item = _>> = if opts.descending {
+                    Box::new(range.rev())
+                } else {
+                    Box::new(range)
+                };
+                let mut skipped = 0usize;
+                for entry in iter {
+                    let (key, value) = db_err!(entry)?;
+                    let (tree, _) = decode_doc_record(value.value())?;
+                    if let Some(row) = make_row(key.value(), &tree, false)? {
+                        if skipped < skip {
+                            skipped += 1;
                             continue;
                         }
-                    } else if (!opts.descending && doc_id.as_str() >= end.as_str())
-                        || (opts.descending && doc_id.as_str() <= end.as_str())
-                    {
-                        continue;
+                        rows.push(row);
+                        if rows.len() >= limit {
+                            break;
+                        }
                     }
                 }
-                if let Some(ref key) = opts.key && &doc_id != key {
-                    continue;
-                }
-                if let Some(ref keys) = opts.keys && !keys.contains(&doc_id) {
-                    continue;
-                }
-
-                let val: serde_json::Value = serde_json::from_slice(entry.1.value())?;
-                let rev = val.get("_rev").and_then(|v| v.as_str()).unwrap_or("0-1").to_string();
-
-                rows.push(AllDocsRow {
-                    id: doc_id.clone(),
-                    key: doc_id,
-                    value: AllDocsRowValue {
-                        rev,
-                        deleted: None,
-                    },
-                    doc: if opts.include_docs { Some(val) } else { None },
-                });
             }
         }
 
-        if opts.descending {
-            rows.reverse();
-        }
-
-        let total_rows = total_count;
-        let skip = opts.skip as usize;
-        if skip > 0 {
-            rows = rows.into_iter().skip(skip).collect();
-        }
-        if let Some(limit) = opts.limit {
-            rows.truncate(limit as usize);
-        }
+        // total_rows is the count of non-deleted documents in the whole
+        // database, independent of any range / key / skip / limit filters.
+        let total_rows = meta.doc_count;
 
         // Read update_seq from the SAME read transaction as the doc snapshot
         // to avoid a TOCTOU inconsistency with a concurrent committed write.
         let update_seq = if opts.update_seq {
-            let meta_table = db_err!(read_txn.open_table(META_TABLE))?;
-            let meta: MetaRecord = serde_json::from_slice(
-                db_err!(meta_table.get("meta"))?
-                    .ok_or_else(|| RouchError::DatabaseError("missing metadata".into()))?
-                    .value(),
-            )?;
             Some(Seq::Num(meta.update_seq))
         } else {
             None
         };
 
-        Ok(AllDocsResponse {
-            total_rows,
-            offset: opts.skip,
-            rows,
-            update_seq,
-        })
+        Ok(AllDocsResponse::new(total_rows, opts.skip, rows).with_update_seq(update_seq))
     }
 
-    async fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
+    fn changes(&self, opts: ChangesOptions) -> Result<ChangesResponse> {
         let read_txn = db_err!(self.db.begin_read())?;
+        // `limit: 0` is no change at all (CouchDB): the feed stays at `since`,
+        // or at the current sequence when descending.
+        if opts.limit == Some(0) {
+            let last_seq = if opts.descending {
+                Seq::Num(read_meta(&db_err!(read_txn.open_table(META_TABLE))?)?.update_seq)
+            } else {
+                opts.since.clone()
+            };
+            return Ok(ChangesResponse::new(Vec::new(), last_seq));
+        }
         let changes_table = db_err!(read_txn.open_table(CHANGES_TABLE))?;
         let doc_table = db_err!(read_txn.open_table(DOC_TABLE))?;
         let rev_table = db_err!(read_txn.open_table(REV_DATA_TABLE))?;
@@ -669,31 +1302,24 @@ impl Adapter for RedbAdapter {
         let mut results = Vec::new();
 
         let start = opts.since.as_num().saturating_add(1);
-        let iter = db_err!(changes_table.range(start..))?;
-
-        // Propagate deserialization errors instead of panicking on a corrupt
-        // or truncated change record.
-        let entries: Vec<(u64, ChangeRecord)> = iter
-            .filter_map(|e| e.ok())
-            .map(|e| {
-                Ok((
-                    e.0.value(),
-                    serde_json::from_slice::<ChangeRecord>(e.1.value())?,
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let iter: Box<dyn Iterator<Item = &(u64, ChangeRecord)>> = if opts.descending {
-            Box::new(entries.iter().rev())
+        let range = db_err!(changes_table.range(start..))?;
+        // Iterate lazily (in either direction) so `limit` stops the scan.
+        let iter: Box<dyn Iterator<Item = _>> = if opts.descending {
+            Box::new(range.rev())
         } else {
-            Box::new(entries.iter())
+            Box::new(range)
         };
 
         // Highest sequence inspected, so last_seq advances past a fully
         // filtered range instead of sticking at `since`.
         let mut max_scanned: Option<u64> = None;
 
-        for (seq, change) in iter {
+        for entry in iter {
+            // Propagate deserialization errors instead of panicking on a
+            // corrupt or truncated change record.
+            let entry = db_err!(entry)?;
+            let seq = &entry.0.value();
+            let change: ChangeRecord = serde_json::from_slice(entry.1.value())?;
             max_scanned = Some(max_scanned.map_or(*seq, |m| m.max(*seq)));
 
             if let Some(ref doc_ids) = opts.doc_ids
@@ -702,86 +1328,55 @@ impl Adapter for RedbAdapter {
                 continue;
             }
 
-            let rev_str = db_err!(doc_table.get(change.doc_id.as_str()))?
-                .and_then(|guard| {
-                    let record: DocRecord = deserialize_doc_record(guard.value()).ok()?;
-                    let tree = serialized_to_rev_tree(&record.rev_tree);
-                    winning_rev(&tree).map(|r| r.to_string())
-                })
+            let tree = load_doc_record(&doc_table, change.doc_id.as_str())?.map(|(t, _)| t);
+            let rev_str = tree
+                .as_ref()
+                .and_then(winning_rev)
+                .map(|r| r.to_string())
                 .unwrap_or_default();
 
             let doc = if opts.include_docs && !rev_str.is_empty() {
-                let key = rev_data_key(&change.doc_id, &rev_str);
-                match db_err!(rev_table.get(key.as_str()))? {
-                    Some(guard) => {
-                        let rd: RevDataRecord = serde_json::from_slice(guard.value())?;
-                        let mut obj = match rd.data {
-                            serde_json::Value::Object(m) => m,
-                            _ => serde_json::Map::new(),
-                        };
-                        obj.insert(
-                            "_id".into(),
-                            serde_json::Value::String(change.doc_id.clone()),
-                        );
-                        obj.insert("_rev".into(), serde_json::Value::String(rev_str.clone()));
-                        if change.deleted {
-                            obj.insert("_deleted".into(), serde_json::Value::Bool(true));
-                        }
-                        Some(serde_json::Value::Object(obj))
-                    }
-                    None => None,
-                }
+                load_rev_data(&rev_table, &change.doc_id, &rev_str)?.map(|rd| {
+                    serde_json::Value::Object(stored_doc_json(
+                        &change.doc_id,
+                        &rev_str,
+                        rd,
+                        change.deleted,
+                    ))
+                })
             } else {
                 None
             };
 
             // Build changes list based on style
-            let changes_list = if opts.style == ChangesStyle::AllDocs {
-                // Fetch all leaf revisions for AllDocs style
-                if let Some(guard) = db_err!(doc_table.get(change.doc_id.as_str()))? {
-                    let record: DocRecord = deserialize_doc_record(guard.value())?;
-                    let tree = serialized_to_rev_tree(&record.rev_tree);
-                    collect_leaves(&tree)
-                        .iter()
-                        .map(|l| ChangeRev {
-                            rev: l.rev_string(),
-                        })
-                        .collect()
-                } else {
-                    vec![ChangeRev {
-                        rev: rev_str.clone(),
-                    }]
-                }
-            } else {
-                vec![ChangeRev { rev: rev_str }]
+            let changes_list = match (&opts.style, &tree) {
+                // All leaf revisions, including deleted ones.
+                (ChangesStyle::AllDocs, Some(tree)) => collect_leaves(tree)
+                    .iter()
+                    .map(|l| l.rev_string())
+                    .collect(),
+                _ => vec![rev_str],
             };
 
             // Collect conflicts if requested
-            let conflicts = if opts.conflicts {
-                if let Some(guard) = db_err!(doc_table.get(change.doc_id.as_str()))? {
-                    let record: DocRecord = deserialize_doc_record(guard.value())?;
-                    let tree = serialized_to_rev_tree(&record.rev_tree);
-                    let c = collect_conflicts(&tree);
+            let conflicts = match (&tree, opts.conflicts) {
+                (Some(tree), true) => {
+                    let c = collect_conflicts(tree);
                     if c.is_empty() {
                         None
                     } else {
                         Some(c.iter().map(|r| r.to_string()).collect())
                     }
-                } else {
-                    None
                 }
-            } else {
-                None
+                _ => None,
             };
 
-            results.push(ChangeEvent {
-                seq: Seq::Num(*seq),
-                id: change.doc_id.clone(),
-                changes: changes_list,
-                deleted: change.deleted,
-                doc,
-                conflicts,
-            });
+            results.push(
+                ChangeEvent::new(*seq, change.doc_id.clone(), changes_list)
+                    .with_deleted(change.deleted)
+                    .with_doc(doc)
+                    .with_conflicts(conflicts),
+            );
 
             if let Some(limit) = opts.limit
                 && results.len() >= limit as usize
@@ -796,425 +1391,233 @@ impl Adapter for RedbAdapter {
             .or_else(|| max_scanned.map(Seq::Num))
             .unwrap_or(opts.since.clone());
 
-        Ok(ChangesResponse { results, last_seq })
+        Ok(ChangesResponse::new(results, last_seq))
     }
 
-    async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
+    fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
         let read_txn = db_err!(self.db.begin_read())?;
         let doc_table = db_err!(read_txn.open_table(DOC_TABLE))?;
 
         let mut results = HashMap::new();
 
         for (doc_id, rev_list) in revs {
-            let mut missing = Vec::new();
-            let mut possible_ancestors = Vec::new();
-
-            let stored = db_err!(doc_table.get(doc_id.as_str()))?;
-            let tree = stored.as_ref().and_then(|guard| {
-                let record: DocRecord = deserialize_doc_record(guard.value()).ok()?;
-                Some(serialized_to_rev_tree(&record.rev_tree))
-            });
-
-            for rev_str in &rev_list {
-                let (pos, hash) = parse_rev(rev_str)?;
-                let exists = tree
-                    .as_ref()
-                    .map(|t| rev_exists(t, pos, &hash))
-                    .unwrap_or(false);
-
-                if !exists {
-                    missing.push(rev_str.clone());
-                    if let Some(ref tree) = tree {
-                        let leaves = collect_leaves(tree);
-                        for leaf in &leaves {
-                            if leaf.pos < pos {
-                                let anc = leaf.rev_string();
-                                if !possible_ancestors.contains(&anc) {
-                                    possible_ancestors.push(anc);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !missing.is_empty() {
-                results.insert(
-                    doc_id,
-                    RevsDiffResult {
-                        missing,
-                        possible_ancestors,
-                    },
-                );
+            let tree = load_doc_record(&doc_table, doc_id.as_str())?.map(|(t, _)| t);
+            if let Some(diff) = revs_diff_one(tree.as_ref(), &rev_list)? {
+                results.insert(doc_id, diff);
             }
         }
 
-        Ok(RevsDiffResponse { results })
+        Ok(RevsDiffResponse::new(results))
     }
 
-    async fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
+    fn bulk_get(&self, docs: Vec<BulkGetItem>) -> Result<BulkGetResponse> {
         let read_txn = db_err!(self.db.begin_read())?;
         let doc_table = db_err!(read_txn.open_table(DOC_TABLE))?;
         let rev_table = db_err!(read_txn.open_table(REV_DATA_TABLE))?;
+        let att_table = db_err!(read_txn.open_table(ATTACHMENT_TABLE))?;
 
         let mut results = Vec::new();
 
         for item in docs {
-            let mut bulk_docs = Vec::new();
+            let not_found = |rev: String| {
+                BulkGetDoc::error(BulkGetError::new(
+                    item.id.clone(),
+                    rev,
+                    "not_found",
+                    "missing",
+                ))
+            };
 
-            match db_err!(doc_table.get(item.id.as_str()))? {
-                Some(guard) => {
-                    let record: DocRecord = deserialize_doc_record(guard.value())?;
-                    let tree = serialized_to_rev_tree(&record.rev_tree);
+            let tree = load_doc_record(&doc_table, item.id.as_str())?.map(|(t, _)| t);
+            let rev_str = match (&item.rev, &tree) {
+                (Some(rev), _) => Some(canonical_rev(rev).unwrap_or_else(|_| rev.clone())),
+                (None, Some(tree)) => winning_rev(tree).map(|w| w.to_string()),
+                (None, None) => None,
+            };
 
-                    let rev_str = if let Some(ref rev) = item.rev {
-                        rev.clone()
-                    } else {
-                        match winning_rev(&tree) {
-                            Some(w) => w.to_string(),
-                            None => {
-                                bulk_docs.push(BulkGetDoc {
-                                    ok: None,
-                                    error: Some(BulkGetError {
-                                        id: item.id.clone(),
-                                        rev: item.rev.unwrap_or_default(),
-                                        error: "not_found".into(),
-                                        reason: "missing".into(),
-                                    }),
-                                });
-                                results.push(BulkGetResult {
-                                    id: item.id,
-                                    docs: bulk_docs,
-                                });
-                                continue;
-                            }
-                        }
-                    };
+            let found = match (&tree, &rev_str) {
+                (Some(tree), Some(rev_str)) if in_tree(tree, rev_str) => {
+                    load_rev_data(&rev_table, &item.id, rev_str)?
+                        .map(|rd| (tree, rev_str.clone(), rd))
+                }
+                _ => None,
+            };
 
-                    let key = rev_data_key(&item.id, &rev_str);
-                    if let Some(rev_guard) = db_err!(rev_table.get(key.as_str()))? {
-                        let rd: RevDataRecord = serde_json::from_slice(rev_guard.value())?;
-                        let mut obj = match rd.data {
-                            serde_json::Value::Object(m) => m,
-                            _ => serde_json::Map::new(),
-                        };
-                        obj.insert("_id".into(), serde_json::Value::String(item.id.clone()));
-                        obj.insert("_rev".into(), serde_json::Value::String(rev_str.clone()));
-                        if rd.deleted {
-                            obj.insert("_deleted".into(), serde_json::Value::Bool(true));
-                        }
+            let bulk_doc = match found {
+                Some((tree, rev_str, rd)) => {
+                    let deleted = rd.deleted;
+                    let atts = rd.attachments.clone();
+                    let mut obj = stored_doc_json(&item.id, &rev_str, rd, deleted);
 
-                        // Include _revisions for replication
-                        if let Ok((pos, ref hash)) = parse_rev(&rev_str)
-                            && let Some(ancestry) = find_rev_ancestry(&tree, pos, hash)
-                        {
-                            obj.insert(
-                                "_revisions".into(),
-                                serde_json::json!({
-                                    "start": pos,
-                                    "ids": ancestry
-                                }),
-                            );
-                        }
-
-                        bulk_docs.push(BulkGetDoc {
-                            ok: Some(serde_json::Value::Object(obj)),
-                            error: None,
-                        });
-                    } else {
-                        bulk_docs.push(BulkGetDoc {
-                            ok: None,
-                            error: Some(BulkGetError {
-                                id: item.id.clone(),
-                                rev: rev_str,
-                                error: "not_found".into(),
-                                reason: "missing".into(),
+                    // Include _revisions for replication
+                    if let Ok((pos, ref hash)) = parse_rev(&rev_str)
+                        && let Some(ancestry) = find_rev_ancestry(tree, pos, hash)
+                    {
+                        obj.insert(
+                            "_revisions".into(),
+                            serde_json::json!({
+                                "start": pos,
+                                "ids": ancestry
                             }),
-                        });
+                        );
                     }
-                }
-                None => {
-                    bulk_docs.push(BulkGetDoc {
-                        ok: None,
-                        error: Some(BulkGetError {
-                            id: item.id.clone(),
-                            rev: item.rev.unwrap_or_default(),
-                            error: "not_found".into(),
-                            reason: "missing".into(),
-                        }),
-                    });
-                }
-            }
 
-            results.push(BulkGetResult {
-                id: item.id,
-                docs: bulk_docs,
-            });
+                    // Include inline attachments so replication carries
+                    // their bytes end-to-end.
+                    if !atts.is_empty() {
+                        let mut att_map = serde_json::Map::new();
+                        for (name, meta) in records_to_meta(&atts) {
+                            let bytes = load_blob(&att_table, &meta.digest)?;
+                            att_map.insert(name, meta.to_json(bytes.as_deref()));
+                        }
+                        obj.insert("_attachments".into(), serde_json::Value::Object(att_map));
+                    }
+
+                    BulkGetDoc::ok(serde_json::Value::Object(obj))
+                }
+                None => not_found(rev_str.unwrap_or_default()),
+            };
+
+            results.push(BulkGetResult::new(item.id.clone(), vec![bulk_doc]));
         }
 
-        Ok(BulkGetResponse { results })
+        Ok(BulkGetResponse::new(results))
     }
 
-    async fn put_attachment(
+    fn put_attachment(
         &self,
         doc_id: &str,
         att_id: &str,
         rev: &str,
         data: Vec<u8>,
         content_type: &str,
+        rev_limit: u64,
     ) -> Result<DocResult> {
-        let digest = compute_attachment_digest(&data);
-        let length = data.len() as u64;
-        let _lock = self.write_lock.write().await;
         let write_txn = db_err!(self.db.begin_write())?;
+        let mut meta = read_meta(&db_err!(write_txn.open_table(META_TABLE))?)?;
+        let since = meta.update_seq;
 
         let result = {
-            // Store the raw attachment data
-            let mut att_table = db_err!(write_txn.open_table(ATTACHMENT_TABLE))?;
-            let att_key = attachment_key(doc_id, att_id);
-            db_err!(att_table.insert(att_key.as_str(), data.as_slice()))?;
+            let mut tables = WriteTables::open(&write_txn)?;
+            let (tree, seq) = load_doc_record(&tables.docs, doc_id)?
+                .ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
+            let parent: Revision = rev.parse()?;
+            let rev = parent.to_string();
 
-            // Load existing doc and verify rev
-            let mut doc_table = db_err!(write_txn.open_table(DOC_TABLE))?;
-            let mut rev_table = db_err!(write_txn.open_table(REV_DATA_TABLE))?;
-            let mut changes_table = db_err!(write_txn.open_table(CHANGES_TABLE))?;
-
-            let existing_record: Option<DocRecord> = {
-                let existing = db_err!(doc_table.get(doc_id))?;
-                existing
-                    .as_ref()
-                    .and_then(|g| deserialize_doc_record(g.value()).ok())
-            };
-
-            let record = existing_record.ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
-            let tree = serialized_to_rev_tree(&record.rev_tree);
-            let winner =
-                winning_rev(&tree).ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
-            if winner.to_string() != rev {
-                return Err(RouchError::Conflict);
-            }
-
-            // Load current rev data to preserve existing attachments
-            let rev_key = rev_data_key(doc_id, rev);
-            let rd: RevDataRecord = db_err!(rev_table.get(rev_key.as_str()))?
-                .map(|g| serde_json::from_slice(g.value()).unwrap())
-                .unwrap_or(RevDataRecord {
-                    data: serde_json::Value::Object(serde_json::Map::new()),
-                    deleted: false,
-                    attachments: HashMap::new(),
-                });
-
-            // Build updated attachment map
-            let mut attachments = rd.attachments;
-            attachments.insert(
-                att_id.to_string(),
-                AttachmentRecord {
-                    content_type: content_type.to_string(),
-                    digest,
-                    length,
-                },
-            );
-
-            // Build a Document and process as normal edit
+            // The new revision builds on `rev` (any leaf, not only the
+            // winner): its body plus its attachments with this one added.
+            let rd = load_rev_data(&tables.revs, doc_id, &rev)?.ok_or(RouchError::Conflict)?;
+            let parent_atts = records_to_meta(&rd.attachments);
+            let mut attachments = parent_atts.clone();
+            attachments.insert(att_id.to_string(), AttachmentMeta::new(content_type, data));
             let doc = Document {
                 id: doc_id.to_string(),
-                rev: Some(winner),
+                rev: Some(parent),
                 deleted: false,
                 data: rd.data,
-                attachments: attachments
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            AttachmentMeta {
-                                content_type: v.content_type.clone(),
-                                digest: v.digest.clone(),
-                                length: v.length,
-                                stub: true,
-                                data: None,
-                            },
-                        )
-                    })
-                    .collect(),
-            };
-
-            let mut meta = {
-                let meta_table = db_err!(write_txn.open_table(META_TABLE))?;
-                let guard = db_err!(meta_table.get("meta"))?.unwrap();
-                serde_json::from_slice::<MetaRecord>(guard.value())?
-            };
-
-            let result = process_doc_new_edits_with_attachments(
-                &mut doc_table,
-                &mut rev_table,
-                &mut changes_table,
-                &mut meta,
-                doc,
                 attachments,
-            )?;
-
-            // Save updated metadata
-            {
-                let mut meta_table = db_err!(write_txn.open_table(META_TABLE))?;
-                let meta_bytes = serde_json::to_vec(&meta)?;
-                db_err!(meta_table.insert("meta", meta_bytes.as_slice()))?;
-            }
-
-            result
+            };
+            let plan = plan_new_edit(Some(&tree), doc, Some(&parent_atts), false, rev_limit)
+                .map_err(attachment_edit_error)?;
+            apply_write(&mut tables, &mut meta, Some((&tree, seq)), plan)?
         };
 
-        db_err!(write_txn.commit())?;
+        write_meta(&mut db_err!(write_txn.open_table(META_TABLE))?, &meta)?;
+        self.commit_announcing(write_txn, since)?;
         Ok(result)
     }
 
-    async fn get_attachment(
+    fn get_attachment(
         &self,
         doc_id: &str,
         att_id: &str,
         opts: GetAttachmentOptions,
     ) -> Result<Vec<u8>> {
         let read_txn = db_err!(self.db.begin_read())?;
-
-        // Verify the document and revision exist, and the attachment is tracked
         let doc_table = db_err!(read_txn.open_table(DOC_TABLE))?;
         let rev_table = db_err!(read_txn.open_table(REV_DATA_TABLE))?;
+        let att_table = db_err!(read_txn.open_table(ATTACHMENT_TABLE))?;
 
-        let record: DocRecord = db_err!(doc_table.get(doc_id))?
-            .map(|g| deserialize_doc_record(g.value()).unwrap())
+        let (tree, _) = load_doc_record(&doc_table, doc_id)?
             .ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
-
-        let tree = serialized_to_rev_tree(&record.rev_tree);
         let rev_str = if let Some(ref rev) = opts.rev {
-            rev.clone()
+            canonical_rev(rev)?
         } else {
             winning_rev(&tree)
                 .ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?
                 .to_string()
         };
 
-        // Check that the attachment exists in this revision's metadata
-        let rev_key = rev_data_key(doc_id, &rev_str);
-        let rd: RevDataRecord = db_err!(rev_table.get(rev_key.as_str()))?
-            .map(|g| serde_json::from_slice(g.value()).unwrap())
-            .ok_or_else(|| RouchError::NotFound(format!("attachment {}/{}", doc_id, att_id)))?;
-
-        if !rd.attachments.contains_key(att_id) {
-            return Err(RouchError::NotFound(format!(
-                "attachment {}/{}",
-                doc_id, att_id
-            )));
+        // Resolve this revision's attachment metadata, then return the bytes
+        // stored under its digest.
+        let not_found = || RouchError::NotFound(format!("attachment {}/{}", doc_id, att_id));
+        if !in_tree(&tree, &rev_str) {
+            return Err(not_found());
         }
-
-        // Fetch raw bytes
-        let att_table = db_err!(read_txn.open_table(ATTACHMENT_TABLE))?;
-        let att_key = attachment_key(doc_id, att_id);
-        let guard = db_err!(att_table.get(att_key.as_str()))?
-            .ok_or_else(|| RouchError::NotFound(format!("attachment {}/{}", doc_id, att_id)))?;
-
-        Ok(guard.value().to_vec())
+        let atts = load_rev_attachments(&rev_table, doc_id, &rev_str)?.ok_or_else(not_found)?;
+        let rec = atts.get(att_id).ok_or_else(not_found)?;
+        load_blob(&att_table, &rec.digest)?.ok_or_else(not_found)
     }
 
-    async fn remove_attachment(&self, doc_id: &str, att_id: &str, rev: &str) -> Result<DocResult> {
-        let _lock = self.write_lock.write().await;
+    fn remove_attachment(
+        &self,
+        doc_id: &str,
+        att_id: &str,
+        rev: &str,
+        rev_limit: u64,
+    ) -> Result<DocResult> {
         let write_txn = db_err!(self.db.begin_write())?;
+        let mut meta = read_meta(&db_err!(write_txn.open_table(META_TABLE))?)?;
+        let since = meta.update_seq;
 
         let result = {
-            let mut doc_table = db_err!(write_txn.open_table(DOC_TABLE))?;
-            let mut rev_table = db_err!(write_txn.open_table(REV_DATA_TABLE))?;
-            let mut changes_table = db_err!(write_txn.open_table(CHANGES_TABLE))?;
-            let mut att_table = db_err!(write_txn.open_table(ATTACHMENT_TABLE))?;
-
-            // Load existing doc and verify rev
-            let record: DocRecord = db_err!(doc_table.get(doc_id))?
-                .map(|g| deserialize_doc_record(g.value()).unwrap())
+            let mut tables = WriteTables::open(&write_txn)?;
+            let (tree, seq) = load_doc_record(&tables.docs, doc_id)?
                 .ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
+            let parent: Revision = rev.parse()?;
+            let rev = parent.to_string();
 
-            let tree = serialized_to_rev_tree(&record.rev_tree);
-            let winner =
-                winning_rev(&tree).ok_or_else(|| RouchError::NotFound(doc_id.to_string()))?;
-            if winner.to_string() != rev {
-                return Err(RouchError::Conflict);
+            let rd = load_rev_data(&tables.revs, doc_id, &rev)?.ok_or(RouchError::Conflict)?;
+            if !rd.attachments.contains_key(att_id) {
+                return Err(RouchError::NotFound(format!(
+                    "attachment {}/{}",
+                    doc_id, att_id
+                )));
             }
-
-            // Load current rev data
-            let rev_key = rev_data_key(doc_id, rev);
-            let rd: RevDataRecord = db_err!(rev_table.get(rev_key.as_str()))?
-                .map(|g| serde_json::from_slice(g.value()).unwrap())
-                .unwrap_or(RevDataRecord {
-                    data: serde_json::Value::Object(serde_json::Map::new()),
-                    deleted: false,
-                    attachments: HashMap::new(),
-                });
-
-            // Remove attachment from metadata and storage
-            let mut attachments = rd.attachments;
+            let parent_atts = records_to_meta(&rd.attachments);
+            let mut attachments = parent_atts.clone();
             attachments.remove(att_id);
 
-            let att_key = attachment_key(doc_id, att_id);
-            let _ = db_err!(att_table.remove(att_key.as_str()));
-
-            // Create a new revision without the attachment
+            // A new revision whose attachment set is exactly the remaining
+            // ones. The bytes stay stored for older revisions (compaction
+            // drops them once unreferenced).
             let doc = Document {
                 id: doc_id.to_string(),
-                rev: Some(winner),
+                rev: Some(parent),
                 deleted: false,
                 data: rd.data,
-                attachments: attachments
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            AttachmentMeta {
-                                content_type: v.content_type.clone(),
-                                digest: v.digest.clone(),
-                                length: v.length,
-                                stub: true,
-                                data: None,
-                            },
-                        )
-                    })
-                    .collect(),
-            };
-
-            let mut meta = {
-                let meta_table = db_err!(write_txn.open_table(META_TABLE))?;
-                let guard = db_err!(meta_table.get("meta"))?.unwrap();
-                serde_json::from_slice::<MetaRecord>(guard.value())?
-            };
-
-            let result = process_doc_new_edits_with_attachments(
-                &mut doc_table,
-                &mut rev_table,
-                &mut changes_table,
-                &mut meta,
-                doc,
                 attachments,
-            )?;
-
-            {
-                let mut meta_table = db_err!(write_txn.open_table(META_TABLE))?;
-                let meta_bytes = serde_json::to_vec(&meta)?;
-                db_err!(meta_table.insert("meta", meta_bytes.as_slice()))?;
-            }
-
-            result
+            };
+            let plan = plan_new_edit(Some(&tree), doc, Some(&parent_atts), false, rev_limit)
+                .map_err(attachment_edit_error)?;
+            apply_write(&mut tables, &mut meta, Some((&tree, seq)), plan)?
         };
 
-        db_err!(write_txn.commit())?;
+        write_meta(&mut db_err!(write_txn.open_table(META_TABLE))?, &meta)?;
+        self.commit_announcing(write_txn, since)?;
         Ok(result)
     }
 
-    async fn get_local(&self, id: &str) -> Result<serde_json::Value> {
+    fn get_local(&self, id: &str) -> Result<serde_json::Value> {
         let read_txn = db_err!(self.db.begin_read())?;
         let table = db_err!(read_txn.open_table(LOCAL_TABLE))?;
         let guard = db_err!(table.get(id))?
             .ok_or_else(|| RouchError::NotFound(format!("_local/{}", id)))?;
-        let value: serde_json::Value = serde_json::from_slice(guard.value())?;
-        Ok(value)
+        decode_body(guard.value())
     }
 
-    async fn put_local(&self, id: &str, doc: serde_json::Value) -> Result<()> {
-        let _lock = self.write_lock.write().await;
+    fn put_local(&self, id: &str, doc: serde_json::Value) -> Result<()> {
+        rouchdb_core::json::check_document_depth(&doc)?;
         let write_txn = db_err!(self.db.begin_write())?;
         {
             let mut table = db_err!(write_txn.open_table(LOCAL_TABLE))?;
@@ -1225,8 +1628,7 @@ impl Adapter for RedbAdapter {
         Ok(())
     }
 
-    async fn remove_local(&self, id: &str) -> Result<()> {
-        let _lock = self.write_lock.write().await;
+    fn remove_local(&self, id: &str) -> Result<()> {
         let write_txn = db_err!(self.db.begin_write())?;
         {
             let mut table = db_err!(write_txn.open_table(LOCAL_TABLE))?;
@@ -1237,394 +1639,343 @@ impl Adapter for RedbAdapter {
         Ok(())
     }
 
-    async fn compact(&self) -> Result<()> {
-        // TODO: remove non-leaf revision data
+    fn compact(&self) -> Result<()> {
+        let write_txn = db_err!(self.db.begin_write())?;
+        {
+            let mut doc_table = db_err!(write_txn.open_table(DOC_TABLE))?;
+            let mut rev_table = db_err!(write_txn.open_table(REV_DATA_TABLE))?;
+            let mut att_table = db_err!(write_txn.open_table(ATTACHMENT_TABLE))?;
+
+            let mut docs = Vec::new();
+            for entry in db_err!(doc_table.iter())? {
+                let (key, value) = db_err!(entry)?;
+                let (tree, seq) = decode_doc_record(value.value())?;
+                docs.push((key.value().to_string(), tree, seq));
+            }
+
+            // Keep only leaf bodies (this also drops bodies of revisions that
+            // were stemmed out of the tree) and mark the rest missing.
+            for (doc_id, mut tree, seq) in docs {
+                let leaves: std::collections::HashSet<String> = collect_leaves(&tree)
+                    .iter()
+                    .map(|l| l.rev_string())
+                    .collect();
+                drop_rev_data_except(&mut rev_table, &doc_id, &leaves)?;
+                if mark_non_leaves_missing(&mut tree) {
+                    let bytes = encode_doc_record(&tree, seq)?;
+                    db_err!(doc_table.insert(doc_id.as_str(), bytes.as_slice()))?;
+                }
+            }
+
+            // Drop attachment bytes no remaining revision references.
+            let mut referenced = std::collections::HashSet::new();
+            for entry in db_err!(rev_table.iter())? {
+                let (_, value) = db_err!(entry)?;
+                let rd: RevAttachmentsRecord = serde_json::from_slice(value.value())?;
+                referenced.extend(rd.attachments.into_values().map(|a| a.digest));
+            }
+            let mut unreferenced = Vec::new();
+            for entry in db_err!(att_table.iter())? {
+                let (key, _) = db_err!(entry)?;
+                if !referenced.contains(key.value()) {
+                    unreferenced.push(key.value().to_string());
+                }
+            }
+            for digest in unreferenced {
+                db_err!(att_table.remove(digest.as_str()))?;
+            }
+        }
+        db_err!(write_txn.commit())?;
         Ok(())
     }
 
-    async fn destroy(&self) -> Result<()> {
-        let _lock = self.write_lock.write().await;
+    fn destroy(&self) -> Result<()> {
         let write_txn = db_err!(self.db.begin_write())?;
 
         // Delete all tables in O(1) instead of draining entries one by one.
+        // The format guard is never deleted: a destroyed database is still
+        // a 0.5 file that older versions must not open.
         let _ = db_err!(write_txn.delete_table(DOC_TABLE))?;
         let _ = db_err!(write_txn.delete_table(REV_DATA_TABLE))?;
         let _ = db_err!(write_txn.delete_table(CHANGES_TABLE))?;
         let _ = db_err!(write_txn.delete_table(LOCAL_TABLE))?;
         let _ = db_err!(write_txn.delete_table(ATTACHMENT_TABLE))?;
+        let _ = db_err!(write_txn.delete_table(META_TABLE))?;
 
-        // Recreate empty tables so subsequent operations don't fail.
-        db_err!(write_txn.open_table(DOC_TABLE))?;
-        db_err!(write_txn.open_table(REV_DATA_TABLE))?;
-        db_err!(write_txn.open_table(CHANGES_TABLE))?;
-        db_err!(write_txn.open_table(LOCAL_TABLE))?;
-        db_err!(write_txn.open_table(ATTACHMENT_TABLE))?;
+        // Recreate empty tables so subsequent operations don't fail, and
+        // reset the metadata (including the security document).
+        create_tables(&write_txn)?;
+        write_meta(
+            &mut db_err!(write_txn.open_table(META_TABLE))?,
+            &MetaRecord::new(),
+        )?;
 
-        // Reset metadata
+        db_err!(write_txn.commit())?;
+        let _ = self.notices.send(ChangeNotice::reset());
+        Ok(())
+    }
+
+    fn purge(&self, req: HashMap<String, Vec<String>>) -> Result<PurgeResponse> {
+        let write_txn = db_err!(self.db.begin_write())?;
+        let mut meta = read_meta(&db_err!(write_txn.open_table(META_TABLE))?)?;
+        let since = meta.update_seq;
+        let mut purged = HashMap::new();
+        let mut bumped = false;
+
         {
-            let mut meta_table = db_err!(write_txn.open_table(META_TABLE))?;
-            let record = MetaRecord {
-                update_seq: 0,
-                db_uuid: Uuid::new_v4().to_string(),
-            };
-            let bytes = serde_json::to_vec(&record)?;
-            db_err!(meta_table.insert("meta", bytes.as_slice()))?;
+            let mut tables = WriteTables::open(&write_txn)?;
+            for (doc_id, revs) in req {
+                let revs = revs
+                    .iter()
+                    .map(|r| canonical_rev(r))
+                    .collect::<Result<Vec<_>>>()?;
+                let Some((tree, old_seq)) = load_doc_record(&tables.docs, &doc_id)? else {
+                    continue;
+                };
+                // Only leaves can be purged; their ancestors go too unless
+                // another leaf still needs them. Nothing older is resurrected.
+                let (new_tree, removed) = remove_leaves(&tree, &revs);
+                if removed.is_empty() {
+                    purged.insert(doc_id, removed);
+                    continue;
+                }
+                db_err!(tables.changes.remove(old_seq))?;
+                drop_rev_data_except(&mut tables.revs, &doc_id, &tree_revs(&new_tree))?;
+                meta.adjust_counts(
+                    Some(is_deleted(&tree)),
+                    (!new_tree.is_empty()).then(|| is_deleted(&new_tree)),
+                );
+
+                if new_tree.is_empty() {
+                    db_err!(tables.docs.remove(doc_id.as_str()))?;
+                } else {
+                    // The winner may have changed: record the document again.
+                    meta.update_seq += 1;
+                    bumped = true;
+                    let seq = meta.update_seq;
+                    let bytes = encode_doc_record(&new_tree, seq)?;
+                    db_err!(tables.docs.insert(doc_id.as_str(), bytes.as_slice()))?;
+                    let change = serde_json::to_vec(&ChangeRecord {
+                        doc_id: doc_id.clone(),
+                        deleted: is_deleted(&new_tree),
+                    })?;
+                    db_err!(tables.changes.insert(seq, change.as_slice()))?;
+                }
+                purged.insert(doc_id, removed);
+            }
         }
 
+        // A purge is a database update even when no document keeps a change
+        // entry (CouchDB bumps update_seq per purge request).
+        if !bumped {
+            meta.update_seq += 1;
+        }
+        meta.purge_seq += 1;
+        write_meta(&mut db_err!(write_txn.open_table(META_TABLE))?, &meta)?;
+        self.commit_announcing(write_txn, since)?;
+
+        Ok(PurgeResponse::new(Some(meta.purge_seq), purged))
+    }
+
+    fn get_security(&self) -> Result<SecurityDocument> {
+        let read_txn = db_err!(self.db.begin_read())?;
+        let table = db_err!(read_txn.open_table(META_TABLE))?;
+        match db_err!(table.get(SECURITY_KEY))? {
+            Some(guard) => Ok(serde_json::from_slice(guard.value())?),
+            None => Ok(SecurityDocument::default()),
+        }
+    }
+
+    fn put_security(&self, doc: SecurityDocument) -> Result<()> {
+        let write_txn = db_err!(self.db.begin_write())?;
+        {
+            let mut table = db_err!(write_txn.open_table(META_TABLE))?;
+            let bytes = serde_json::to_vec(&doc)?;
+            db_err!(table.insert(SECURITY_KEY, bytes.as_slice()))?;
+        }
         db_err!(write_txn.commit())?;
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Document processing (shared by bulk_docs)
+// Document processing (shared by bulk_docs and the attachment APIs)
 // ---------------------------------------------------------------------------
 
-fn process_doc(
-    doc_table: &mut redb::Table<&str, &[u8]>,
-    rev_table: &mut redb::Table<&str, &[u8]>,
-    changes_table: &mut redb::Table<u64, &[u8]>,
-    meta: &mut MetaRecord,
-    doc: Document,
-    new_edits: bool,
-) -> Result<DocResult> {
-    if new_edits {
-        process_doc_new_edits(doc_table, rev_table, changes_table, meta, doc)
-    } else {
-        process_doc_replication(doc_table, rev_table, changes_table, meta, doc)
+/// The tables a document write touches, opened once per write transaction.
+struct WriteTables<'txn> {
+    docs: redb::Table<'txn, &'static str, &'static [u8]>,
+    revs: redb::Table<'txn, &'static str, &'static [u8]>,
+    changes: redb::Table<'txn, u64, &'static [u8]>,
+    atts: redb::Table<'txn, &'static str, &'static [u8]>,
+    locals: redb::Table<'txn, &'static str, &'static [u8]>,
+}
+
+impl<'txn> WriteTables<'txn> {
+    fn open(txn: &'txn redb::WriteTransaction) -> Result<Self> {
+        Ok(WriteTables {
+            docs: db_err!(txn.open_table(DOC_TABLE))?,
+            revs: db_err!(txn.open_table(REV_DATA_TABLE))?,
+            changes: db_err!(txn.open_table(CHANGES_TABLE))?,
+            atts: db_err!(txn.open_table(ATTACHMENT_TABLE))?,
+            locals: db_err!(txn.open_table(LOCAL_TABLE))?,
+        })
     }
 }
 
-fn process_doc_new_edits(
-    doc_table: &mut redb::Table<&str, &[u8]>,
-    rev_table: &mut redb::Table<&str, &[u8]>,
-    changes_table: &mut redb::Table<u64, &[u8]>,
-    meta: &mut MetaRecord,
-    doc: Document,
-) -> Result<DocResult> {
-    let doc_id = if doc.id.is_empty() {
-        Uuid::new_v4().to_string()
-    } else {
-        doc.id.clone()
-    };
-
-    // Load existing record (clone data out of access guard immediately)
-    let existing_record: Option<DocRecord> = {
-        let existing = db_err!(doc_table.get(doc_id.as_str()))?;
-        existing
-            .as_ref()
-            .and_then(|g| deserialize_doc_record(g.value()).ok())
-    };
-
-    let existing_tree = existing_record
-        .as_ref()
-        .map(|r| serialized_to_rev_tree(&r.rev_tree))
-        .unwrap_or_default();
-
-    // Conflict check
-    if let Some(ref record) = existing_record {
-        let tree = serialized_to_rev_tree(&record.rev_tree);
-        let winner = winning_rev(&tree);
-        match (&doc.rev, &winner) {
-            (Some(provided_rev), Some(current_winner))
-                if provided_rev.to_string() != current_winner.to_string() =>
-            {
-                return Ok(DocResult {
-                    ok: false,
-                    id: doc_id,
-                    rev: None,
-                    error: Some("conflict".to_string()),
-                    reason: Some("Document update conflict.".to_string()),
-                });
-            }
-            // Creating a doc that already exists and is not deleted is a
-            // conflict; a deleted winner falls through and may be re-created.
-            (None, Some(_)) if !is_deleted(&tree) => {
-                return Ok(DocResult {
-                    ok: false,
-                    id: doc_id,
-                    rev: None,
-                    error: Some("conflict".into()),
-                    reason: Some("Document update conflict".into()),
-                });
-            }
-            _ => {}
-        }
-    } else if doc.rev.is_some() {
-        return Ok(DocResult {
-            ok: false,
-            id: doc_id,
-            rev: None,
-            error: Some("not_found".into()),
-            reason: Some("missing".into()),
-        });
-    }
-
-    // Generate new revision
-    let new_pos = doc.rev.as_ref().map(|r| r.pos + 1).unwrap_or(1);
-    let prev_rev_str = doc.rev.as_ref().map(|r| r.to_string());
-    let new_hash = generate_rev_hash(&doc.data, doc.deleted, prev_rev_str.as_deref());
-    let new_rev_str = format!("{}-{}", new_pos, new_hash);
-
-    let mut rev_hashes = vec![new_hash.clone()];
-    if let Some(ref prev) = doc.rev {
-        rev_hashes.push(prev.hash.clone());
-    }
-    let new_path = build_path_from_revs(
-        new_pos,
-        &rev_hashes,
-        NodeOpts {
-            deleted: doc.deleted,
-        },
-        RevStatus::Available,
-    );
-
-    let (merged_tree, _) = merge_tree(&existing_tree, &new_path, DEFAULT_REV_LIMIT);
-
-    // Update sequence
-    meta.update_seq += 1;
-    let seq = meta.update_seq;
-
-    // Remove old change entry
-    if let Some(ref record) = existing_record {
-        let _ = db_err!(changes_table.remove(record.seq));
-    }
-
-    // Save doc record
-    let new_record = DocRecord {
-        rev_tree: rev_tree_to_serialized(&merged_tree),
-        seq,
-    };
-    let doc_bytes = serde_json::to_vec(&new_record)?;
-    db_err!(doc_table.insert(doc_id.as_str(), doc_bytes.as_slice()))?;
-
-    // Save rev data
-    let rd = RevDataRecord {
-        data: doc.data,
-        deleted: doc.deleted,
-        attachments: HashMap::new(),
-    };
-    let rev_bytes = serde_json::to_vec(&rd)?;
-    let key = rev_data_key(&doc_id, &new_rev_str);
-    db_err!(rev_table.insert(key.as_str(), rev_bytes.as_slice()))?;
-
-    // Save change
-    let change = ChangeRecord {
-        doc_id: doc_id.clone(),
-        deleted: doc.deleted,
-    };
-    let change_bytes = serde_json::to_vec(&change)?;
-    db_err!(changes_table.insert(seq, change_bytes.as_slice()))?;
-
-    Ok(DocResult {
-        ok: true,
-        id: doc_id,
-        rev: Some(new_rev_str),
-        error: None,
-        reason: None,
-    })
-}
-
-/// Like `process_doc_new_edits` but also stores attachment metadata in the rev data.
-fn process_doc_new_edits_with_attachments(
-    doc_table: &mut redb::Table<&str, &[u8]>,
-    rev_table: &mut redb::Table<&str, &[u8]>,
-    changes_table: &mut redb::Table<u64, &[u8]>,
-    meta: &mut MetaRecord,
-    doc: Document,
-    attachments: HashMap<String, AttachmentRecord>,
-) -> Result<DocResult> {
-    let doc_id = doc.id.clone();
-
-    let existing_record: Option<DocRecord> = {
-        let existing = db_err!(doc_table.get(doc_id.as_str()))?;
-        existing
-            .as_ref()
-            .and_then(|g| deserialize_doc_record(g.value()).ok())
-    };
-
-    let existing_tree = existing_record
-        .as_ref()
-        .map(|r| serialized_to_rev_tree(&r.rev_tree))
-        .unwrap_or_default();
-
-    // Generate new revision
-    let new_pos = doc.rev.as_ref().map(|r| r.pos + 1).unwrap_or(1);
-    let prev_rev_str = doc.rev.as_ref().map(|r| r.to_string());
-    let new_hash = generate_rev_hash(&doc.data, doc.deleted, prev_rev_str.as_deref());
-    let new_rev_str = format!("{}-{}", new_pos, new_hash);
-
-    let mut rev_hashes = vec![new_hash.clone()];
-    if let Some(ref prev) = doc.rev {
-        rev_hashes.push(prev.hash.clone());
-    }
-    let new_path = build_path_from_revs(
-        new_pos,
-        &rev_hashes,
-        NodeOpts {
-            deleted: doc.deleted,
-        },
-        RevStatus::Available,
-    );
-
-    let (merged_tree, _) = merge_tree(&existing_tree, &new_path, DEFAULT_REV_LIMIT);
-
-    meta.update_seq += 1;
-    let seq = meta.update_seq;
-
-    if let Some(ref record) = existing_record {
-        let _ = db_err!(changes_table.remove(record.seq));
-    }
-
-    let new_record = DocRecord {
-        rev_tree: rev_tree_to_serialized(&merged_tree),
-        seq,
-    };
-    let doc_bytes = serde_json::to_vec(&new_record)?;
-    db_err!(doc_table.insert(doc_id.as_str(), doc_bytes.as_slice()))?;
-
-    // Save rev data with attachment metadata
-    let rd = RevDataRecord {
-        data: doc.data,
-        deleted: doc.deleted,
-        attachments,
-    };
-    let rev_bytes = serde_json::to_vec(&rd)?;
-    let key = rev_data_key(&doc_id, &new_rev_str);
-    db_err!(rev_table.insert(key.as_str(), rev_bytes.as_slice()))?;
-
-    let change = ChangeRecord {
-        doc_id: doc_id.clone(),
-        deleted: doc.deleted,
-    };
-    let change_bytes = serde_json::to_vec(&change)?;
-    db_err!(changes_table.insert(seq, change_bytes.as_slice()))?;
-
-    Ok(DocResult {
-        ok: true,
-        id: doc_id,
-        rev: Some(new_rev_str),
-        error: None,
-        reason: None,
-    })
-}
-
-fn process_doc_replication(
-    doc_table: &mut redb::Table<&str, &[u8]>,
-    rev_table: &mut redb::Table<&str, &[u8]>,
-    changes_table: &mut redb::Table<u64, &[u8]>,
+/// Apply one `new_edits=true` write. The edit rules (conflicts, attachment
+/// inheritance, revision hashing) live in `rouchdb_core::write` so this
+/// adapter behaves exactly like the others; this only loads the inputs and
+/// stores the plan.
+fn write_new_edit(
+    tables: &mut WriteTables,
     meta: &mut MetaRecord,
     mut doc: Document,
+    rev_limit: u64,
 ) -> Result<DocResult> {
-    let doc_id = doc.id.clone();
-    let rev = match &doc.rev {
-        Some(r) => r.clone(),
-        None => {
-            return Ok(DocResult {
-                ok: false,
-                id: doc_id,
-                rev: None,
-                error: Some("bad_request".into()),
-                reason: Some("missing _rev".into()),
-            });
-        }
-    };
-
-    let rev_str = rev.to_string();
-
-    let existing_record: Option<DocRecord> = {
-        let existing = db_err!(doc_table.get(doc_id.as_str()))?;
-        existing
-            .as_ref()
-            .and_then(|g| deserialize_doc_record(g.value()).ok())
-    };
-
-    let existing_tree = existing_record
-        .as_ref()
-        .map(|r| serialized_to_rev_tree(&r.rev_tree))
-        .unwrap_or_default();
-
-    // Build the revision path — use _revisions ancestry if available
-    let new_path = if let Some(revisions) = doc.data.get("_revisions") {
-        let start = revisions["start"].as_u64().unwrap_or(rev.pos);
-        let ids: Vec<String> = revisions["ids"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_else(|| vec![rev.hash.clone()]);
-
-        build_path_from_revs(
-            start,
-            &ids,
-            NodeOpts {
-                deleted: doc.deleted,
-            },
-            RevStatus::Available,
-        )
-    } else {
-        // Fallback: single-node path (no ancestry available)
-        RevPath {
-            pos: rev.pos,
-            tree: RevNode {
-                hash: rev.hash.clone(),
-                status: RevStatus::Available,
-                opts: NodeOpts {
-                    deleted: doc.deleted,
-                },
-                children: vec![],
-            },
-        }
-    };
-
-    // Strip _revisions from data before storing
-    if let serde_json::Value::Object(ref mut map) = doc.data {
-        map.remove("_revisions");
+    if let Err(e) = doc.prepare_for_write() {
+        // The bare reason, as CouchDB and replicated writes report it.
+        let reason = match e {
+            RouchError::BadRequest(reason) => reason,
+            other => other.to_string(),
+        };
+        return Ok(error_result(&doc.id, "bad_request", &reason));
+    }
+    if doc.id.is_empty() {
+        // 32 hex digits, like the ids CouchDB generates.
+        doc.id = Uuid::new_v4().simple().to_string();
+    }
+    if local_doc_id(&doc.id).is_some() {
+        return match plan_local_write(doc) {
+            Ok(LocalWrite::Put { id, body, result }) => {
+                let bytes = serde_json::to_vec(&body)?;
+                db_err!(tables.locals.insert(id.as_str(), bytes.as_slice()))?;
+                Ok(result)
+            }
+            Ok(LocalWrite::Delete { id, result }) => {
+                db_err!(tables.locals.remove(id.as_str()))?;
+                Ok(result)
+            }
+            Err(result) => Ok(result),
+        };
     }
 
-    let (merged_tree, _) = merge_tree(&existing_tree, &new_path, DEFAULT_REV_LIMIT);
+    // A decoding error aborts the batch instead of being treated as a
+    // missing document.
+    let existing = load_doc_record(&tables.docs, &doc.id)?;
+    let tree = existing.as_ref().map(|(t, _)| t);
+    let parent_atts = match edit_parent(tree, &doc) {
+        Some(parent) => load_rev_attachments(&tables.revs, &doc.id, &parent.to_string())?
+            .map(|atts| records_to_meta(&atts)),
+        None => None,
+    };
+
+    match plan_new_edit(tree, doc, parent_atts.as_ref(), true, rev_limit) {
+        Ok(plan) => apply_write(tables, meta, existing.as_ref().map(|(t, s)| (t, *s)), plan),
+        Err(result) => Ok(result),
+    }
+}
+
+/// Apply one replicated (`new_edits=false`) write.
+fn write_replicated(
+    tables: &mut WriteTables,
+    meta: &mut MetaRecord,
+    doc: Document,
+    rev_limit: u64,
+) -> Result<DocResult> {
+    // CouchDB ignores `_local/` documents in replicated writes (they are
+    // never replicated): nothing is stored.
+    if local_doc_id(&doc.id).is_some() {
+        let mut result = DocResult::ok(doc.id, "");
+        result.rev = doc.rev.map(|r| r.to_string());
+        return Ok(result);
+    }
+    let existing = load_doc_record(&tables.docs, &doc.id)?;
+    let has_body = match (&existing, &doc.rev) {
+        (Some(_), Some(rev)) => {
+            let key = rev_data_key(&doc.id, &rev.clone().normalized().to_string());
+            db_err!(tables.revs.get(key.as_str()))?.is_some()
+        }
+        _ => false,
+    };
+
+    let plan =
+        match plan_replicated_edit(existing.as_ref().map(|(t, _)| t), doc, has_body, rev_limit) {
+            Ok(ReplicatedWrite::Write(plan)) => *plan,
+            Ok(ReplicatedWrite::AlreadyStored(result)) => return Ok(result),
+            Err(result) => return Ok(result),
+        };
+
+    // Stubs must refer to bytes we already hold.
+    for digest in &plan.required_blobs {
+        if db_err!(tables.atts.get(digest.as_str()))?.is_none() {
+            return Ok(error_result(
+                &plan.id,
+                "missing_stub",
+                &format!("Invalid attachment stub in {} for {}", plan.id, digest),
+            ));
+        }
+    }
+
+    apply_write(tables, meta, existing.as_ref().map(|(t, s)| (t, *s)), plan)
+}
+
+/// Persist a planned write: attachment bytes (by digest), the revision tree,
+/// the revision's body and attachment metadata, and a new sequence entry.
+fn apply_write(
+    tables: &mut WriteTables,
+    meta: &mut MetaRecord,
+    existing: Option<(&RevTree, u64)>,
+    plan: PlannedWrite,
+) -> Result<DocResult> {
+    let old_seq = existing.map(|(_, seq)| seq);
+    meta.adjust_counts(
+        existing.map(|(tree, _)| is_deleted(tree)),
+        Some(plan.doc_deleted),
+    );
+
+    for (digest, bytes) in &plan.new_blobs {
+        if db_err!(tables.atts.get(digest.as_str()))?.is_none() {
+            db_err!(tables.atts.insert(digest.as_str(), bytes.as_slice()))?;
+        }
+    }
 
     meta.update_seq += 1;
     let seq = meta.update_seq;
 
-    if let Some(ref record) = existing_record {
-        let _ = db_err!(changes_table.remove(record.seq));
+    // Each document keeps a single entry in the changes table.
+    if let Some(old_seq) = old_seq {
+        db_err!(tables.changes.remove(old_seq))?;
     }
 
-    let doc_deleted = is_deleted(&merged_tree);
+    let doc_bytes = encode_doc_record(&plan.tree, seq)?;
+    db_err!(tables.docs.insert(plan.id.as_str(), doc_bytes.as_slice()))?;
 
-    let new_record = DocRecord {
-        rev_tree: rev_tree_to_serialized(&merged_tree),
-        seq,
-    };
-    let doc_bytes = serde_json::to_vec(&new_record)?;
-    db_err!(doc_table.insert(doc_id.as_str(), doc_bytes.as_slice()))?;
+    // Stemmed revisions no longer exist: drop their bodies.
+    for rev in &plan.stemmed {
+        let key = rev_data_key(&plan.id, &rev.to_string());
+        db_err!(tables.revs.remove(key.as_str()))?;
+    }
 
     let rd = RevDataRecord {
-        data: doc.data,
-        deleted: doc.deleted,
-        attachments: HashMap::new(),
+        data: plan.data,
+        deleted: plan.deleted,
+        attachments: meta_to_records(&plan.attachments),
     };
     let rev_bytes = serde_json::to_vec(&rd)?;
-    let key = rev_data_key(&doc_id, &rev_str);
-    db_err!(rev_table.insert(key.as_str(), rev_bytes.as_slice()))?;
+    let key = rev_data_key(&plan.id, &plan.rev.to_string());
+    db_err!(tables.revs.insert(key.as_str(), rev_bytes.as_slice()))?;
 
+    // The feed reports whether the document (its winner) is deleted, not
+    // whether this particular edit was a deletion.
     let change = ChangeRecord {
-        doc_id: doc_id.clone(),
-        deleted: doc_deleted,
+        doc_id: plan.id.clone(),
+        deleted: plan.doc_deleted,
     };
     let change_bytes = serde_json::to_vec(&change)?;
-    db_err!(changes_table.insert(seq, change_bytes.as_slice()))?;
+    db_err!(tables.changes.insert(seq, change_bytes.as_slice()))?;
 
-    Ok(DocResult {
-        ok: true,
-        id: doc_id,
-        rev: Some(rev_str),
-        error: None,
-        reason: None,
-    })
+    Ok(ok_result(&plan.id, &plan.rev))
 }
 
 // ---------------------------------------------------------------------------
@@ -1635,6 +1986,7 @@ fn process_doc_replication(
 mod tests {
     use super::*;
     use rouchdb_core::document::{AllDocsOptions, BulkDocsOptions, ChangesOptions, GetOptions};
+    use rouchdb_core::rev_tree::build_path_from_revs;
 
     fn temp_db() -> (tempfile::TempDir, RedbAdapter) {
         let dir = tempfile::tempdir().unwrap();
@@ -1649,73 +2001,6 @@ mod tests {
         let info = db.info().await.unwrap();
         assert_eq!(info.doc_count, 0);
         assert_eq!(info.update_seq, Seq::Num(0));
-    }
-
-    #[tokio::test]
-    async fn put_and_get() {
-        let (_dir, db) = temp_db();
-
-        let doc = Document {
-            id: "doc1".into(),
-            rev: None,
-            deleted: false,
-            data: serde_json::json!({"name": "Alice"}),
-            attachments: HashMap::new(),
-        };
-        let results = db
-            .bulk_docs(vec![doc], BulkDocsOptions::new())
-            .await
-            .unwrap();
-        assert!(results[0].ok);
-
-        let fetched = db.get("doc1", GetOptions::default()).await.unwrap();
-        assert_eq!(fetched.data["name"], "Alice");
-    }
-
-    #[tokio::test]
-    async fn update_and_conflict() {
-        let (_dir, db) = temp_db();
-
-        let doc = Document {
-            id: "doc1".into(),
-            rev: None,
-            deleted: false,
-            data: serde_json::json!({"v": 1}),
-            attachments: HashMap::new(),
-        };
-        let r1 = db
-            .bulk_docs(vec![doc], BulkDocsOptions::new())
-            .await
-            .unwrap();
-        let rev1: Revision = r1[0].rev.clone().unwrap().parse().unwrap();
-
-        // Successful update
-        let doc2 = Document {
-            id: "doc1".into(),
-            rev: Some(rev1),
-            deleted: false,
-            data: serde_json::json!({"v": 2}),
-            attachments: HashMap::new(),
-        };
-        let r2 = db
-            .bulk_docs(vec![doc2], BulkDocsOptions::new())
-            .await
-            .unwrap();
-        assert!(r2[0].ok);
-
-        // Conflict
-        let bad = Document {
-            id: "doc1".into(),
-            rev: Some(Revision::new(1, "wrong".into())),
-            deleted: false,
-            data: serde_json::json!({"v": 3}),
-            attachments: HashMap::new(),
-        };
-        let r3 = db
-            .bulk_docs(vec![bad], BulkDocsOptions::new())
-            .await
-            .unwrap();
-        assert!(!r3[0].ok);
     }
 
     #[tokio::test]
@@ -1745,7 +2030,7 @@ mod tests {
             ..AllDocsOptions::new()
         };
         let result = db.all_docs(opts).await.unwrap();
-        let ids: Vec<&str> = result.rows.iter().map(|r| r.id.as_str()).collect();
+        let ids: Vec<&str> = result.rows.iter().map(|r| r.key.as_str()).collect();
         assert_eq!(ids, vec!["c", "b"]);
         assert_eq!(result.total_rows, 4);
     }
@@ -1787,50 +2072,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changes_feed() {
-        let (_dir, db) = temp_db();
-
-        for i in 0..3 {
-            let doc = Document {
-                id: format!("doc{}", i),
-                rev: None,
-                deleted: false,
-                data: serde_json::json!({"i": i}),
-                attachments: HashMap::new(),
-            };
-            db.bulk_docs(vec![doc], BulkDocsOptions::new())
-                .await
-                .unwrap();
-        }
-
-        let changes = db.changes(ChangesOptions::default()).await.unwrap();
-        assert_eq!(changes.results.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn all_docs_sorted() {
-        let (_dir, db) = temp_db();
-
-        for name in ["charlie", "alice", "bob"] {
-            let doc = Document {
-                id: name.into(),
-                rev: None,
-                deleted: false,
-                data: serde_json::json!({}),
-                attachments: HashMap::new(),
-            };
-            db.bulk_docs(vec![doc], BulkDocsOptions::new())
-                .await
-                .unwrap();
-        }
-
-        let result = db.all_docs(AllDocsOptions::new()).await.unwrap();
-        assert_eq!(result.rows[0].id, "alice");
-        assert_eq!(result.rows[1].id, "bob");
-        assert_eq!(result.rows[2].id, "charlie");
-    }
-
-    #[tokio::test]
     async fn local_docs() {
         let (_dir, db) = temp_db();
 
@@ -1841,28 +2082,109 @@ mod tests {
         assert_eq!(fetched["seq"], 5);
 
         db.remove_local("ck1").await.unwrap();
-        assert!(db.get_local("ck1").await.is_err());
+        assert!(matches!(
+            db.get_local("ck1").await,
+            Err(RouchError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
-    async fn replication_mode() {
+    async fn destroy_announces_a_reset() {
+        use rouchdb_core::adapter::ChangeNotice;
         let (_dir, db) = temp_db();
+        let before = db.id().await.unwrap();
+        let mut rx = db.subscribe().unwrap();
+        db.destroy().await.unwrap();
+        assert_eq!(rx.try_recv().unwrap(), ChangeNotice::reset());
+        assert!(rx.try_recv().is_err());
+        assert_ne!(db.id().await.unwrap(), before);
+    }
 
-        let doc = Document {
-            id: "doc1".into(),
-            rev: Some(Revision::new(1, "abc".into())),
-            deleted: false,
-            data: serde_json::json!({"from": "remote"}),
-            attachments: HashMap::new(),
-        };
+    #[tokio::test]
+    async fn subscribers_are_notified_after_each_committed_change() {
+        use rouchdb_core::adapter::ChangeNotice;
+        let dir = tempfile::tempdir().unwrap();
+        let db = RedbAdapter::open(dir.path().join("n.redb"), "test").unwrap();
+        let mut rx = db.subscribe().expect("the redb adapter announces changes");
+        let doc = |id: &str| Document::from_json(serde_json::json!({"_id": id})).unwrap();
         let results = db
-            .bulk_docs(vec![doc], BulkDocsOptions::replication())
+            .bulk_docs(vec![doc("a"), doc("b")], BulkDocsOptions::new())
             .await
             .unwrap();
-        assert!(results[0].ok);
+        let notice = |seq: u64, id: &str| ChangeNotice::new(seq, id);
+        assert_eq!(rx.try_recv().unwrap(), notice(1, "a"));
+        assert_eq!(rx.try_recv().unwrap(), notice(2, "b"));
+        db.bulk_docs(vec![doc("a")], BulkDocsOptions::new())
+            .await
+            .unwrap();
+        db.put_local("cp", serde_json::json!({})).await.unwrap();
+        assert!(rx.try_recv().is_err());
+        let rev = results[0].rev.clone().unwrap();
+        let r2 = db
+            .put_attachment("a", "x", &rev, b"x".to_vec(), "text/plain")
+            .await
+            .unwrap()
+            .rev
+            .unwrap();
+        assert_eq!(rx.try_recv().unwrap(), notice(3, "a"));
+        db.remove_attachment("a", "x", &r2).await.unwrap();
+        assert_eq!(rx.try_recv().unwrap(), notice(4, "a"));
+        let purged = db
+            .purge(HashMap::from([(
+                "b".to_string(),
+                vec![results[1].rev.clone().unwrap()],
+            )]))
+            .await
+            .unwrap();
+        assert_eq!(purged.purged["b"].len(), 1);
+        // A fully purged document has no change left to announce.
+        assert!(rx.try_recv().is_err());
+    }
 
-        let fetched = db.get("doc1", GetOptions::default()).await.unwrap();
-        assert_eq!(fetched.rev.unwrap().to_string(), "1-abc");
+    /// The security document round-trips, survives reopening the file, is
+    /// kept apart from local documents (`_local/_security` is an ordinary
+    /// one, as in CouchDB) and is reset by `destroy`.
+    #[tokio::test]
+    async fn security_document_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.redb");
+        let stored = |sec: SecurityDocument| serde_json::to_value(sec).unwrap();
+        let empty = stored(SecurityDocument::default());
+        let sec = SecurityDocument {
+            admins: SecurityGroup {
+                names: vec!["bob".into()],
+                roles: vec![],
+            },
+            members: SecurityGroup {
+                names: vec![],
+                roles: vec!["team".into()],
+            },
+            extra: serde_json::Map::from_iter([("x".into(), serde_json::json!(1))]),
+        };
+        let expected = stored(sec.clone());
+        {
+            let db = RedbAdapter::open(&path, "test").unwrap();
+            assert_eq!(stored(db.get_security().await.unwrap()), empty);
+            db.put_security(sec).await.unwrap();
+            assert_eq!(stored(db.get_security().await.unwrap()), expected);
+        }
+
+        let db = RedbAdapter::open(&path, "test").unwrap();
+        assert_eq!(stored(db.get_security().await.unwrap()), expected);
+        assert!(matches!(
+            db.get_local("_security").await,
+            Err(RouchError::NotFound(_))
+        ));
+        db.put_local(
+            "_security",
+            serde_json::json!({"admins": {"names": ["eve"]}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored(db.get_security().await.unwrap()), expected);
+
+        db.destroy().await.unwrap();
+        assert_eq!(stored(db.get_security().await.unwrap()), empty);
     }
 
     #[tokio::test]
@@ -1876,14 +2198,81 @@ mod tests {
             data: serde_json::json!({}),
             attachments: HashMap::new(),
         };
-        db.bulk_docs(vec![doc], BulkDocsOptions::new())
+        let rev = db
+            .bulk_docs(vec![doc], BulkDocsOptions::new())
+            .await
+            .unwrap()[0]
+            .rev
+            .clone()
+            .unwrap();
+        db.put_attachment("doc1", "a", &rev, b"bytes".to_vec(), "text/plain")
             .await
             .unwrap();
+        db.put_local("x", serde_json::json!({})).await.unwrap();
+        db.put_security(SecurityDocument {
+            admins: rouchdb_core::document::SecurityGroup {
+                names: vec!["bob".into()],
+                roles: vec![],
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
 
         db.destroy().await.unwrap();
         let info = db.info().await.unwrap();
-        assert_eq!(info.doc_count, 0);
+        assert_eq!((info.doc_count, info.doc_del_count), (0, 0));
         assert_eq!(info.update_seq, Seq::Num(0));
+        assert!(matches!(
+            db.get("doc1", GetOptions::default()).await,
+            Err(RouchError::NotFound(_))
+        ));
+        assert!(matches!(
+            db.get_local("x").await,
+            Err(RouchError::NotFound(_))
+        ));
+        let changes = db.changes(ChangesOptions::default()).await.unwrap();
+        assert!(changes.results.is_empty());
+        assert!(db.get_security().await.unwrap().admins.names.is_empty());
+        // Every table is empty again, including the attachment store.
+        use redb::ReadableTableMetadata;
+        let txn = db.inner.db.begin_read().unwrap();
+        for table in [DOC_TABLE, REV_DATA_TABLE, LOCAL_TABLE, ATTACHMENT_TABLE] {
+            assert!(txn.open_table(table).unwrap().is_empty().unwrap());
+        }
+        assert!(txn.open_table(CHANGES_TABLE).unwrap().is_empty().unwrap());
+        // The format guard survives: 0.4 still cannot open the file.
+        assert!(txn.open_table(upgrade::GUARD_TABLE).is_ok());
+    }
+
+    /// Re-sending a revision already stored with its body in replication
+    /// mode is a no-op, as in CouchDB: the stored body stays, and there is
+    /// no new sequence or change.
+    #[tokio::test]
+    async fn replicated_known_revision_is_a_noop() {
+        let (_dir, db) = temp_db();
+        let rev: Revision = format!("1-{}", "a".repeat(32)).parse().unwrap();
+        for v in [1, 2] {
+            let doc = Document {
+                id: "d".into(),
+                rev: Some(rev.clone()),
+                deleted: false,
+                data: serde_json::json!({"v": v}),
+                attachments: HashMap::new(),
+            };
+            let results = db
+                .bulk_docs(vec![doc], BulkDocsOptions::replication())
+                .await
+                .unwrap();
+            assert!(results[0].ok, "{:?}", results[0]);
+        }
+
+        let doc = db.get("d", GetOptions::default()).await.unwrap();
+        assert_eq!(doc.data["v"], 1);
+        assert_eq!(db.info().await.unwrap().update_seq, Seq::Num(1));
+        let changes = db.changes(ChangesOptions::default()).await.unwrap();
+        assert_eq!(changes.results.len(), 1);
+        assert_eq!(changes.results[0].seq, Seq::Num(1));
     }
 
     #[tokio::test]
@@ -2004,13 +2393,15 @@ mod tests {
         revs.insert("doc2".into(), vec!["1-xyz".into()]);
 
         let diff = db.revs_diff(revs).await.unwrap();
-        // doc1: 2-def missing, 1-abc exists
+        assert_eq!(diff.results.len(), 2);
+        // doc1: 2-def missing (1-abc exists and may be its ancestor)
         let d1 = &diff.results["doc1"];
-        assert!(d1.missing.contains(&"2-def".to_string()));
-        assert!(!d1.missing.contains(&"1-abc".to_string()));
+        assert_eq!(d1.missing, ["2-def"]);
+        assert_eq!(d1.possible_ancestors, ["1-abc"]);
         // doc2: entirely missing
         let d2 = &diff.results["doc2"];
-        assert!(d2.missing.contains(&"1-xyz".to_string()));
+        assert_eq!(d2.missing, ["1-xyz"]);
+        assert!(d2.possible_ancestors.is_empty());
     }
 
     #[tokio::test]
@@ -2043,39 +2434,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.results.len(), 2);
-        // doc1 should be found
-        assert!(response.results[0].docs[0].ok.is_some());
+        // doc1 should be found, with its ancestry
         let ok_doc = response.results[0].docs[0].ok.as_ref().unwrap();
-        assert_eq!(ok_doc["name"], "Alice");
-        assert!(ok_doc["_revisions"].is_object());
+        let rev: Revision = ok_doc["_rev"].as_str().unwrap().parse().unwrap();
+        assert_eq!(rev.pos, 1);
+        assert_eq!(
+            ok_doc,
+            &serde_json::json!({
+                "_id": "doc1", "_rev": rev.to_string(), "name": "Alice",
+                "_revisions": {"start": 1, "ids": [rev.hash]}
+            })
+        );
         // nonexistent should error
-        assert!(response.results[1].docs[0].error.is_some());
+        let err = response.results[1].docs[0].error.as_ref().unwrap();
+        assert_eq!(
+            (err.id.as_str(), err.error.as_str()),
+            ("nonexistent", "not_found")
+        );
+        assert!(response.results[1].docs[0].ok.is_none());
     }
 
     #[tokio::test]
-    async fn auto_generate_id() {
-        let (_dir, db) = temp_db();
-
-        let doc = Document {
-            id: String::new(),
-            rev: None,
-            deleted: false,
-            data: serde_json::json!({"auto": true}),
-            attachments: HashMap::new(),
-        };
-        let results = db
-            .bulk_docs(vec![doc], BulkDocsOptions::new())
-            .await
-            .unwrap();
-        assert!(results[0].ok);
-        assert!(!results[0].id.is_empty());
-
-        let fetched = db.get(&results[0].id, GetOptions::default()).await.unwrap();
-        assert_eq!(fetched.data["auto"], true);
-    }
-
-    #[tokio::test]
-    async fn conflict_put_without_rev_on_existing() {
+    async fn recreate_deleted_doc_with_same_content() {
         let (_dir, db) = temp_db();
 
         let doc = Document {
@@ -2085,24 +2465,45 @@ mod tests {
             data: serde_json::json!({"v": 1}),
             attachments: HashMap::new(),
         };
-        db.bulk_docs(vec![doc], BulkDocsOptions::new())
+        let r = db
+            .bulk_docs(vec![doc], BulkDocsOptions::new())
             .await
             .unwrap();
+        let rev1: Revision = r[0].rev.clone().unwrap().parse().unwrap();
 
-        // Try to create again without rev => conflict
-        let doc2 = Document {
+        let del = Document {
             id: "doc1".into(),
-            rev: None,
-            deleted: false,
-            data: serde_json::json!({"v": 2}),
+            rev: Some(rev1),
+            deleted: true,
+            data: serde_json::json!({}),
             attachments: HashMap::new(),
         };
         let r = db
-            .bulk_docs(vec![doc2], BulkDocsOptions::new())
+            .bulk_docs(vec![del], BulkDocsOptions::new())
             .await
             .unwrap();
-        assert!(!r[0].ok);
-        assert_eq!(r[0].error.as_deref(), Some("conflict"));
+        assert!(r[0].ok);
+
+        // Re-create with the identical content and no rev. The deterministic
+        // rev hash would reproduce rev 1 exactly, so the new edit must extend
+        // the tombstone instead of starting a fresh pos-1 branch.
+        let recreated = Document {
+            id: "doc1".into(),
+            rev: None,
+            deleted: false,
+            data: serde_json::json!({"v": 1}),
+            attachments: HashMap::new(),
+        };
+        let r = db
+            .bulk_docs(vec![recreated], BulkDocsOptions::new())
+            .await
+            .unwrap();
+        assert!(r[0].ok);
+        let rev3 = r[0].rev.clone().unwrap();
+        assert!(rev3.starts_with("3-"), "expected pos 3, got {rev3}");
+
+        let fetched = db.get("doc1", GetOptions::default()).await.unwrap();
+        assert_eq!(fetched.data["v"], serde_json::json!(1));
     }
 
     #[tokio::test]
@@ -2120,8 +2521,9 @@ mod tests {
             .bulk_docs(vec![doc], BulkDocsOptions::new())
             .await
             .unwrap();
+        // CouchDB and PouchDB: a revision of a missing document conflicts.
         assert!(!r[0].ok);
-        assert_eq!(r[0].error.as_deref(), Some("not_found"));
+        assert_eq!(r[0].error.as_deref(), Some("conflict"));
     }
 
     #[tokio::test]
@@ -2154,73 +2556,418 @@ mod tests {
         assert!(fetched.data.get("_revisions").is_none());
     }
 
-    /// Regression test for the recursion-limit bug: a document replicated
-    /// with a long, purely linear revision history (no conflicts — exactly
-    /// how a record updated hundreds of times over its life arrives via
-    /// `new_edits: false`) must still be readable. Verified against a real
-    /// production CouchDB (`kosmos-tauri`): a frequently-toggled record
-    /// reached revision 321 with zero branching, and every accessor that
-    /// deserialized its `DocRecord` (get, info, all_docs, attachments)
-    /// failed with "recursion limit exceeded" before `deserialize_doc_record`
-    /// (serde_stacker-backed) replaced the plain `serde_json::from_slice`
-    /// calls. 200 revisions comfortably exceeds serde_json's default
-    /// 128-level guard while staying well under any realistic Rust
-    /// call-stack ceiling, so this specifically exercises the guard rather
-    /// than a genuine stack limit.
-    #[tokio::test]
-    async fn deep_linear_history_from_replication_is_readable() {
-        let (_dir, db) = temp_db();
+    // --- F01: on-disk revision tree format ---
 
-        const DEPTH: usize = 200;
-        let mut ids: Vec<String> = (0..DEPTH).map(|i| format!("{i:03}rev")).collect();
-        ids.reverse(); // newest-first, matching CouchDB's `_revisions.ids` order
-
-        let doc = Document {
-            id: "hot-doc".into(),
-            rev: Some(Revision::new(DEPTH as u64, ids[0].clone())),
+    fn put_doc(id: &str, rev: Option<&str>, v: serde_json::Value) -> Document {
+        Document {
+            id: id.into(),
+            rev: rev.map(|r| r.parse().unwrap()),
             deleted: false,
-            data: serde_json::json!({
-                "status": "toggled-many-times",
-                "_revisions": {
-                    "start": DEPTH as u64,
-                    "ids": ids,
-                }
-            }),
+            data: v,
             attachments: HashMap::new(),
-        };
-        let results = db
-            .bulk_docs(vec![doc], BulkDocsOptions::replication())
+        }
+    }
+
+    /// Write a DocRecord in the pre-0.5 nested format, exactly as older
+    /// versions serialized it.
+    fn write_legacy_record(db: &RedbAdapter, id: &str, tree: &RevTree, seq: u64) {
+        let bytes = serde_json::to_vec(&LegacyDocRecord {
+            rev_tree: legacy_tree_to_serialized(tree),
+            seq,
+        })
+        .unwrap();
+        let txn = db.inner.db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(DOC_TABLE).unwrap();
+            t.insert(id, bytes.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    /// Turn a file into the layout of rouchdb <= 0.4: no format guard, and
+    /// `meta` as the record of an unguarded `metadata` table.
+    fn make_legacy(db: &RedbAdapter, meta: &[u8]) {
+        let txn = db.inner.db.begin_write().unwrap();
+        txn.delete_table(upgrade::GUARD_TABLE).unwrap();
+        txn.delete_table(META_TABLE).unwrap();
+        txn.open_table(upgrade::LEGACY_META_TABLE)
+            .unwrap()
+            .insert(META_KEY, meta)
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    fn open_upgrading(path: &Path) -> RedbAdapter {
+        let db = RedbAdapter::open_with(
+            path,
+            "legacy",
+            OpenOptions::new().upgrade(UpgradePolicy::InPlaceNoBackup),
+        )
+        .unwrap();
+        assert!(db.upgrade_report().unwrap().upgraded);
+        db
+    }
+
+    fn raw_record(db: &RedbAdapter, id: &str) -> Vec<u8> {
+        let txn = db.inner.db.begin_read().unwrap();
+        let t = txn.open_table(DOC_TABLE).unwrap();
+        t.get(id).unwrap().unwrap().value().to_vec()
+    }
+
+    fn linear_tree(len: u64) -> RevTree {
+        let ids: Vec<String> = (0..len).rev().map(|i| format!("{:032x}", i + 1)).collect();
+        vec![build_path_from_revs(
+            len,
+            &ids,
+            NodeOpts::default(),
+            RevStatus::Available,
+        )]
+    }
+
+    #[tokio::test]
+    async fn legacy_nested_records_still_load() {
+        // A file as written by rouchdb <= 0.4: nested records, one shallow
+        // and one far deeper than serde_json's default recursion limit (which
+        // is what bricked F01 databases), and a metadata record without the
+        // newer fields.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.redb");
+        let docs = [("shallow", 3u64), ("deep", 400u64)];
+        {
+            let db = RedbAdapter::open(&path, "legacy").unwrap();
+            for (id, len) in docs {
+                write_legacy_record(&db, id, &linear_tree(len), len);
+                let txn = db.inner.db.begin_write().unwrap();
+                {
+                    let mut t = txn.open_table(REV_DATA_TABLE).unwrap();
+                    let rd = serde_json::to_vec(
+                        &serde_json::json!({"data": {"id": id}, "deleted": false}),
+                    )
+                    .unwrap();
+                    let leaf = format!("{}-{:032x}", len, len);
+                    t.insert(rev_data_key(id, &leaf).as_str(), rd.as_slice())
+                        .unwrap();
+                }
+                txn.commit().unwrap();
+            }
+            make_legacy(&db, br#"{"update_seq":400,"db_uuid":"x"}"#);
+        }
+
+        let db = open_upgrading(&path);
+        assert_eq!(db.info().await.unwrap().doc_count, 2);
+        // Node status survives the legacy decoding: only the leaf has a body.
+        let shallow = db
+            .get(
+                "shallow",
+                GetOptions {
+                    revs_info: true,
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
+        let statuses: Vec<&str> = shallow.data["_revs_info"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(statuses, ["available", "missing", "missing"]);
+        for (id, len) in docs {
+            let leaf = format!("{}-{:032x}", len, len);
+            let got = db.get(id, GetOptions::default()).await.unwrap();
+            assert_eq!(got.rev.unwrap().to_string(), leaf);
+            assert_eq!(got.data["id"], id);
+
+            // The next write rewrites the record in the flat format.
+            let r = db
+                .bulk_docs(
+                    vec![put_doc(id, Some(&leaf), serde_json::json!({"v": 2}))],
+                    BulkDocsOptions::new(),
+                )
+                .await
+                .unwrap();
+            assert!(r[0].ok, "{:?}", r[0]);
+            assert!(!raw_record(&db, id).starts_with(b"{\"rev_tree\""));
+            let got = db.get(id, GetOptions::default()).await.unwrap();
+            assert_eq!(got.rev.unwrap().pos, len + 1);
+        }
+        assert_eq!(db.info().await.unwrap().doc_count, 2);
+    }
+
+    #[tokio::test]
+    async fn corrupt_record_is_an_error_not_a_missing_doc() {
+        let (_dir, db) = temp_db();
+        db.bulk_docs(
+            vec![put_doc("d", None, serde_json::json!({}))],
+            BulkDocsOptions::new(),
+        )
+        .await
+        .unwrap();
+        {
+            let txn = db.inner.db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(DOC_TABLE).unwrap();
+                t.insert("d", &b"{not json"[..]).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        // Writing without a rev must not silently replace the history.
+        let res = db
+            .bulk_docs(
+                vec![put_doc("d", None, serde_json::json!({}))],
+                BulkDocsOptions::new(),
+            )
+            .await;
         assert!(
-            results[0].ok,
-            "replicating a {DEPTH}-revision-deep document should succeed"
+            matches!(res, Err(RouchError::DatabaseError(_))),
+            "{:?}",
+            res
         );
+        assert!(matches!(
+            db.get("d", GetOptions::default()).await,
+            Err(RouchError::DatabaseError(_))
+        ));
+        let diff = db
+            .revs_diff(HashMap::from([(
+                "d".to_string(),
+                vec!["1-abc".to_string()],
+            )]))
+            .await;
+        assert!(matches!(diff, Err(RouchError::DatabaseError(_))));
+    }
 
-        // GET must not fail with a JSON recursion error.
-        let fetched = db.get("hot-doc", GetOptions::default()).await.unwrap();
-        assert_eq!(fetched.data["status"], "toggled-many-times");
+    #[test]
+    fn record_with_bad_parent_index_is_an_error() {
+        // A parent index must point at an EARLIER node; anything else (self,
+        // later, or out of range) is corruption, reported as an error rather
+        // than a panic or a silently different tree.
+        for parent in [1u32, 2, 99] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "revs": [
+                    {"pos": 1, "hash": "a"},
+                    {"pos": 2, "hash": "b", "parent": parent},
+                ],
+                "seq": 1
+            }))
+            .unwrap();
+            assert!(
+                matches!(decode_doc_record(&bytes), Err(RouchError::DatabaseError(_))),
+                "parent {}",
+                parent
+            );
+        }
+        let ok = serde_json::to_vec(&serde_json::json!({
+            "revs": [{"pos": 1, "hash": "a"}, {"pos": 2, "hash": "b", "parent": 0}],
+            "seq": 1
+        }))
+        .unwrap();
+        let (tree, seq) = decode_doc_record(&ok).unwrap();
+        assert_eq!(seq, 1);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].tree.children[0].hash, "b");
+    }
 
-        // GET /{db} (info) must not fail either — it scans every DocRecord.
+    #[test]
+    fn flat_record_roundtrip_preserves_tree() {
+        // 1-a -> 2-b (deleted) ; 1-a -> 2-c -> 3-d ; plus a second root 5-x
+        let tree = vec![
+            RevPath {
+                pos: 1,
+                tree: RevNode {
+                    hash: "a".into(),
+                    status: RevStatus::Missing,
+                    opts: NodeOpts::default(),
+                    children: vec![
+                        RevNode {
+                            hash: "b".into(),
+                            status: RevStatus::Available,
+                            opts: NodeOpts { deleted: true },
+                            children: vec![],
+                        },
+                        RevNode {
+                            hash: "c".into(),
+                            status: RevStatus::Available,
+                            opts: NodeOpts::default(),
+                            children: vec![RevNode {
+                                hash: "d".into(),
+                                status: RevStatus::Available,
+                                opts: NodeOpts::default(),
+                                children: vec![],
+                            }],
+                        },
+                    ],
+                },
+            },
+            RevPath {
+                pos: 5,
+                tree: RevNode {
+                    hash: "x".into(),
+                    status: RevStatus::Available,
+                    opts: NodeOpts::default(),
+                    children: vec![],
+                },
+            },
+        ];
+        let bytes = encode_doc_record(&tree, 7).unwrap();
+        let (back, seq) = decode_doc_record(&bytes).unwrap();
+        assert_eq!(seq, 7);
+        assert_eq!(format!("{:?}", back), format!("{:?}", tree));
+    }
+
+    /// F68: bounded queries must not scan (and decode) the whole database.
+    /// A corrupt record placed outside the requested range proves it.
+    #[tokio::test]
+    async fn bounded_queries_do_not_scan_everything() {
+        let (_dir, db) = temp_db();
+        for id in ["a", "b", "c", "zzz"] {
+            db.bulk_docs(
+                vec![put_doc(id, None, serde_json::json!({"id": id}))],
+                BulkDocsOptions::new(),
+            )
+            .await
+            .unwrap();
+        }
+        {
+            let txn = db.inner.db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(DOC_TABLE).unwrap();
+                t.insert("zzz", &b"{corrupt"[..]).unwrap();
+            }
+            txn.commit().unwrap();
+        }
         let info = db.info().await.unwrap();
-        assert_eq!(info.doc_count, 1);
-
-        // all_docs must also survive scanning the deep record.
-        let all = db.all_docs(AllDocsOptions::default()).await.unwrap();
-        assert_eq!(all.rows.len(), 1);
+        assert_eq!(info.doc_count, 4);
+        let page = db
+            .all_docs(AllDocsOptions {
+                limit: Some(2),
+                include_docs: true,
+                ..AllDocsOptions::new()
+            })
+            .await
+            .unwrap();
+        let ids = |r: &AllDocsResponse| r.rows.iter().map(|r| r.key.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&page), ["a", "b"]);
+        assert_eq!(page.total_rows, 4);
+        let range = db
+            .all_docs(AllDocsOptions {
+                start_key: Some("b".into()),
+                end_key: Some("c".into()),
+                ..AllDocsOptions::new()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&range), ["b", "c"]);
+        let key = db
+            .all_docs(AllDocsOptions {
+                key: Some("a".into()),
+                ..AllDocsOptions::new()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&key), ["a"]);
+        let ch = db
+            .changes(ChangesOptions {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let seqs: Vec<(u64, &str)> = ch
+            .results
+            .iter()
+            .map(|c| (c.seq.as_num(), c.id.as_str()))
+            .collect();
+        assert_eq!(seqs, [(1, "a"), (2, "b")]);
+        // Scanning into the corrupt record still reports the error.
+        assert!(matches!(
+            db.all_docs(AllDocsOptions::new()).await,
+            Err(RouchError::DatabaseError(_))
+        ));
     }
 
-    #[tokio::test]
-    async fn compact_is_noop() {
-        let (_dir, db) = temp_db();
-        db.compact().await.unwrap();
+    /// F87: storage work (fsync'd commits, scans) must not run on the async
+    /// runtime's thread. On a current-thread runtime another task has to keep
+    /// making progress while a large write is in flight.
+    #[test]
+    fn storage_work_runs_off_the_runtime_thread() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (_dir, db) = temp_db();
+            let db = Arc::new(db);
+            let docs: Vec<Document> = (0..2000)
+                .map(|i| put_doc(&format!("d{}", i), None, serde_json::json!({"i": i})))
+                .collect();
+            let writer = tokio::spawn({
+                let db = db.clone();
+                async move { db.bulk_docs(docs, BulkDocsOptions::new()).await }
+            });
+            let mut ticks = 0u64;
+            while !writer.is_finished() {
+                tokio::task::yield_now().await;
+                ticks += 1;
+            }
+            let results = writer.await.unwrap().unwrap();
+            assert_eq!(results.len(), 2000);
+            assert!(
+                ticks > 10,
+                "the runtime thread was blocked (ticks = {})",
+                ticks
+            );
+        });
     }
 
+    /// F05: files written by rouchdb <= 0.4 stored attachment bytes under
+    /// `doc_id\0name`; opening them re-keys the bytes by digest.
     #[tokio::test]
-    async fn get_nonexistent_returns_not_found() {
-        let (_dir, db) = temp_db();
-        let result = db.get("nope", GetOptions::default()).await;
-        assert!(result.is_err());
+    async fn legacy_attachment_keys_are_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.redb");
+        let digest = attachment_digest(b"legacy bytes");
+        {
+            let db = RedbAdapter::open(&path, "legacy").unwrap();
+            let tree = linear_tree(2);
+            let rev = format!("2-{:032x}", 2);
+            write_legacy_record(&db, "d", &tree, 1);
+            let txn = db.inner.db.begin_write().unwrap();
+            {
+                let mut revs = txn.open_table(REV_DATA_TABLE).unwrap();
+                let rd = serde_json::json!({
+                    "data": {"v": 1}, "deleted": false,
+                    "attachments": {"a.txt": {"content_type": "text/plain", "digest": digest, "length": 12}}
+                });
+                revs.insert(
+                    rev_data_key("d", &rev).as_str(),
+                    serde_json::to_vec(&rd).unwrap().as_slice(),
+                )
+                .unwrap();
+                let mut atts = txn.open_table(ATTACHMENT_TABLE).unwrap();
+                atts.insert("d\0a.txt", &b"legacy bytes"[..]).unwrap();
+            }
+            txn.commit().unwrap();
+            // A pre-0.5 metadata record (no schema field).
+            make_legacy(&db, br#"{"update_seq":1,"db_uuid":"x"}"#);
+        }
+
+        let db = open_upgrading(&path);
+        let bytes = db
+            .get_attachment("d", "a.txt", GetAttachmentOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"legacy bytes");
+        let txn = db.inner.db.begin_read().unwrap();
+        let atts = txn.open_table(ATTACHMENT_TABLE).unwrap();
+        assert!(atts.get("d\0a.txt").unwrap().is_none());
+        assert!(atts.get(digest.as_str()).unwrap().is_some());
+        let meta = read_meta(&txn.open_table(META_TABLE).unwrap()).unwrap();
+        assert_eq!(meta.schema, SCHEMA_VERSION);
+        assert_eq!(meta.update_seq, 1);
+        // Document counts are computed once for files that predate them.
+        let info = db.info().await.unwrap();
+        assert_eq!((info.doc_count, info.doc_del_count), (1, 0));
     }
 
     #[tokio::test]
@@ -2260,14 +3007,247 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(fetched.data["_conflicts"].is_array());
-        assert_eq!(fetched.data["_conflicts"].as_array().unwrap().len(), 1);
+        // Same generation: the higher hash wins, the other is the conflict.
+        assert_eq!(fetched.rev.unwrap().to_string(), "1-bbb");
+        assert_eq!(fetched.data["branch"], "b");
+        assert_eq!(fetched.data["_conflicts"], serde_json::json!(["1-aaa"]));
     }
 
     #[tokio::test]
     async fn remove_local_nonexistent() {
         let (_dir, db) = temp_db();
         let result = db.remove_local("nope").await;
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(RouchError::NotFound(_))),
+            "{:?}",
+            result
+        );
+    }
+
+    fn put_raw(db: &RedbAdapter, table: TableDefinition<&str, &[u8]>, key: &str, value: &[u8]) {
+        let txn = db.inner.db.begin_write().unwrap();
+        txn.open_table(table).unwrap().insert(key, value).unwrap();
+        txn.commit().unwrap();
+    }
+
+    fn body_keys(db: &RedbAdapter, id: &str) -> Vec<String> {
+        let txn = db.inner.db.begin_read().unwrap();
+        rev_data_keys(&txn.open_table(REV_DATA_TABLE).unwrap(), id).unwrap()
+    }
+
+    async fn write_doc(
+        db: &RedbAdapter,
+        id: &str,
+        rev: Option<&str>,
+        data: serde_json::Value,
+    ) -> String {
+        let doc = Document {
+            id: id.into(),
+            rev: rev.map(|r| r.parse().unwrap()),
+            deleted: false,
+            data,
+            attachments: HashMap::new(),
+        };
+        let res = db
+            .bulk_docs(vec![doc], BulkDocsOptions::new())
+            .await
+            .unwrap();
+        assert!(res[0].ok, "{:?}", res[0]);
+        res[0].rev.clone().unwrap()
+    }
+
+    /// A file written by a newer rouchdb (unknown schema) is refused with a
+    /// clear error instead of being misread, and is left untouched.
+    #[tokio::test]
+    async fn newer_schema_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.redb");
+        let future =
+            serde_json::json!({"update_seq": 7, "db_uuid": "u", "schema": SCHEMA_VERSION + 1});
+        {
+            let db = RedbAdapter::open(&path, "future").unwrap();
+            put_raw(
+                &db,
+                META_TABLE,
+                META_KEY,
+                &serde_json::to_vec(&future).unwrap(),
+            );
+        }
+        let err = RedbAdapter::open(&path, "future").err().expect("must fail");
+        let msg = err.to_string();
+        assert!(matches!(err, RouchError::DatabaseError(_)), "{msg}");
+        assert!(
+            msg.contains(&format!("schema version {}", SCHEMA_VERSION + 1)),
+            "{msg}"
+        );
+        assert!(msg.contains("newer"), "{msg}");
+        // Still refused (nothing was rewritten); the current schema opens.
+        assert!(RedbAdapter::open(&path, "future").is_err());
+        let current =
+            serde_json::json!({"update_seq": 7, "db_uuid": "u", "schema": SCHEMA_VERSION});
+        {
+            let db = Database::create(&path).unwrap();
+            let txn = db.begin_write().unwrap();
+            txn.open_table(META_TABLE)
+                .unwrap()
+                .insert(META_KEY, serde_json::to_vec(&current).unwrap().as_slice())
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        let db = RedbAdapter::open(&path, "future").unwrap();
+        assert_eq!(db.info().await.unwrap().update_seq, Seq::Num(7));
+    }
+
+    /// Q-CORE-3: the body keys of `a` and of ids that extend it with a NUL
+    /// (`a\0b`, `a\0`) share a key range but never mix. The key encoding
+    /// itself is unchanged, so existing files keep working.
+    #[tokio::test]
+    async fn nul_ids_have_disjoint_body_keys() {
+        assert_eq!(rev_data_key("a\0b", "1-x"), "a\u{0}b\u{0}1-x");
+        let (_dir, db) = temp_db();
+        let mut revs: HashMap<&str, String> = HashMap::new();
+        for id in ["a", "a\0b", "a\0", "a\0\0"] {
+            revs.insert(id, write_doc(&db, id, None, serde_json::json!({})).await);
+        }
+        for (id, rev) in &revs {
+            assert_eq!(body_keys(&db, id), [rev_data_key(id, rev)], "{id:?}");
+        }
+        let a = revs["a"].clone();
+        let res = db
+            .purge(HashMap::from([("a".to_string(), vec![a])]))
+            .await
+            .unwrap();
+        assert_eq!(res.purged["a"].len(), 1);
+        db.compact().await.unwrap();
+        for id in ["a\0b", "a\0", "a\0\0"] {
+            assert!(db.get(id, GetOptions::default()).await.is_ok(), "{id:?}");
+        }
+    }
+
+    /// Q-CORE-1: revisions stemmed by the revision limit lose their bodies.
+    #[tokio::test]
+    async fn stemming_drops_stored_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RedbAdapter::open(dir.path().join("s.redb"), "s")
+            .unwrap()
+            .with_rev_limit(3);
+        let mut rev = write_doc(&db, "d", None, serde_json::json!({"v": 0})).await;
+        let first = rev.clone();
+        for v in 1..6 {
+            rev = write_doc(&db, "d", Some(&rev), serde_json::json!({"v": v})).await;
+        }
+        assert_eq!(body_keys(&db, "d").len(), 3);
+        let old = GetOptions {
+            rev: Some(first),
+            ..Default::default()
+        };
+        assert!(matches!(
+            db.get("d", old).await,
+            Err(RouchError::NotFound(_))
+        ));
+    }
+
+    /// Bodies left behind by versions that did not drop stemmed revisions
+    /// are unreadable, and compaction removes them.
+    #[tokio::test]
+    async fn stale_bodies_of_stemmed_revisions() {
+        let (_dir, db) = temp_db();
+        let r1 = write_doc(&db, "d", None, serde_json::json!({"v": 1})).await;
+        let r2 = write_doc(&db, "d", Some(&r1), serde_json::json!({"v": 2})).await;
+        // What an older version left: the tree stemmed to 2-x, 1-x's body kept.
+        let (mut tree, seq) = decode_doc_record(&raw_record(&db, "d")).unwrap();
+        rouchdb_core::merge::stem(&mut tree, 1);
+        put_raw(&db, DOC_TABLE, "d", &encode_doc_record(&tree, seq).unwrap());
+        assert_eq!(body_keys(&db, "d").len(), 2);
+        for rev in [&r1, &r2] {
+            let opts = GetOptions {
+                rev: Some(rev.clone()),
+                ..Default::default()
+            };
+            let got = db.get("d", opts).await;
+            assert_eq!(got.is_ok(), rev == &r2, "{rev}: {got:?}");
+        }
+        let bulk = db
+            .bulk_get(vec![BulkGetItem {
+                id: "d".into(),
+                rev: Some(r1.clone()),
+            }])
+            .await
+            .unwrap();
+        assert!(bulk.results[0].docs[0].ok.is_none());
+        db.compact().await.unwrap();
+        assert_eq!(body_keys(&db, "d"), [rev_data_key("d", &r2)]);
+    }
+
+    /// Q-API-3: stored bodies nested beyond serde_json's 128 levels decode;
+    /// one beyond rouchdb's limit (only an older version could have stored
+    /// it) is a clear error, and does not break compaction.
+    #[tokio::test]
+    async fn deep_bodies_decode() {
+        let (_dir, db) = temp_db();
+        let mut deep = serde_json::json!(1);
+        for _ in 1..MAX_NESTING_DEPTH {
+            deep = serde_json::json!([deep]);
+        }
+        write_doc(&db, "deep", None, serde_json::json!({ "v": deep.clone() })).await;
+        let got = db.get("deep", GetOptions::default()).await.unwrap();
+        assert_eq!(got.data["v"], deep);
+        db.put_local("l", serde_json::json!({ "v": deep.clone() }))
+            .await
+            .unwrap();
+        assert_eq!(db.get_local("l").await.unwrap()["v"], deep);
+        assert!(
+            db.put_local("l", serde_json::json!({ "v": [deep.clone()] }))
+                .await
+                .is_err()
+        );
+
+        let rev = write_doc(&db, "legacy", None, serde_json::json!({})).await;
+        let body = format!(
+            r#"{{"data":{{"v":{}1{}}},"deleted":false}}"#,
+            "[".repeat(MAX_NESTING_DEPTH + 1),
+            "]".repeat(MAX_NESTING_DEPTH + 1)
+        );
+        put_raw(
+            &db,
+            REV_DATA_TABLE,
+            &rev_data_key("legacy", &rev),
+            body.as_bytes(),
+        );
+        let err = db.get("legacy", GetOptions::default()).await.unwrap_err();
+        assert!(err.to_string().contains("exceeds the maximum"), "{err}");
+        db.compact().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn attachment_metadata_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("att.redb");
+        let doc = Document::from_json(serde_json::json!({
+            "_id": "d",
+            "_attachments": {"a.txt": {"content_type": "text/plain", "data": "aGk="}}
+        }))
+        .unwrap();
+        let expected = serde_json::json!({"a.txt": {"content_type": "text/plain", "revpos": 1,
+            "digest": attachment_digest(b"hi"), "length": 2, "stub": true}});
+        {
+            let db = RedbAdapter::open(&path, "t").unwrap();
+            db.bulk_docs(vec![doc], BulkDocsOptions::new())
+                .await
+                .unwrap();
+        }
+        let db = RedbAdapter::open(&path, "t").unwrap();
+        let got = db.get("d", GetOptions::default()).await.unwrap();
+        assert_eq!(got.to_json()["_attachments"], expected);
+        let bulk = db
+            .bulk_get(vec![BulkGetItem {
+                id: "d".into(),
+                rev: None,
+            }])
+            .await
+            .unwrap();
+        let doc = bulk.results[0].docs[0].ok.as_ref().unwrap();
+        assert_eq!(doc["_attachments"]["a.txt"]["revpos"], 1);
+        assert_eq!(doc["_attachments"]["a.txt"]["data"], "aGk=");
     }
 }

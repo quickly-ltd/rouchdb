@@ -1,8 +1,13 @@
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
+use rouchdb_core::error::RouchError;
+
+use super::set_location;
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -11,131 +16,103 @@ pub struct LocalQuery {
     pub rev: Option<String>,
 }
 
-fn validate_db(db: &str, state: &AppState) -> Result<(), AppError> {
-    if db != state.db_name {
-        return Err(AppError(rouchdb_core::error::RouchError::NotFound(
-            format!("Database does not exist: {db}"),
-        )));
-    }
-    Ok(())
+fn missing() -> AppError {
+    AppError(RouchError::NotFound("missing".into()))
 }
 
-fn normalize_id(id: &str) -> (&str, String) {
-    let clean = id.strip_prefix("_local/").unwrap_or(id);
-    let full = format!("_local/{}", clean);
-    (clean, full)
+/// Parse a local-document revision (`0-N`) into its counter.
+fn parse_local_rev(rev: &str) -> Result<u64, AppError> {
+    rev.strip_prefix("0-")
+        .and_then(|n| n.parse::<u64>().ok())
+        .ok_or_else(|| AppError(RouchError::BadRequest("Invalid rev format".into())))
 }
 
-/// GET /{db}/_local or /{db}/_local/ — list all local documents.
-pub async fn get_all_local(
-    State(state): State<AppState>,
-    Path(db): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    validate_db(&db, &state)?;
-    let opts = rouchdb_core::document::AllDocsOptions {
-        include_docs: true,
-        start_key: Some("_local/".to_string()),
-        end_key: Some("_local/\u{ffff}".to_string()),
-        ..Default::default()
-    };
-    let response = state.db.adapter().all_docs(opts).await?;
-    let total_rows = response.rows.len() as u64;
-    Ok(Json(serde_json::json!({
-        "offset": 0,
-        "rows": response.rows,
-        "total_rows": total_rows,
-    })))
-}
-
-/// GET /{db}/_local/{*id} — get a local document (checkpoint).
+/// GET /{db}/_local/{id} — read a local (non-replicated) document.
 pub async fn get_local(
     State(state): State<AppState>,
     Path((db, id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    validate_db(&db, &state)?;
-    let (clean_id, full_id) = normalize_id(&id);
+    state.check_db(&db)?;
+    let stored = match state.db.adapter().get_local(&id).await {
+        Ok(doc) => doc,
+        Err(RouchError::NotFound(_)) => return Err(missing()),
+        Err(e) => return Err(AppError(e)),
+    };
 
-    match state.db.adapter().get_local(clean_id).await {
-        Ok(mut doc) => {
-            if let serde_json::Value::Object(ref mut map) = doc {
-                map.insert("_id".into(), serde_json::Value::String(full_id));
-            }
-            Ok(Json(doc))
-        }
-        Err(rouchdb_core::error::RouchError::NotFound(_)) => {
-            Err(AppError(rouchdb_core::error::RouchError::NotFound(
-                "missing".to_string(),
-            )))
-        }
-        Err(err) => Err(AppError(err)),
-    }
+    let mut obj = match stored {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    let rev = obj
+        .remove("_rev")
+        .and_then(|r| r.as_str().map(String::from))
+        .unwrap_or_else(|| "0-1".to_string());
+    obj.remove("_id");
+    let mut doc = serde_json::Map::new();
+    doc.insert("_id".into(), format!("_local/{id}").into());
+    doc.insert("_rev".into(), rev.into());
+    doc.extend(obj);
+    Ok(Json(serde_json::Value::Object(doc)))
 }
 
-/// PUT /{db}/_local/{*id} — create or update a local document (checkpoint).
+/// PUT /{db}/_local/{id} — write a local document.
+///
+/// Like CouchDB 3, local documents are not MVCC-checked: the new revision is
+/// `0-(N+1)` where `0-N` is the revision sent (or `0-1` without one).
 pub async fn put_local(
     State(state): State<AppState>,
     Path((db, id)): Path<(String, String)>,
     Query(query): Query<LocalQuery>,
-    Json(mut body): Json<serde_json::Value>,
-) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
-    validate_db(&db, &state)?;
-    let (clean_id, full_id) = normalize_id(&id);
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    state.check_db(&db)?;
+    let mut obj = super::json_object_body(&body)?;
 
-    let current_rev = query.rev.or_else(|| {
-        body.as_object()
-            .and_then(|o| o.get("_rev"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-    });
-
-    let next_rev = match current_rev {
-        Some(ref r) => {
-            if let Some((num_str, _)) = r.split_once('-') {
-                if let Ok(num) = num_str.parse::<u64>() {
-                    format!("{}-{}", num + 1, uuid::Uuid::new_v4().simple())
-                } else {
-                    format!("0-{}", uuid::Uuid::new_v4().simple())
-                }
-            } else {
-                format!("0-{}", uuid::Uuid::new_v4().simple())
-            }
-        }
-        None => "0-1".to_string(),
+    let body_rev = obj
+        .remove("_rev")
+        .and_then(|r| r.as_str().map(String::from));
+    let current = match query.rev.or(body_rev) {
+        Some(rev) => parse_local_rev(&rev)?,
+        None => 0,
     };
+    let rev = format!("0-{}", current + 1);
 
-    if let serde_json::Value::Object(ref mut map) = body {
-        map.insert("_id".into(), serde_json::Value::String(full_id.clone()));
-        map.insert("_rev".into(), serde_json::Value::String(next_rev.clone()));
-    }
+    obj.remove("_id");
+    obj.insert("_rev".into(), rev.clone().into());
+    state
+        .db
+        .adapter()
+        .put_local(&id, serde_json::Value::Object(obj))
+        .await?;
 
-    state.db.adapter().put_local(clean_id, body).await?;
-
-    let response = serde_json::json!({
-        "ok": true,
-        "id": full_id,
-        "rev": next_rev,
-    });
-
-    Ok((StatusCode::CREATED, Json(response)))
+    let local_id = format!("_local/{id}");
+    let mut resp = (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "ok": true,
+            "id": local_id,
+            "rev": rev,
+        })),
+    )
+        .into_response();
+    set_location(&mut resp, &headers, &[&db, &local_id]);
+    Ok(resp)
 }
 
-/// DELETE /{db}/_local/{*id} — delete a local document (checkpoint).
+/// DELETE /{db}/_local/{id} — remove a local document.
 pub async fn delete_local(
     State(state): State<AppState>,
     Path((db, id)): Path<(String, String)>,
-    Query(query): Query<LocalQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    validate_db(&db, &state)?;
-    let (clean_id, full_id) = normalize_id(&id);
-
-    let rev = query.rev.unwrap_or_else(|| "0-0".to_string());
-    state.db.adapter().remove_local(clean_id).await?;
-
-    let response = serde_json::json!({
-        "ok": true,
-        "id": full_id,
-        "rev": rev,
-    });
-
-    Ok(Json(response))
+    state.check_db(&db)?;
+    match state.db.adapter().remove_local(&id).await {
+        Ok(()) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "id": format!("_local/{id}"),
+            "rev": "0-0",
+        }))),
+        Err(RouchError::NotFound(_)) => Err(missing()),
+        Err(e) => Err(AppError(e)),
+    }
 }

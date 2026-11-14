@@ -131,17 +131,16 @@ For real-time reactivity, `LiveChangesStream` yields change events continuously,
 
 ```rust
 use std::sync::Arc;
-use rouchdb_changes::{LiveChangesStream, ChangesStreamOptions, ChangeSender};
+use rouchdb_changes::{LiveChangesStream, ChangesStreamOptions};
 use rouchdb::Seq;
 
 let db = Arc::new(rouchdb_adapter_memory::MemoryAdapter::new("mydb"));
 
-// Create a broadcast channel for instant notifications
-let (sender, receiver) = ChangeSender::new(64);
-
+// `None`: the stream subscribes to the adapter's own change notifications
+// (`Adapter::subscribe`), so a write wakes it up immediately.
 let mut stream = LiveChangesStream::new(
     db.clone(),
-    Some(receiver),
+    None,
     ChangesStreamOptions {
         since: Seq::default(),
         live: true,
@@ -185,7 +184,7 @@ let opts = ChangesStreamOptions {
 };
 ```
 
-The `poll_interval` is used only when no broadcast channel is provided. When a `ChangeReceiver` is available, the stream blocks on the broadcast channel for instant notification instead of polling.
+The memory and redb adapters announce every committed change (`Adapter::subscribe`), and a live stream over them (`live_changes`, `live_changes_events`, `Database::live_changes`, or `LiveChangesStream::new(adapter, None, ..)`) waits on those notifications: a write reaches the stream at once, with no polling while idle. `poll_interval` is only used for adapters that cannot announce changes (the HTTP adapter: `subscribe()` returns `None`), when a `ChangeReceiver` you pass is not given, and as the base delay of retries after a failed fetch.
 
 ### How It Works
 
@@ -193,8 +192,12 @@ The `LiveChangesStream` operates through a simple state machine:
 
 1. **FetchingInitial** -- on first call, fetches all changes since the given sequence.
 2. **Yielding** -- returns buffered change events one at a time.
-3. **Waiting** -- when the buffer is exhausted, waits for a notification (via the broadcast channel) or polls on a timer.
+3. **Waiting** -- when the buffer is exhausted, waits for a change notification (the adapter's, or the `ChangeReceiver` you passed) or, without one, polls on a timer. The stream subscribes before its first read, so no change committed in between is missed; a notification is only a wake-up, the changes themselves are always read from the feed (a subscriber that lags behind re-reads it).
 4. **Done** -- when the limit is reached or the channel closes.
+
+### After destroying the database
+
+A live changes stream keeps its position (`last_seq`) for its whole life. When the database it follows is destroyed and reused, the new database numbers its changes from 1 again, so a stream still positioned after the old database's changes misses them: it does not start over on its own (live replication does, see [Replication](replication.md)). Cancel the stream (drop it or call `ChangesHandle::cancel`) and create a new one from `Seq::zero()` after `destroy()`; never pass a `last_seq` from before the `destroy()` to a new stream.
 
 ## ChangeSender / ChangeReceiver
 
@@ -214,7 +217,7 @@ let another_receiver = sender.subscribe();
 sender.notify(Seq::Num(42), "user:alice".into());
 ```
 
-When integrating with a custom adapter, call `sender.notify()` after every successful write so that all `LiveChangesStream` instances wake up immediately instead of waiting for the poll interval.
+A custom adapter should rather implement `Adapter::subscribe` (a default method returning `None`): return a `tokio::sync::broadcast::Receiver<ChangeNotice>` and send a `ChangeNotice::new(seq, doc_id)` for every document change once it is committed. Live changes streams and live replication then use it automatically. `ChangeSender` remains for feeding a stream notifications by hand; `ChangeNotification` is the same type as `ChangeNotice`.
 
 ## Custom Filter Closures
 
@@ -292,7 +295,7 @@ while let Some(event) = rx.recv().await {
         ChangesEvent::Change(ce) => {
             println!("Doc changed: {} seq={}", ce.id, ce.seq);
         }
-        ChangesEvent::Complete { last_seq } => {
+        ChangesEvent::Complete { last_seq, .. } => {
             println!("Caught up at seq {}", last_seq);
         }
         ChangesEvent::Error(msg) => {
@@ -304,6 +307,9 @@ while let Some(event) = rx.recv().await {
         ChangesEvent::Active => {
             println!("Processing changes...");
         }
+        // `ChangesEvent` is `#[non_exhaustive]` (this also covers
+        // `Heartbeat` and events added later).
+        _ => {}
     }
 }
 

@@ -55,8 +55,8 @@ let opts = FindOptions {
 ```
 
 - `selector` -- the query (see operators below).
-- `fields` -- field projection; only these fields (plus `_id`) are returned.
-- `sort` -- sort by one or more fields, ascending (`"asc"`) or descending (`"desc"`).
+- `fields` -- field projection; only these fields are returned (list `_id` explicitly if you need it). Nested paths such as `address.city` keep their structure.
+- `sort` -- sort by one or more fields, ascending (`"asc"`) or descending (`"desc"`). As in CouchDB (which sorts through an index on those fields), documents that lack a sort field are left out of sorted results; unlike CouchDB, no index is required.
 - `limit` -- maximum number of results.
 - `skip` -- number of results to skip (for pagination).
 
@@ -95,11 +95,14 @@ Supported type names: `"null"`, `"boolean"`, `"number"`, `"string"`, `"array"`, 
 |----------|-------------|---------|
 | `$regex` | Matches a regular expression | `{"name": {"$regex": "^Ali"}}` |
 
+Patterns use PCRE-like syntax (via `fancy-regex`), including lookaround and
+backreferences, as CouchDB does.
+
 ### Array Operators
 
 | Operator | Description | Example |
 |----------|-------------|---------|
-| `$all` | Array contains all listed elements | `{"tags": {"$all": ["rust", "db"]}}` |
+| `$all` | Array contains all listed elements (exact equality: `50.0` is not `50`) | `{"tags": {"$all": ["rust", "db"]}}` |
 | `$size` | Array has exactly N elements | `{"tags": {"$size": 3}}` |
 | `$elemMatch` | At least one element matches sub-selector | See below |
 
@@ -128,8 +131,13 @@ let selector = json!({
 |----------|-------------|---------|
 | `$and` | All sub-selectors must match | `{"$and": [{"age": {"$gte": 18}}, {"active": true}]}` |
 | `$or` | At least one sub-selector must match | `{"$or": [{"city": "NYC"}, {"city": "LA"}]}` |
-| `$not` | Negate a selector | `{"$not": {"status": "archived"}}` |
+| `$not` | Negate a selector (the argument must be an object) | `{"$not": {"status": "archived"}}` |
 | `$nor` | None of the sub-selectors match | `{"$nor": [{"status": "banned"}, {"age": {"$lt": 13}}]}` |
+
+An empty `$and`, `$or` or `$nor` is always true, so `{"age": 22, "$or": []}`
+is `{"age": 22}`; but, as in CouchDB, a query whose selector is nothing but an
+empty combinator (`{"$and": []}`, `{"$nor": []}`, `{"f": {"$or": []}}`)
+returns no documents.
 
 Note: multiple fields in the same selector object are an implicit `$and`:
 
@@ -152,6 +160,10 @@ Use dot notation to query nested objects:
 ```rust
 let selector = json!({"address.city": "NYC"});
 ```
+
+### Deeply Nested Selectors
+
+Compiling and matching a selector recurse once per nested object, and `find` does not limit how deep a selector is. On a 2 MiB thread (the default for Tokio workers), a debug build overflows the stack, aborting the process, at around 700 levels of nested objects; a release build handles a few thousand. Selectors parsed with `serde_json::from_str` are safe, because serde_json stops at 127 levels. If your application accepts selectors that may be deeper (from `rouchdb_core::json::from_slice`, another parser, or built in code), check their depth first with `rouchdb_core::json::value_depth`, or run queries on threads with a larger stack (`tokio::runtime::Builder::thread_stack_size`). `rouchdb-server` runs on 16 MiB threads for this reason.
 
 ## Map/Reduce Views
 
@@ -200,15 +212,16 @@ let result = query_view(
 ```
 
 `ViewQueryOptions` fields:
-- `key` -- return only rows with this exact key.
-- `start_key` / `end_key` -- define a key range (inclusive by default).
+- `key` -- return only rows with this exact key. With `start_key` or `end_key` it is the other bound of the range (as when `startkey` follows `key` in a CouchDB query string).
+- `start_key` / `end_key` -- define a key range (inclusive by default). A range no row can be in (a start after the end, or before it when descending) is a `BadRequest`, as in CouchDB.
 - `inclusive_end` -- whether to include the end key.
 - `descending` -- reverse the sort order.
 - `skip` / `limit` -- pagination.
-- `include_docs` -- embed full documents.
-- `reduce` -- whether to run the reduce function.
-- `group` -- group reduced results by key.
+- `include_docs` -- embed full documents (a value `{"_id": ...}` embeds that document instead).
+- `reduce` -- whether to run the reduce function (on by default with `new()`, as in CouchDB).
+- `group` -- group reduced results by key. Grouping (`group`, or a `group_level` above 0) without a reduce is a `BadRequest`.
 - `group_level` -- for array keys, group by the first N elements.
+- `keys` -- return the rows of these keys, in this order (reversed when `descending`, except for grouped reduce rows, which keep it). With a reduce, more than one key requires `group: true` without `group_level` (CouchDB's rule); a single key behaves like `key`. Several keys cannot be combined with `key`, `start_key` or `end_key`.
 
 ### Built-In Reduce Functions
 
@@ -230,10 +243,10 @@ let sum_result = query_view(
         ..ViewQueryOptions::new()
     },
 ).await?;
-// sum_result.rows[0].value == 90.0 (30 + 25 + 35)
+// sum_result.rows[0].value == 90 (30 + 25 + 35; integers stay integers)
 ```
 
-- `ReduceFn::Sum` -- sums all numeric values.
+- `ReduceFn::Sum` -- sums numbers (arrays element-wise, objects field by field). Like CouchDB, values it cannot add make the reduced value an error object (`{"error": "builtin_reduce_error", "reason": ..., "caused_by": <value>}`) instead of failing the query.
 - `ReduceFn::Count` -- counts the number of rows.
 - `ReduceFn::Stats` -- computes `{"sum", "count", "min", "max", "sumsqr"}`.
 

@@ -6,37 +6,258 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
+# The blocking jobs use the toolchain pinned in rust-toolchain.toml, so a new
+# stable release cannot break CI with new lints. `rustup toolchain install`
+# without arguments installs exactly that toolchain and its components.
 jobs:
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      - name: Install pinned toolchain
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Format check
         run: cargo fmt --all -- --check
 
+      - name: Docs use the current version
+        run: |
+          minor=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*"/\1/p' Cargo.toml)
+          stale=$(grep -rnE 'rouchdb[a-z-]* = (\{ ?version = )?"[0-9]+\.[0-9]+' README.md docs/book/src \
+            | grep -vF "\"$minor\"" || true)
+          if [ -n "$stale" ]; then
+            echo "::error::README/book snippets must use rouchdb version $minor:"
+            echo "$stale"
+            exit 1
+          fi
+
+      # The CouchDB scripts select tests by these two reasons (and by the
+      # blocked_on_ name of blocked tests), so no other kind of #[ignore].
+      - name: Every ignored test says why
+        run: |
+          bad=$(git grep -nE '#\[ignore' -- '*.rs' \
+            | grep -vE '#\[ignore = "(requires CouchDB|blocked on [^"]+)"\]' || true)
+          if [ -n "$bad" ]; then
+            echo '::error::Use #[ignore = "requires CouchDB"] or #[ignore = "blocked on Fxx"] (docs/book/src/contributing/testing.md):'
+            echo "$bad"
+            exit 1
+          fi
+
+      # --all-targets also type-checks tests, examples and benches.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Check TLS feature combinations
+        run: |
+          cargo check -p rouchdb --locked --no-default-features
+          cargo check -p rouchdb --locked --no-default-features --features native-tls
+          cargo check -p rouchdb --locked --no-default-features --features rustls-tls-native-roots
 
   test:
     name: Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned toolchain
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
+      # --no-fail-fast: report every failing test binary, not just the first.
       - name: Run unit tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked --no-fail-fast
+
+      # The opt-in `arbitrary-precision` feature (serde_json's
+      # arbitrary_precision) changes how every crate handles numbers, so the
+      # whole suite runs with it too (big_numbers.rs pins both modes).
+      - name: Run unit tests with arbitrary-precision numbers
+        run: cargo test --workspace --locked --no-fail-fast --features rouchdb/arbitrary-precision
+
+  # The redb upgrade, its backup (create, sync, rename) and the CLI touch the
+  # filesystem in ways that differ on Windows (a file opened read-only
+  # cannot be flushed, open files cannot be renamed over). Windows also has
+  # the smallest thread stacks (a 1 MiB main thread), which documents nested
+  # MAX_NESTING_DEPTH levels deep test in the CLI and the server binaries.
+  # The CouchDB tests are #[ignore]d, so none of this needs a CouchDB.
+  windows:
+    name: Tests (Windows, redb + CLI + server)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `-p rouchdb-adapter-redb` is ambiguous (the compat tests also link
+      # the 0.4.0 release), so that crate is selected by its manifest.
+      - name: Run the redb adapter tests
+        run: cargo test --manifest-path crates/rouchdb-adapter-redb/Cargo.toml --locked --no-fail-fast
+
+      - name: Run the CLI and 0.4 compatibility tests
+        run: cargo test -p rouchdb-cli -p rouchdb-compat-tests --locked --no-fail-fast
+
+      # deep_json_binary runs the rouchdb-server binary itself, so the
+      # stacks of its own threads are the ones under test.
+      - name: Run the server's deep-document tests
+        run: cargo test -p rouchdb-server --locked --no-fail-fast --test deep_json_binary --test deep_json
+
+  couchdb:
+    name: CouchDB integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      couchdb:
+        # Pinned, like docker-compose.yml.
+        image: couchdb:3.5.1
+        ports:
+          - 15984:5984
+        env:
+          COUCHDB_USER: admin
+          COUCHDB_PASSWORD: password
+        options: >-
+          --health-cmd "curl -fs http://localhost:5984/_up"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      COUCHDB_URL: http://admin:password@localhost:15984
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build tests
+        run: cargo test --workspace --tests --locked --no-run
+
+      - name: Wait for CouchDB
+        run: curl -fsS --retry 30 --retry-delay 2 --retry-all-errors "$COUCHDB_URL/_up"
+
+      # CouchDB 3.4+ locks an account after 5 failed logins, and a locked-out
+      # admin fails every remaining test with 403. The tests never log in as
+      # the admin with a wrong password; this is the safety net (the same
+      # setting docker-compose.yml applies).
+      - name: Disable CouchDB account lockout
+        run: |
+          curl -fsS -X PUT "$COUCHDB_URL/_node/_local/_config/chttpd_auth_lockout/mode" -d '"off"'
+
+      # Every #[ignore = "requires CouchDB"] test, in parallel. The script
+      # skips the tests blocked on a known bug (`blocked_on_` in the name) and
+      # fails if a test leaves one of its rouchdb_test_* databases behind.
+      - name: Run CouchDB tests
+        run: bash scripts/test-couchdb.sh --locked
+
+      # Big integers against CouchDB, with exact numbers. (Only this test:
+      # the parity tests compare CouchDB's normalized decimals, such as 0.0
+      # for -0.0, which the feature keeps as written.)
+      - name: Run the CouchDB number test with arbitrary-precision
+        run: cargo test -p rouchdb --test big_numbers --locked --features arbitrary-precision -- --ignored
+
+      # xfail check, non-blocking: flags blocked tests that pass now, i.e.
+      # bugs that seem fixed while the test is still marked as blocked.
+      - name: Blocked tests still fail
+        continue-on-error: true
+        run: bash scripts/test-blocked.sh --locked
+
+      # Also catches databases created outside the common helpers.
+      - name: No databases left behind
+        if: success() || failure()
+        run: |
+          leftovers=$(curl -fsS "$COUCHDB_URL/_all_dbs" | jq -r '.[] | select(startswith("_") | not)')
+          if [ -n "$leftovers" ]; then
+            echo "::error::The CouchDB tests left these databases behind:"
+            echo "$leftovers"
+            exit 1
+          fi
+
+  bench:
+    name: Benchmarks (build + smoke run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build benchmarks
+        run: cargo bench --workspace --locked --no-run
+
+      # Criterion's --test mode runs every benchmark once, on a small
+      # dataset: it executes the benches' own assertions (results, query
+      # plans) but measures nothing. Measuring is manual: see bench.yml.
+      # --workspace plus the bench names reuses the build above.
+      - name: Smoke-run benchmarks
+        env:
+          ROUCHDB_BENCH_N: "1000"
+        run: cargo bench --workspace --locked --bench core_ops --bench revtree -- --test
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Overrides rust-toolchain.toml. Keep in sync with `rust-version` in
+      # the root Cargo.toml.
+      RUSTUP_TOOLCHAIN: "1.88.0"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88.0"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check on the minimum supported Rust version
+        run: cargo check --workspace --all-targets --all-features --locked
+
+  latest:
+    name: Clippy on ${{ matrix.toolchain }} (early warning)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Non-blocking: reports lints from the next toolchains before the pin in
+    # rust-toolchain.toml is bumped.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta]
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

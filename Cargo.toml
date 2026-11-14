@@ -12,11 +12,16 @@ members = [
     "crates/rouchdb",
     "crates/rouchdb-server",
     "crates/rouchdb-cli",
+    "crates/rouchdb-bench",
+    "crates/rouchdb-compat-tests",
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.1"
 edition = "2024"
+# Minimum supported Rust version, checked in CI (`msrv` job). Edition 2024
+# let-chains need 1.88.
+rust-version = "1.88"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/rubylab-app/rouchdb"

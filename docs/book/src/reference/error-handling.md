@@ -20,8 +20,11 @@ Every async method on `Database` and every `Adapter` trait method returns `Resul
 
 ## RouchError Variants
 
+`RouchError` is `#[non_exhaustive]`: new kinds of errors may be added in minor releases, so a `match` on it needs a catch-all arm (`Err(e) => ...`), as in the examples below.
+
 ```rust
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RouchError {
     NotFound(String),
     Conflict,
@@ -32,6 +35,7 @@ pub enum RouchError {
     MissingId,
     DatabaseExists(String),
     DatabaseError(String),
+    UpgradeRequired { path: std::path::PathBuf },
     Io(#[from] std::io::Error),
     Json(#[from] serde_json::Error),
 }
@@ -50,6 +54,7 @@ pub enum RouchError {
 | `MissingId` | `"missing document id"` | A document write was attempted without a document ID. |
 | `DatabaseExists(String)` | `"database already exists: {0}"` | An attempt was made to create a database that already exists. |
 | `DatabaseError(String)` | `"database error: {0}"` | A general database-level error (storage corruption, adapter failure, unexpected internal state). |
+| `UpgradeRequired { path }` | `"{path} was written by rouchdb 0.4 or earlier and must be upgraded …"` | `Database::open` / `RedbAdapter::open` found a redb file written by rouchdb 0.4 or earlier. The file was not modified. Upgrade it once with `rouchdb migrate <path>`, `RedbAdapter::upgrade` or `Database::open_with` (see [Migrating from 0.4 to 0.5](../upgrading/0.4-to-0.5.md#redb-files-upgrade-once-explicitly)). |
 | `Io(std::io::Error)` | `"io error: {0}"` | An I/O error from the underlying storage layer (file system, network). Automatically converted from `std::io::Error` via `#[from]`. |
 | `Json(serde_json::Error)` | `"json error: {0}"` | A JSON serialization or deserialization error. Automatically converted from `serde_json::Error` via `#[from]`. |
 

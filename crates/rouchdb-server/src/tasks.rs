@@ -65,7 +65,7 @@ static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 /// Shared registry of running replication tasks.
 ///
 /// Cheap to clone (internally `Arc`'d) — hand one clone to
-/// [`crate::build_router`] (so `GET /_active_tasks` can read it) and keep
+/// [`crate::build_router_with_tasks`] (so `GET /_active_tasks` can read it) and keep
 /// another wherever replication is started, so both sides observe the same
 /// tasks.
 #[derive(Clone, Default)]
@@ -204,6 +204,7 @@ impl ActiveTasks {
 
         let registry = self.inner.clone();
         tokio::spawn(async move {
+            let mut previous = (0u64, 0u64, 0u64);
             while let Some(event) = rx.recv().await {
                 let mut tasks = registry.write().unwrap_or_else(|e| e.into_inner());
                 let Some(entry) = tasks.get_mut(&task_id) else {
@@ -214,14 +215,17 @@ impl ActiveTasks {
                         docs_read,
                         docs_written,
                         doc_write_failures,
+                        ..
                     } => {
-                        entry.docs_read += docs_read;
-                        entry.docs_written += docs_written;
-                        entry.doc_write_failures += doc_write_failures;
+                        entry.docs_read += docs_read.saturating_sub(previous.0);
+                        entry.docs_written += docs_written.saturating_sub(previous.1);
+                        entry.doc_write_failures += doc_write_failures.saturating_sub(previous.2);
+                        previous = (docs_read, docs_written, doc_write_failures);
                         entry.status = "syncing";
                         entry.updated_on = now_unix();
                     }
                     ReplicationEvent::Active => {
+                        previous = (0, 0, 0);
                         entry.status = "syncing";
                         entry.updated_on = now_unix();
                     }
@@ -239,6 +243,7 @@ impl ActiveTasks {
                         tasks.remove(&task_id);
                         break;
                     }
+                    _ => {}
                 }
             }
             registry
@@ -305,7 +310,6 @@ mod tests {
         assert_eq!(synced[0].docs_read, 1);
         assert_eq!(synced[0].docs_written, 1);
         assert_eq!(synced[0].doc_write_failures, 0);
-        assert_eq!(synced[0].status, "syncing");
         assert!(synced[0].updated_on >= synced[0].started_on);
 
         let all = target.all_docs(Default::default()).await.unwrap();

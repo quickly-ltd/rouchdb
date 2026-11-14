@@ -86,7 +86,7 @@ The foundation crate. Everything else depends on it.
 **Responsibility:** Streaming changes feed with one-shot and live/continuous modes.
 
 **Key files:**
-- `src/lib.rs` -- `ChangeSender`, `ChangeReceiver`, `ChangeNotification`, and `LiveChangesStream`. Uses Tokio broadcast channels for real-time change notification.
+- `src/lib.rs` -- `ChangeSender`, `ChangeReceiver`, `ChangeNotification` (= core's `ChangeNotice`), and `LiveChangesStream`, which waits on the adapter's change notifications (`Adapter::subscribe`, Tokio broadcast channels) and polls adapters without them.
 
 ### `rouchdb-replication`
 
@@ -111,7 +111,7 @@ The foundation crate. Everything else depends on it.
 **Responsibility:** Design documents and the persistent view engine.
 
 **Key files:**
-- `src/lib.rs` -- `DesignDocument` struct (with views, filters, validate_doc_update) and `ViewEngine` for persistent map/reduce indexes.
+- `src/design_doc.rs` -- the lossless `DesignDocument` struct (typed views, filters, validate_doc_update, plus `other_views` and `extra` for every other member); `src/engine.rs` -- `ViewEngine` for persistent map/reduce indexes.
 
 ### `rouchdb`
 
@@ -129,6 +129,8 @@ The foundation crate. Everything else depends on it.
 - `src/lib.rs` -- Public API: `build_router()`, `start_server()`, `ServerConfig`.
 - `src/main.rs` -- Standalone binary entry point with clap CLI.
 - `src/state.rs` -- `AppState` shared across all route handlers.
+- `src/auth.rs` -- Admin authentication (Basic auth and `_session` cookies).
+- `src/host.rs` -- `Host` header check against DNS rebinding (`--allowed-host`).
 - `src/error.rs` -- Maps `RouchError` to CouchDB-style JSON error responses.
 - `src/routes/*.rs` -- Route handlers for each CouchDB endpoint (root, session, all_dbs, database, document, all_docs, bulk_docs, find, index, explain, compact, design, fauxton).
 - `fauxton/` -- Embedded Fauxton static files (downloaded via `scripts/download-fauxton.sh`, gitignored).
@@ -138,7 +140,14 @@ The foundation crate. Everything else depends on it.
 **Responsibility:** Command-line tool for inspecting and querying redb database files.
 
 **Key files:**
-- `src/main.rs` -- Clap-based CLI with subcommands: `info`, `get`, `all-docs`, `find`, `changes`, `dump`, `replicate`, `compact`.
+- `src/main.rs` -- Clap-based CLI with subcommands: `info`, `get`, `all-docs`, `find`, `changes`, `dump`, `replicate`, `migrate`, `compact`, `put`, `delete`, `post`, `import`.
+
+### `rouchdb-compat-tests` (not published)
+
+**Responsibility:** Cross-version tests. Depends on the released `rouchdb-core` and `rouchdb-adapter-redb` 0.4.0 from crates.io (renamed `rouchdb04-*`) next to the workspace crates, and checks that 0.4 files are refused and upgraded without loss by this version and that 0.4 refuses 0.5 files.
+
+**Key files:**
+- `tests/redb_0_4_to_0_5.rs`
 
 ## Adding an Adapter
 

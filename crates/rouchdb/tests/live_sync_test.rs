@@ -10,38 +10,21 @@ mod common;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::{delete_remote_db, fresh_remote_db};
+use common::{couchdb, fresh_remote_db};
 use rouchdb::{AuthClient, Database, ReplicationEvent, ReplicationOptions};
 use serde_json::json;
 use tokio::time::sleep;
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires CouchDB"]
 async fn test_live_sync_remote() {
-    let raw_db_url = fresh_remote_db("live_sync").await;
-
-    let mut parsed = reqwest::Url::parse(&raw_db_url).expect("valid COUCHDB_URL");
-    let username = parsed.username().to_string();
-    let password = parsed.password().unwrap_or_default().to_string();
-    let _ = parsed.set_username("");
-    let _ = parsed.set_password(None);
-
-    let db_url = parsed.to_string();
-    let mut server_parsed = parsed;
-    if let Ok(mut segments) = server_parsed.path_segments_mut() {
-        segments.pop_if_empty().pop();
-    }
-    let host_url = server_parsed.as_str().trim_end_matches('/').to_string();
-
-    let remote = if !username.is_empty() {
-        let auth = AuthClient::new(&host_url);
-        auth.login(&username, &password)
-            .await
-            .expect("Failed to login");
-        Arc::new(Database::http_with_auth(&db_url, &auth))
-    } else {
-        Arc::new(Database::http(&db_url))
-    };
+    let remote_db = fresh_remote_db("live_sync").await;
+    let config = couchdb();
+    let auth = AuthClient::new(&config.anonymous_url);
+    auth.login(&config.user, &config.password)
+        .await
+        .expect("Failed to login");
+    let remote = Arc::new(Database::http_with_auth(&remote_db.anonymous_url(), &auth));
     let local = Arc::new(Database::memory("live_sync_local"));
 
     let doc_id = format!(
@@ -100,7 +83,6 @@ async fn test_live_sync_remote() {
     }
 
     handle.cancel();
-    delete_remote_db(&raw_db_url).await;
 
     assert!(found, "Live sync failed to replicate the document in time");
 }
