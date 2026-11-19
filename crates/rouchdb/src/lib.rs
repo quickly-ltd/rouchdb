@@ -88,7 +88,10 @@ pub trait Plugin: Send + Sync {
     /// The plugin name.
     fn name(&self) -> &str;
     /// Called before documents are written; may modify them or reject the
-    /// write with an error.
+    /// write with an error. Changes apply to edits only (`new_edits:
+    /// true`): a replicated revision is stored as the source sent it, on
+    /// every path (`bulk_docs` with `new_edits: false` as well as
+    /// replication).
     ///
     /// For replicated documents it acts like a CouchDB `validate_doc_update`:
     /// it is called once per document, changes it makes are ignored (the
@@ -144,9 +147,13 @@ pub trait Plugin: Send + Sync {
     ) -> Result<()> {
         Ok(())
     }
-    /// Called after documents (or attachments) were written. The write is
-    /// already committed: an error is returned to the caller but does not
-    /// undo it, so retrying the same write will conflict.
+    /// Called after documents (or attachments) were written, with the
+    /// results of the documents sent to storage, in request order: a
+    /// document `validate_doc_update` or `before_write` denied was never
+    /// written and is not among them (it is in the results the caller
+    /// gets). The write is already committed: an error is returned to the
+    /// caller but does not undo it, so retrying the same write will
+    /// conflict.
     async fn after_write(&self, _results: &[DocResult]) -> Result<()> {
         Ok(())
     }
@@ -175,6 +182,7 @@ fn denial(doc: &Document, replicated: bool, error: &RouchError) -> Option<DocRes
             ("forbidden", reason.as_str())
         }
         RouchError::Unauthorized => ("unauthorized", "unauthorized"),
+        RouchError::Conflict => ("conflict", "Document update conflict."),
         _ => return None,
     };
     Some(denied(doc, replicated, kind, reason))
@@ -229,22 +237,66 @@ fn validates(plugins: &[Arc<dyn Plugin>], user_ctx: &UserCtx) -> bool {
     !plugins.is_empty() || !user_ctx.is_admin()
 }
 
-/// Put the results of the written documents back among the denied ones, in
-/// the order of the request. When the adapter did not answer for every
-/// written document (CouchDB answers `new_edits: false` writes with the
-/// failures only), the denials follow its results.
-fn merge_results(slots: Vec<Option<DocResult>>, written: Vec<DocResult>) -> Vec<DocResult> {
-    let expected = slots.iter().filter(|slot| slot.is_none()).count();
-    if written.len() != expected {
-        let mut results = written;
-        results.extend(slots.into_iter().flatten());
-        return results;
+/// A document of a write: sent to the adapter, or denied before it.
+enum Slot {
+    Write { id: String, rev: Option<String> },
+    Denied(DocResult),
+}
+
+/// The results of a write in the order of its documents, and those of the
+/// written ones alone (for `after_write`). CouchDB answers `new_edits:
+/// false` writes with the failures only: the written documents it does not
+/// list are reported as written (with their revision).
+fn merge_results(
+    slots: Vec<Slot>,
+    written: Vec<DocResult>,
+    new_edits: bool,
+) -> (Vec<DocResult>, Vec<DocResult>) {
+    let expected = slots
+        .iter()
+        .filter(|slot| matches!(slot, Slot::Write { .. }))
+        .count();
+    let mut in_order = written.into_iter();
+    let mut by_id: HashMap<String, std::collections::VecDeque<DocResult>> = HashMap::new();
+    let positional = in_order.len() == expected;
+    if !positional {
+        for result in in_order.by_ref() {
+            by_id
+                .entry(result.id.clone())
+                .or_default()
+                .push_back(result);
+        }
     }
-    let mut written = written.into_iter();
-    slots
-        .into_iter()
-        .filter_map(|slot| slot.or_else(|| written.next()))
-        .collect()
+    let mut all = Vec::with_capacity(slots.len());
+    let mut written = Vec::with_capacity(expected);
+    for slot in slots {
+        match slot {
+            Slot::Denied(result) => all.push(result),
+            Slot::Write { id, rev } => {
+                let result = if positional {
+                    in_order.next()
+                } else {
+                    by_id.get_mut(&id).and_then(|queue| queue.pop_front())
+                };
+                let result = match result {
+                    Some(result) => result,
+                    None if !new_edits => {
+                        let mut ok = DocResult::ok(id, "");
+                        ok.rev = rev;
+                        ok
+                    }
+                    None => continue,
+                };
+                written.push(result.clone());
+                all.push(result);
+            }
+        }
+    }
+    // Results the adapter returned for no document of the write.
+    let extra: Vec<DocResult> = by_id.into_values().flatten().collect();
+    written.extend(extra.iter().cloned());
+    all.extend(extra);
+    (all, written)
 }
 
 impl PluginAdapter {
@@ -321,7 +373,7 @@ impl Adapter for PluginAdapter {
         // revision id would silently diverge from it for good.
         let ctx = WriteContext::new(self.inner.as_ref(), self.user_ctx.clone(), opts.new_edits);
         let mut accepted = Vec::with_capacity(docs.len());
-        let mut denied = Vec::new();
+        let mut slots = Vec::with_capacity(docs.len());
         for doc in docs {
             let mut probe = vec![doc.clone()];
             let mut outcome = Ok(());
@@ -346,38 +398,27 @@ impl Adapter for PluginAdapter {
                 },
             };
             match verdict {
-                None => accepted.push(doc),
-                Some(result) => denied.push(result),
+                None => {
+                    slots.push(Slot::Write {
+                        id: doc.id.clone(),
+                        rev: doc.rev.as_ref().map(|r| r.to_string()),
+                    });
+                    accepted.push(doc);
+                }
+                Some(result) => slots.push(Slot::Denied(result)),
             }
         }
 
-        let written: Vec<(String, Option<String>)> = accepted
-            .iter()
-            .map(|d| (d.id.clone(), d.rev.as_ref().map(|r| r.to_string())))
-            .collect();
-        let mut results = if accepted.is_empty() {
+        let results = if accepted.is_empty() {
             Vec::new()
         } else {
             self.inner.bulk_docs(accepted, opts.clone()).await?
         };
-        // CouchDB answers new_edits=false writes with only the failures;
-        // report the rest as written so after_write sees every doc.
-        if !opts.new_edits && results.len() < written.len() {
-            let failed: std::collections::HashSet<String> =
-                results.iter().map(|r| r.id.clone()).collect();
-            for (id, rev) in written {
-                if !failed.contains(&id) {
-                    let mut written = DocResult::ok(id, "");
-                    written.rev = rev;
-                    results.push(written);
-                }
-            }
-        }
+        let (all, written) = merge_results(slots, results, opts.new_edits);
         for plugin in &self.plugins {
-            plugin.after_write(&results).await?;
+            plugin.after_write(&written).await?;
         }
-        results.extend(denied);
-        Ok(results)
+        Ok(all)
     }
 
     async fn all_docs(&self, opts: AllDocsOptions) -> Result<AllDocsResponse> {
@@ -802,6 +843,11 @@ impl Database {
         mut docs: Vec<Document>,
         opts: BulkDocsOptions,
     ) -> Result<Vec<DocResult>> {
+        if !opts.new_edits {
+            // Replicated revisions are written as the source sent them:
+            // plugins accept or reject each one, as for replication.
+            return self.plugin_adapter().bulk_docs(docs, opts).await;
+        }
         for plugin in &self.plugins {
             plugin.before_write(&mut docs).await?;
         }
@@ -816,10 +862,13 @@ impl Database {
         for doc in docs {
             match validate_doc(&self.plugins, self.adapter.as_ref(), &doc, &ctx).await? {
                 None => {
-                    slots.push(None);
+                    slots.push(Slot::Write {
+                        id: doc.id.clone(),
+                        rev: doc.rev.as_ref().map(|r| r.to_string()),
+                    });
                     accepted.push(doc);
                 }
-                Some(result) => slots.push(Some(result)),
+                Some(result) => slots.push(Slot::Denied(result)),
             }
         }
         let written = if accepted.is_empty() {
@@ -827,10 +876,11 @@ impl Database {
         } else {
             self.adapter.bulk_docs(accepted, opts).await?
         };
+        let (all, written) = merge_results(slots, written, true);
         for plugin in &self.plugins {
             plugin.after_write(&written).await?;
         }
-        Ok(merge_results(slots, written))
+        Ok(all)
     }
 
     /// Query all documents.
@@ -3145,6 +3195,33 @@ mod tests {
             .collect();
         summary.sort();
         summary
+    }
+
+    #[tokio::test]
+    async fn replicated_results_keep_the_request_order_with_failures_only_answers() {
+        // CouchDB lists only the failures of a new_edits=false write: the
+        // denied documents still come back where they were in the request.
+        let mut spy = SpyAdapter::new().rejecting("zbad", Some("forbidden"), Some("no"));
+        spy.failures_only = true;
+        let spy = Arc::new(spy);
+        let pa = plugin_adapter(&spy, vec![Arc::new(GatePlugin)]);
+        let results = pa
+            .bulk_docs(
+                vec![
+                    new_doc("a", Some("1-aaa"), serde_json::json!({})),
+                    new_doc("f1", Some("1-fff"), serde_json::json!({})),
+                    new_doc("zbad", Some("1-bbb"), serde_json::json!({})),
+                    new_doc("c", Some("1-ccc"), serde_json::json!({})),
+                ],
+                BulkDocsOptions::replication(),
+            )
+            .await
+            .unwrap();
+        let ids: Vec<(&str, bool)> = results.iter().map(|r| (r.id.as_str(), r.ok)).collect();
+        assert_eq!(
+            ids,
+            [("a", true), ("f1", false), ("zbad", false), ("c", true)]
+        );
     }
 
     #[tokio::test]

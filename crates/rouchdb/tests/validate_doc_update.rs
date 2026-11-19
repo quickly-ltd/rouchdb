@@ -532,3 +532,81 @@ async fn attachment_writes_are_validated_with_the_edited_revision() {
         assert_eq!(rec.take()[0].old.as_ref().map(|o| &o.0), Some(&r2));
     }
 }
+
+/// Rejects a document whose body has `"conflict"` with `RouchError::Conflict`.
+struct ConflictPlugin;
+
+#[async_trait::async_trait]
+impl Plugin for ConflictPlugin {
+    fn name(&self) -> &str {
+        "conflict"
+    }
+    async fn validate_doc_update(
+        &self,
+        new_doc: &Document,
+        _old_doc: &OldDoc<'_>,
+        _ctx: &WriteContext<'_>,
+    ) -> Result<()> {
+        match new_doc.data.get("conflict") {
+            Some(_) => Err(RouchError::Conflict),
+            None => Ok(()),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_plugin_conflict_denies_that_document_only() {
+    let db = Database::memory("c").with_plugin(Arc::new(ConflictPlugin));
+    let results = db
+        .bulk_docs(
+            vec![doc("a", json!({"conflict": true})), doc("b", json!({}))],
+            BulkDocsOptions::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(results[0].error.as_deref(), Some("conflict"), "{results:?}");
+    assert!(results[1].ok, "{results:?}");
+    let err = db.put("x", json!({"conflict": true})).await.unwrap_err();
+    assert!(matches!(err, RouchError::Conflict), "{err:?}");
+}
+
+/// Changes every document it sees in `before_write`.
+struct Stamper;
+
+#[async_trait::async_trait]
+impl Plugin for Stamper {
+    fn name(&self) -> &str {
+        "stamper"
+    }
+    async fn before_write(&self, docs: &mut Vec<Document>) -> Result<()> {
+        for doc in docs {
+            doc.data["stamped"] = json!(true);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn replicated_writes_keep_the_source_body_on_every_path() {
+    // `before_write` changes are applied to edits only: a replicated revision
+    // is stored as the source sent it, through `bulk_docs` as through
+    // replication.
+    let db = Database::memory("t").with_plugin(Arc::new(Stamper));
+    let replicated = Document::from_json(json!({
+        "_id": "r",
+        "_rev": "1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "_revisions": {"start": 1, "ids": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]},
+        "v": 1,
+    }))
+    .unwrap();
+    db.bulk_docs(vec![replicated], BulkDocsOptions::replication())
+        .await
+        .unwrap();
+    assert!(db.get("r").await.unwrap().data.get("stamped").is_none());
+    let source = Database::memory("s");
+    source.put("p", json!({})).await.unwrap();
+    source.replicate_to(&db).await.unwrap();
+    assert!(db.get("p").await.unwrap().data.get("stamped").is_none());
+    db.put("e", json!({})).await.unwrap();
+    assert_eq!(db.get("e").await.unwrap().data["stamped"], true);
+}
