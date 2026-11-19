@@ -2844,15 +2844,17 @@ async fn replicate_errors_in_output_do_not_print_url_password() {
             .find(|r| r.method == "PUT")
             .expect("a checkpoint write");
         let v = stdout_json(&output);
-        assert_eq!(
-            v["errors"],
-            serde_json::json!([format!(
-                "checkpoint write failed: database error: error sending request for url (http://{}{}{})",
-                shown,
-                fake.base.trim_start_matches("http://"),
-                checkpoint_put.path
-            )])
+        // The error names the URL, then the cause (the connection closed).
+        let errors = v["errors"].as_array().expect("errors");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        let error = errors[0].as_str().unwrap();
+        let expected = format!(
+            "checkpoint write failed: database error: error sending request for url (http://{}{}{}): ",
+            shown,
+            fake.base.trim_start_matches("http://"),
+            checkpoint_put.path
         );
+        assert!(error.starts_with(&expected), "{error}");
         assert_eq!(v["docs_written"], 1);
         assert_eq!(
             stderr,

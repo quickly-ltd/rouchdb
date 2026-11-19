@@ -76,7 +76,10 @@ pub struct ReplicationOptions {
     pub retry: bool,
     /// Polling interval for live replication (default: 500ms), used when
     /// the source cannot announce its changes ([`Adapter::subscribe`]
-    /// returns `None`, as for a remote CouchDB).
+    /// returns `None`, as for a remote CouchDB). A source with a longpoll
+    /// feed ([`Adapter::wait_for_changes`], like the HTTP adapter's) is
+    /// waited on instead. Either way passes start at most once per
+    /// `poll_interval`: a busy source is not read faster than when polled.
     pub poll_interval: Duration,
     /// Backoff function for retry: takes attempt number, returns delay.
     pub back_off_function: Option<Box<dyn Fn(u32) -> Duration + Send + Sync>>,
@@ -162,7 +165,9 @@ pub enum ReplicationEvent {
     Error(String),
     /// A condition that does not stop the replication, also listed in
     /// [`ReplicationResult::warnings`]. A live replication sends it once
-    /// per session, not on every pass.
+    /// per session, not on every pass. A live replication also sends one
+    /// when waiting on the source's longpoll feed fails (once per distinct
+    /// error; it then polls every `poll_interval`).
     Warning(String),
 }
 
@@ -321,6 +326,34 @@ struct RunOutcome {
     /// Set when the pass stopped at a batch it could not fully replicate
     /// (the checkpoint was not advanced past it), so it must be retried.
     failure: Option<String>,
+}
+
+/// The longest a live replication waits in one request for a change of a
+/// source that cannot announce its changes ([`Adapter::wait_for_changes`]).
+const LONGPOLL_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Wait for a change after `since` on a source that cannot announce its
+/// changes: in one `wait_for_changes` request (CouchDB's longpoll feed) if
+/// the source supports it, and never less than `poll_interval` in any case.
+/// A source that answers at once (no longpoll, an error, or a change already
+/// there because it is busy) is thus not read faster than when it was
+/// polled. Returns the wait's error, if it failed: the replication then
+/// polls, and reports it (once per distinct error) as a warning.
+async fn idle_wait(
+    source: &dyn Adapter,
+    since: Option<Seq>,
+    poll_interval: Duration,
+) -> Option<String> {
+    let started = tokio::time::Instant::now();
+    let failed = match since {
+        Some(since) => match source.wait_for_changes(since, LONGPOLL_TIMEOUT).await {
+            Ok(_) => None,
+            Err(e) => Some(e.to_string()),
+        },
+        None => None,
+    };
+    tokio::time::sleep_until(started + poll_interval).await;
+    failed
 }
 
 /// Per-doc write errors that will never succeed on retry.
@@ -655,7 +688,8 @@ async fn run_replication(
 ///
 /// Performs an initial one-shot replication, then replicates again each
 /// time the source announces a change ([`Adapter::subscribe`]), or, for a
-/// source that cannot, every `poll_interval`. Runs until the returned
+/// source that cannot, when its longpoll feed reports one
+/// ([`Adapter::wait_for_changes`]) or every `poll_interval` without it. Runs until the returned
 /// `ReplicationHandle` is cancelled/dropped.
 ///
 /// Events are emitted through the returned channel receiver.
@@ -669,8 +703,9 @@ async fn run_replication(
 /// listens for the reset notice ([`ChangeNotice::reset`]) that the memory
 /// and redb adapters announce on `destroy`, and compares the ids of a
 /// target that cannot announce it (such as a remote CouchDB) every
-/// `poll_interval`, then runs a pass that copies everything to the new
-/// target. (The HTTP adapter caches the server's uuid, so a remote database
+/// `poll_interval`, also while it waits on the longpoll feed of a source
+/// that cannot announce its changes either, then runs a pass that copies
+/// everything to the new target. (The HTTP adapter caches the server's uuid, so a remote database
 /// that is deleted and re-created keeps its id.)
 ///
 /// When both peers report the same id, the replication runs without
@@ -732,6 +767,8 @@ pub fn replicate_live(
             // A peer announced a reset (`ChangeNotice::reset`) since the last
             // pass.
             let mut reset = false;
+            // The last error of the longpoll wait, reported once.
+            let mut wait_error: Option<String> = None;
 
             'live: loop {
                 let result = async {
@@ -852,16 +889,23 @@ pub fn replicate_live(
                 }
 
                 // Wait for a change on the source (its notifications, or
-                // poll_interval without them), a reset of the target (its
+                // `idle_wait` without them), a reset of the target (its
                 // notifications, or its id checked every poll_interval without
-                // them) or cancellation.
-                if caught_up && notices.is_some() {
+                // them) or cancellation. The pass caught up: report it now,
+                // since the wait may be long (a longpoll feed does not answer
+                // before the next change).
+                if caught_up {
                     if let Some(last_seq) = since.clone() {
                         let _ = tx.send(ReplicationEvent::CaughtUp { last_seq }).await;
                     }
                     let _ = tx.send(ReplicationEvent::Paused).await;
                 }
                 let mut deadline = tokio::time::Instant::now() + poll_interval;
+                // Without notices, wait for the source's next change (see
+                // `idle_wait`); one wait spans the loop, so the target's
+                // notices do not restart it.
+                let idle = idle_wait(source.as_ref(), since.clone(), poll_interval);
+                tokio::pin!(idle);
                 loop {
                     tokio::select! {
                         notice = next_notice(&mut notices), if notices.is_some() => {
@@ -877,7 +921,18 @@ pub fn replicate_live(
                             }
                             break;
                         }
-                        _ = tokio::time::sleep_until(deadline), if notices.is_none() => break,
+                        failed = &mut idle, if notices.is_none() => {
+                            if let Some(message) = &failed
+                                && wait_error.as_ref() != Some(message)
+                            {
+                                let warning = format!(
+                                    "waiting for the source's changes failed, polling every poll_interval: {message}"
+                                );
+                                let _ = tx.send(ReplicationEvent::Warning(warning)).await;
+                            }
+                            wait_error = failed;
+                            break;
+                        }
                         notice = next_notice(&mut target_notices), if target_notices.is_some() => {
                             match notice {
                                 Ok(notice) if notice.reset => {
@@ -896,8 +951,10 @@ pub fn replicate_live(
                                 }
                             }
                         }
-                        _ = tokio::time::sleep_until(deadline),
-                            if notices.is_some() && target_notices.is_none() =>
+                        // Also while waiting on a longpoll feed: a target
+                        // reset is noticed within a poll_interval even if
+                        // the source stays idle until the longpoll timeout.
+                        _ = tokio::time::sleep_until(deadline), if target_notices.is_none() =>
                         {
                             if ids_changed().await {
                                 break;
@@ -1258,6 +1315,63 @@ mod tests {
         async fn destroy(&self) -> Result<()> {
             self.0.destroy().await
         }
+    }
+
+    /// QuicklySystems 15c7060f: with checkpoints off, a live replication
+    /// must still report Paused once the target has everything, whether the
+    /// source announces its changes or is polled; a first-sync gate waiting
+    /// for it would otherwise wait forever.
+    #[tokio::test]
+    async fn live_replication_pauses_after_writing_without_checkpoints() {
+        for announcing in [true, false] {
+            let memory = MemoryAdapter::new("source");
+            put_doc(&memory, "doc1", serde_json::json!({"v": 1})).await;
+            let source: Arc<dyn Adapter> = if announcing {
+                Arc::new(memory)
+            } else {
+                Arc::new(Quiet(memory))
+            };
+            let target: Arc<dyn Adapter> = Arc::new(MemoryAdapter::new("target"));
+            let (mut rx, handle) = replicate_live(
+                source,
+                target,
+                ReplicationOptions {
+                    live: true,
+                    checkpoint: false,
+                    poll_interval: Duration::from_millis(20),
+                    ..Default::default()
+                },
+            );
+            let paused_after_write = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut written = false;
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        ReplicationEvent::Change { docs_written, .. } if docs_written > 0 => {
+                            written = true
+                        }
+                        ReplicationEvent::Paused if written => return true,
+                        _ => {}
+                    }
+                }
+                false
+            })
+            .await;
+            handle.cancel();
+            assert_eq!(paused_after_write, Ok(true), "announcing: {announcing}");
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_wait_without_longpoll_waits_the_poll_interval() {
+        // A source that cannot wait for its changes (or answers at once) is
+        // still polled no faster than poll_interval.
+        let source = Quiet(MemoryAdapter::new("s"));
+        let started = tokio::time::Instant::now();
+        idle_wait(&source, Some(Seq::Num(0)), Duration::from_millis(80)).await;
+        assert!(started.elapsed() >= Duration::from_millis(80));
+        let started = tokio::time::Instant::now();
+        idle_wait(&source, None, Duration::from_millis(80)).await;
+        assert!(started.elapsed() >= Duration::from_millis(80));
     }
 
     #[tokio::test]
