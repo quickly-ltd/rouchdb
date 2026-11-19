@@ -8,6 +8,7 @@ This project follows [Semantic Versioning](https://semver.org/). Since we are pr
 
 ### Fixed
 
+- HTTP adapter errors include their cause (`... error sending request for url (...): client error (Connect): tcp connect error: Connection refused`), so a replication's `last_error` says why a request failed.
 - Serialize HTTP database deletion and recreation so `PUT /{db}` cannot acknowledge a new database before an in-flight deletion clears its storage.
 - Cancel live replication while adapter I/O or event delivery is pending; a full event queue no longer prevents the worker from stopping. Terminal completion on cancellation is best-effort when the queue is full.
 - Report unsuccessful HTTP session logout responses instead of returning success.

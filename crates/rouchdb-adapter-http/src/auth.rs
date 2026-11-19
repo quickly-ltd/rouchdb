@@ -83,13 +83,13 @@ impl AuthClient {
             .json(&serde_json::json!({"name": username, "password": password}))
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = crate::check_response(resp).await?;
 
         let login = resp
             .json::<LoginResponse>()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         Ok(Session {
             ok: login.ok,
             user_ctx: login.user_ctx.unwrap_or(UserContext {
@@ -106,7 +106,7 @@ impl AuthClient {
             .delete(format!("{}/_session", self.server_url))
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         crate::check_response(response).await?;
         Ok(())
     }
@@ -118,11 +118,11 @@ impl AuthClient {
             .get(format!("{}/_session", self.server_url))
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
 
         resp.json::<Session>()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))
     }
 
     /// Create a new user in the `_users` database.
@@ -142,7 +142,7 @@ impl AuthClient {
             .json(&user_doc)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         crate::check_response(resp).await?;
 
         Ok(())

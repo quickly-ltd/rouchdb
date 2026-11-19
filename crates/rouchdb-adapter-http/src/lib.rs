@@ -18,6 +18,25 @@ use rouchdb_core::document::*;
 use rouchdb_core::error::{Result, RouchError};
 use rouchdb_core::json::MAX_NESTING_DEPTH;
 
+/// An error's message followed by its causes (`a: b: c`). A
+/// `reqwest::Error` only says "error sending request for url (...)"; why
+/// (connection refused, TLS, DNS) is in its source chain, and belongs in
+/// the replication's `last_error`.
+pub(crate) fn err_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_message = cause.to_string();
+        // Some errors repeat their cause in their own message.
+        if !message.ends_with(&cause_message) {
+            message.push_str(": ");
+            message.push_str(&cause_message);
+        }
+        source = cause.source();
+    }
+    message
+}
+
 /// Containers a CouchDB response wraps around a document (a `_bulk_get`
 /// result: object, `results`, result, `docs`, entry), with some margin.
 const RESPONSE_ENVELOPE_DEPTH: usize = 8;
@@ -30,7 +49,7 @@ where
     T: serde::de::DeserializeOwned + Send + 'static,
 {
     rouchdb_core::json::from_slice(bytes, MAX_NESTING_DEPTH + RESPONSE_ENVELOPE_DEPTH)
-        .map_err(|e| RouchError::DatabaseError(e.to_string()))
+        .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))
 }
 
 /// Read and decode a JSON response body (see [`decode_response`]).
@@ -41,7 +60,7 @@ where
     let bytes = resp
         .bytes()
         .await
-        .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+        .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
     decode_response(&bytes)
 }
 
@@ -338,7 +357,7 @@ impl HttpAdapter {
                 .request(method.clone(), &self.base_url)
                 .send()
                 .await
-                .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+                .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
             if resp.status() != reqwest::StatusCode::INTERNAL_SERVER_ERROR || retries == 0 {
                 return Ok(resp);
             }
@@ -437,7 +456,7 @@ impl Adapter for HttpAdapter {
             .get(&self.base_url)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = self.check_error(resp).await?;
         let info: CouchDbInfo = read_json(resp).await?;
 
@@ -468,7 +487,7 @@ impl Adapter for HttpAdapter {
             .get(server)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let root: Option<serde_json::Value> = match resp.error_for_status() {
             Ok(resp) => resp.json().await.ok(),
             Err(_) => None,
@@ -527,7 +546,7 @@ impl Adapter for HttpAdapter {
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = self.check_error(resp).await?;
         let json: serde_json::Value = read_json(resp).await?;
 
@@ -588,7 +607,7 @@ impl Adapter for HttpAdapter {
                 .json(&request)
                 .send()
                 .await
-                .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+                .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
             let resp = self.check_error(resp).await?;
             read_json(resp).await?
         };
@@ -665,7 +684,7 @@ impl Adapter for HttpAdapter {
         } else {
             self.client.get(&url).send().await
         }
-        .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+        .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = self.check_error(resp).await?;
         let result: CouchDbAllDocsResponse = read_json(resp).await?;
 
@@ -720,13 +739,13 @@ impl Adapter for HttpAdapter {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| RouchError::DatabaseError(e.to_string()))?
+                .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?
         } else {
             self.client
                 .get(&url)
                 .send()
                 .await
-                .map_err(|e| RouchError::DatabaseError(e.to_string()))?
+                .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?
         };
 
         let resp = self.check_error(resp).await?;
@@ -777,7 +796,7 @@ impl Adapter for HttpAdapter {
             .get(&url)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = self.check_error(resp).await?;
         let result: CouchDbChangesResponse = read_json(resp).await?;
         Ok(if result.results.is_empty() {
@@ -795,7 +814,7 @@ impl Adapter for HttpAdapter {
             .json(&revs)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = self.check_error(resp).await?;
 
         let results: HashMap<String, RevsDiffResult> = read_json(resp).await?;
@@ -827,7 +846,7 @@ impl Adapter for HttpAdapter {
             .json(&request)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = self.check_error(resp).await?;
 
         let result: CouchDbBulkGetResponse = read_json(resp).await?;
@@ -879,7 +898,7 @@ impl Adapter for HttpAdapter {
             .body(data)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = self.check_error(resp).await?;
         let result: CouchDbPutResponse = read_json(resp).await?;
 
@@ -913,12 +932,12 @@ impl Adapter for HttpAdapter {
             .get(&url)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = self.check_error(resp).await?;
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
 
         Ok(bytes.to_vec())
     }
@@ -937,7 +956,7 @@ impl Adapter for HttpAdapter {
             .delete(&url)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = self.check_error(resp).await?;
         let result: CouchDbPutResponse = read_json(resp).await?;
 
@@ -958,7 +977,7 @@ impl Adapter for HttpAdapter {
             .get(&url)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = self.check_error(resp).await?;
         let json: serde_json::Value = read_json(resp).await?;
         Ok(json)
@@ -974,7 +993,7 @@ impl Adapter for HttpAdapter {
             .json(&doc)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         self.check_error(resp).await?;
         Ok(())
     }
@@ -994,7 +1013,7 @@ impl Adapter for HttpAdapter {
             .delete(&url)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         self.check_error(resp).await?;
         Ok(())
     }
@@ -1007,7 +1026,7 @@ impl Adapter for HttpAdapter {
             .header("Content-Type", "application/json")
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         self.check_error(resp).await?;
         Ok(())
     }
@@ -1039,7 +1058,7 @@ impl Adapter for HttpAdapter {
             .json(&req)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = self.check_error(resp).await?;
         let result: PurgeResponse = read_json(resp).await?;
         Ok(result)
@@ -1052,7 +1071,7 @@ impl Adapter for HttpAdapter {
             .get(self.url("_security"))
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         let resp = self.check_error(resp).await?;
         let doc: SecurityDocument = read_json(resp).await?;
         Ok(doc)
@@ -1066,7 +1085,7 @@ impl Adapter for HttpAdapter {
             .json(&doc)
             .send()
             .await
-            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+            .map_err(|e| RouchError::DatabaseError(crate::err_chain(&e)))?;
         self.check_error(resp).await?;
         Ok(())
     }
@@ -1480,6 +1499,21 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1, "{requests:?}");
         requests[0].clone()
+    }
+
+    #[tokio::test]
+    async fn transport_errors_carry_their_cause() {
+        // reqwest's own message only says "error sending request for url";
+        // why it failed (refused, TLS, DNS) is in its source chain.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let err = adapter_at(&format!("http://{addr}"))
+            .info()
+            .await
+            .unwrap_err();
+        let message = err.to_string().to_lowercase();
+        assert!(message.contains("connection refused"), "{message}");
     }
 
     #[tokio::test]
