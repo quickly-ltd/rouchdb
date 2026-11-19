@@ -384,3 +384,191 @@ async fn projection_answers_exactly_like_the_full_scan() {
         }
     }
 }
+
+/// What [`Racy`] does right before the first candidate read of a projected
+/// selector feed (a one-change page), i.e. after the projection was
+/// refreshed for the request.
+enum Race {
+    /// Update `product-1`: it moves to a newer seq.
+    Update,
+    /// Destroy the database and write a new generation whose seq 11 is
+    /// another document.
+    Recreate,
+}
+
+/// A memory database that runs a [`Race`] once during a request.
+struct Racy {
+    inner: Database,
+    race: std::sync::Mutex<Option<Race>>,
+}
+
+impl Racy {
+    async fn run(&self, race: Race) {
+        let db = &self.inner;
+        match race {
+            Race::Update => {
+                let rev = db.get("product-1").await.unwrap().rev.unwrap().to_string();
+                db.update(
+                    "product-1",
+                    &rev,
+                    json!({"kind": "products", "name": "Tea 2"}),
+                )
+                .await
+                .unwrap();
+            }
+            Race::Recreate => {
+                db.destroy().await.unwrap();
+                for i in 0..10 {
+                    db.put(&format!("x{i}"), json!({"kind": "events"}))
+                        .await
+                        .unwrap();
+                }
+                db.put("intruder", json!({"kind": "products"}))
+                    .await
+                    .unwrap();
+                db.put("another", json!({"kind": "products"}))
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl rouchdb::Adapter for Racy {
+    async fn info(&self) -> rouchdb::Result<rouchdb::DbInfo> {
+        self.inner.adapter().info().await
+    }
+    async fn id(&self) -> rouchdb::Result<String> {
+        self.inner.adapter().id().await
+    }
+    async fn get(&self, id: &str, opts: rouchdb::GetOptions) -> rouchdb::Result<rouchdb::Document> {
+        self.inner.adapter().get(id, opts).await
+    }
+    async fn bulk_docs(
+        &self,
+        docs: Vec<rouchdb::Document>,
+        opts: rouchdb::BulkDocsOptions,
+    ) -> rouchdb::Result<Vec<rouchdb::DocResult>> {
+        self.inner.adapter().bulk_docs(docs, opts).await
+    }
+    async fn all_docs(
+        &self,
+        opts: rouchdb::AllDocsOptions,
+    ) -> rouchdb::Result<rouchdb::AllDocsResponse> {
+        self.inner.adapter().all_docs(opts).await
+    }
+    async fn changes(
+        &self,
+        opts: rouchdb::ChangesOptions,
+    ) -> rouchdb::Result<rouchdb::ChangesResponse> {
+        if opts.limit == Some(1) {
+            let race = self.race.lock().unwrap().take();
+            if let Some(race) = race {
+                self.run(race).await;
+            }
+        }
+        self.inner.adapter().changes(opts).await
+    }
+    async fn revs_diff(
+        &self,
+        revs: std::collections::HashMap<String, Vec<String>>,
+    ) -> rouchdb::Result<rouchdb::RevsDiffResponse> {
+        self.inner.adapter().revs_diff(revs).await
+    }
+    async fn bulk_get(
+        &self,
+        docs: Vec<rouchdb::BulkGetItem>,
+    ) -> rouchdb::Result<rouchdb::BulkGetResponse> {
+        self.inner.adapter().bulk_get(docs).await
+    }
+    async fn put_attachment(
+        &self,
+        doc_id: &str,
+        att_id: &str,
+        rev: &str,
+        data: Vec<u8>,
+        content_type: &str,
+    ) -> rouchdb::Result<rouchdb::DocResult> {
+        self.inner
+            .adapter()
+            .put_attachment(doc_id, att_id, rev, data, content_type)
+            .await
+    }
+    async fn get_attachment(
+        &self,
+        doc_id: &str,
+        att_id: &str,
+        opts: rouchdb::GetAttachmentOptions,
+    ) -> rouchdb::Result<Vec<u8>> {
+        self.inner
+            .adapter()
+            .get_attachment(doc_id, att_id, opts)
+            .await
+    }
+    async fn remove_attachment(
+        &self,
+        doc_id: &str,
+        att_id: &str,
+        rev: &str,
+    ) -> rouchdb::Result<rouchdb::DocResult> {
+        self.inner
+            .adapter()
+            .remove_attachment(doc_id, att_id, rev)
+            .await
+    }
+    async fn get_local(&self, id: &str) -> rouchdb::Result<Value> {
+        self.inner.adapter().get_local(id).await
+    }
+    async fn put_local(&self, id: &str, doc: Value) -> rouchdb::Result<()> {
+        self.inner.adapter().put_local(id, doc).await
+    }
+    async fn remove_local(&self, id: &str) -> rouchdb::Result<()> {
+        self.inner.adapter().remove_local(id).await
+    }
+    async fn compact(&self) -> rouchdb::Result<()> {
+        self.inner.adapter().compact().await
+    }
+    async fn destroy(&self) -> rouchdb::Result<()> {
+        self.inner.adapter().destroy().await
+    }
+}
+
+/// A projected selector feed with a [`Race`] during its candidate reads,
+/// and the plain feed's answer right after it.
+async fn raced(race: Race) -> (Value, Value) {
+    let selector = products();
+    let (inner, _) = mixed(&[]).await;
+    let inner = Arc::try_unwrap(inner).ok().unwrap();
+    let racy = Arc::new(Racy {
+        inner,
+        race: std::sync::Mutex::new(Some(race)),
+    });
+    let db = Arc::new(Database::from_adapter(racy));
+    let mut config = config();
+    config.selector_index_fields = vec!["kind".into()];
+    let projected = app_with(db.clone(), &config);
+    let uri = "/db/_changes?filter=_selector&include_docs=true";
+    let answer = post(&projected, uri, selector.clone()).await.json();
+    let plain = app_with(db, &common::config());
+    let expected = post(&plain, uri, selector).await.json();
+    (answer, expected)
+}
+
+/// A document written while the request reads its candidates moved to a
+/// newer seq: it is returned at that seq, as the full scan returns it.
+#[tokio::test]
+async fn document_moved_during_the_request_is_returned_at_its_new_seq() {
+    let (answer, expected) = raced(Race::Update).await;
+    assert_eq!(ids(&expected), ["product-2", "product-1"]);
+    assert_eq!(answer, expected);
+}
+
+/// The database recreated while the request reads its candidates: a seq of
+/// the old generation is not taken for the new document at that seq.
+#[tokio::test]
+async fn database_recreated_during_the_request_is_read_anew() {
+    let (answer, expected) = raced(Race::Recreate).await;
+    assert_eq!(ids(&expected), ["intruder", "another"]);
+    assert_eq!(answer, expected);
+}

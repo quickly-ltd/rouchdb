@@ -96,11 +96,12 @@ impl SelectorIndex {
         (inner.upto, found)
     }
 
-    /// Brings the index up to the database's current changes. `Ok(false)`
-    /// when it cannot be used right now: the first build runs in another
-    /// task (waiting for it would cost as much as a full scan), or the
-    /// database was reset during the refresh.
-    pub async fn refresh(&self, db: &Database) -> Result<bool> {
+    /// Brings the index up to the database's current changes and returns
+    /// the identity of the database it now reflects. `Ok(None)` when it
+    /// cannot be used right now: the first build runs in another task
+    /// (waiting for it would cost as much as a full scan), or the database
+    /// was reset during the refresh.
+    pub async fn refresh(&self, db: &Database) -> Result<Option<String>> {
         let db_id = db.adapter().id().await?;
         let built = {
             let inner = self.read();
@@ -111,7 +112,7 @@ impl SelectorIndex {
         } else {
             match self.refresh.try_lock() {
                 Ok(guard) => guard,
-                Err(_) => return Ok(false),
+                Err(_) => return Ok(None),
             }
         };
         let mut upto = {
@@ -140,7 +141,7 @@ impl SelectorIndex {
             let mut inner = self.write();
             // Reset (or destroyed and reused) while the page was read.
             if inner.db_id.as_deref() != Some(db_id.as_str()) || inner.upto != upto {
-                return Ok(false);
+                return Ok(None);
             }
             for (seq, change) in entries {
                 if let Some(old) = inner.seq_of.insert(change.id.clone(), seq) {
@@ -152,7 +153,7 @@ impl SelectorIndex {
             upto = inner.upto;
             if scanned < REFRESH_CHUNK {
                 inner.built = true;
-                return Ok(true);
+                return Ok(Some(db_id));
             }
         }
     }
@@ -398,7 +399,7 @@ mod tests {
         }
         db.put("p", json!({"kind": "products"})).await.unwrap();
         let index = SelectorIndex::new(["kind"]);
-        assert!(index.refresh(&db).await.unwrap());
+        assert!(index.refresh(&db).await.unwrap().is_some());
         let (upto, found) = index.candidates(0, &json!({"kind": "products"}));
         assert_eq!(upto, 6);
         assert_eq!(found.len(), 1);
@@ -423,9 +424,9 @@ mod tests {
         let building = index.refresh.lock().await; // a build reading the feed
         let answer =
             tokio::time::timeout(std::time::Duration::from_millis(200), index.refresh(&db)).await;
-        assert!(!answer.expect("not held up by the build").unwrap());
+        assert!(answer.expect("not held up by the build").unwrap().is_none());
         drop(building);
-        assert!(index.refresh(&db).await.unwrap());
+        assert!(index.refresh(&db).await.unwrap().is_some());
         assert_eq!(index.candidates(0, &json!({"kind": "products"})).1.len(), 1);
     }
 
@@ -435,12 +436,12 @@ mod tests {
         let db = Database::memory("db");
         db.put("p", json!({"kind": "products"})).await.unwrap();
         let index = SelectorIndex::new(["kind"]);
-        assert!(index.refresh(&db).await.unwrap());
+        assert!(index.refresh(&db).await.unwrap().is_some());
         index.reset().await;
         let (upto, found) = index.candidates(0, &json!({"name": "x"}));
         assert_eq!(upto, 0);
         assert!(found.is_empty());
-        assert!(index.refresh(&db).await.unwrap());
+        assert!(index.refresh(&db).await.unwrap().is_some());
         assert_eq!(index.candidates(0, &json!({"name": "x"})).1.len(), 1);
     }
 }

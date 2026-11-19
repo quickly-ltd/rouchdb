@@ -287,15 +287,22 @@ async fn fetch(
     Ok(response)
 }
 
+/// Refreshes of the projection one selector request may need when documents
+/// keep moving under it, before it falls back to a full scan.
+const PROJECTION_ATTEMPTS: usize = 8;
+
 /// `filter=_selector` answered from the projection of the changes feed
 /// ([`SelectorIndex`]): only the bodies of candidates the projection cannot
 /// rule out are read and matched in full, so the results are those of
 /// [`Database::changes`](rouchdb::Database::changes) with the selector.
 /// `limit` counts matching changes; `last_seq` is the seq of the last
 /// returned change when the limit cut the result, otherwise the last indexed
-/// seq (so an empty result never rescans the same range). `None` when the
-/// projection cannot be used right now (its first build runs elsewhere): the
-/// caller scans in full.
+/// seq (so an empty result never rescans the same range). A candidate that
+/// is no longer at its indexed seq (written during the request, or the
+/// database was recreated) makes the projection refresh and the scan go on
+/// from the last handled change. `None` when the projection cannot be used
+/// right now (its first build runs elsewhere, or writes keep outpacing it):
+/// the caller scans in full.
 async fn indexed_selector_changes(
     state: &AppState,
     index: &SelectorIndex,
@@ -304,45 +311,72 @@ async fn indexed_selector_changes(
     since: u64,
 ) -> Result<Option<ChangesResponse>, RouchError> {
     let compiled = CompiledSelector::new(selector)?;
-    if !index.refresh(&state.db).await? {
-        return Ok(None);
-    }
-    let (upto, candidates) = index.candidates(since, selector);
+    let mut generation: Option<String> = None;
+    let mut from = since;
     let mut results = Vec::new();
-    for (seq, _) in candidates {
-        // The candidate's change as the feed itself reports it (same body,
-        // `changes` list and `_conflicts` as a full scan); a later write moved
-        // the document to a newer seq, which a later request will see.
-        let page = state
-            .db
-            .adapter()
-            .changes(ChangesOptions {
-                since: Seq::Num(seq - 1),
-                limit: Some(1),
-                include_docs: true,
-                conflicts: opts.conflicts,
-                style: opts.style.clone(),
-                ..Default::default()
-            })
-            .await?;
-        let Some(mut event) = page.results.into_iter().next() else {
-            continue;
+    for _ in 0..PROJECTION_ATTEMPTS {
+        let Some(db_id) = index.refresh(&state.db).await? else {
+            return Ok(None);
         };
-        if event.seq.as_num() != seq || !event.doc.as_ref().is_some_and(|d| compiled.matches(d)) {
-            continue;
-        }
-        if !opts.include_docs {
-            event.doc = None;
-        }
-        results.push(event);
-        if opts
-            .limit
-            .is_some_and(|limit| results.len() as u64 >= limit)
+        // Recreated since the previous attempt: what was read belongs to
+        // the old database.
+        if generation
+            .replace(db_id.clone())
+            .is_some_and(|old| old != db_id)
         {
-            return Ok(Some(ChangesResponse::new(results, seq)));
+            results.clear();
+            from = since;
+        }
+        let (upto, candidates) = index.candidates(from, selector);
+        let mut stale = false;
+        for (seq, change) in candidates {
+            // The candidate's change as the feed itself reports it (same
+            // body, `changes` list and `_conflicts` as a full scan).
+            let page = state
+                .db
+                .adapter()
+                .changes(ChangesOptions {
+                    // Candidates are after `since`, so `seq >= 1`.
+                    since: Seq::Num(seq.saturating_sub(1)),
+                    limit: Some(1),
+                    include_docs: true,
+                    conflicts: opts.conflicts,
+                    style: opts.style.clone(),
+                    ..Default::default()
+                })
+                .await?;
+            let Some(mut event) = page.results.into_iter().next() else {
+                // Nothing at or after this seq any more.
+                break;
+            };
+            if event.seq.as_num() != seq || event.id != change.id {
+                // Written since the refresh (the document moved to a newer
+                // seq) or the database was recreated: refresh and go on
+                // after the last change already handled.
+                stale = true;
+                break;
+            }
+            from = seq;
+            if !event.doc.as_ref().is_some_and(|d| compiled.matches(d)) {
+                continue;
+            }
+            if !opts.include_docs {
+                event.doc = None;
+            }
+            results.push(event);
+            if opts
+                .limit
+                .is_some_and(|limit| results.len() as u64 >= limit)
+            {
+                return Ok(Some(ChangesResponse::new(results, seq)));
+            }
+        }
+        if !stale {
+            return Ok(Some(ChangesResponse::new(results, upto.max(from))));
         }
     }
-    Ok(Some(ChangesResponse::new(results, upto.max(since))))
+    // Written to faster than the projection can follow: scan in full.
+    Ok(None)
 }
 
 fn normal_body(results: &[ChangeEvent], last_seq: &Seq, pending: u64) -> serde_json::Value {
