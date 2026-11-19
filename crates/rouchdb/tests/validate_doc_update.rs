@@ -44,7 +44,7 @@ impl Plugin for Recorder {
         &self,
         new_doc: &Document,
         old_doc: &OldDoc<'_>,
-        ctx: &WriteContext,
+        ctx: &WriteContext<'_>,
     ) -> Result<()> {
         let old = old_doc.get().await?.map(|d| {
             (
@@ -135,22 +135,171 @@ async fn local_writes_see_the_admin_context_and_the_replaced_revision() {
         assert!(seen[0].deleted, "{kind:?}");
         assert_eq!(seen[0].old.as_ref().map(|o| &o.0), Some(&r2), "{kind:?}");
 
-        // A write without `_rev` over a deleted document replaces the
-        // deletion, as in CouchDB.
+        // A write without `_rev` over a deleted document creates it again:
+        // like CouchDB (`prep_and_validate_update`), it has no old doc.
         db.put("a", json!({"v": 3})).await.unwrap();
         let seen = rec.take();
-        let (_, old_deleted, _) = seen[0].old.clone().expect("deleted winner");
-        assert!(old_deleted, "{kind:?}: the old doc is the deletion");
+        assert_eq!(seen[0].old, None, "{kind:?}: re-created over a deletion");
 
-        // `post` and design documents go through it too.
+        // `post` goes through it too.
         db.post(json!({"p": true})).await.unwrap();
         assert_eq!(rec.take().len(), 1, "{kind:?}: post");
-        db.put_design(DesignDocument::from_json(json!({"_id": "_design/d"})).unwrap())
+    }
+}
+
+#[tokio::test]
+async fn local_and_design_documents_are_not_validated_by_plugins() {
+    // CouchDB (`couch_db:validate_doc_update`) never validates `_local/`
+    // documents, and only checks that a `_design/` writer is an admin.
+    for kind in KINDS {
+        let (db, rec, _dir) = open(kind, "special");
+        db.put("_local/x", json!({"reject": "never"}))
             .await
             .unwrap();
-        let seen = rec.take();
-        assert_eq!(seen[0].id, "_design/d", "{kind:?}: put_design");
+        db.put_design(
+            DesignDocument::from_json(json!({"_id": "_design/d", "reject": "no"})).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(rec.take().is_empty(), "{kind:?}");
+
+        let err = db
+            .as_user(cashier())
+            .put_design(DesignDocument::from_json(json!({"_id": "_design/e"})).unwrap())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RouchError::Unauthorized), "{kind:?}: {err:?}");
+        let results = db
+            .as_user(UserCtx::anonymous())
+            .bulk_docs(
+                vec![doc("_design/f", json!({})), doc("ok", json!({}))],
+                BulkDocsOptions::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some("unauthorized"),
+            "{results:?}"
+        );
+        assert_eq!(
+            results[0].reason.as_deref(),
+            Some("You are not a db or server admin.")
+        );
+        assert!(results[1].ok, "{kind:?}: {results:?}");
+
+        // A database admin (security document) may write design documents.
+        let mut security = SecurityDocument::default();
+        security.admins.names.push("cashier".into());
+        db.put_security(security).await.unwrap();
+        db.as_user(cashier())
+            .put_design(DesignDocument::from_json(json!({"_id": "_design/e"})).unwrap())
+            .await
+            .unwrap();
+        // Design documents are still not passed to the plugins.
+        assert_eq!(rec.take().len(), 1, "{kind:?}: only `ok`");
     }
+}
+
+#[tokio::test]
+async fn conflicting_edits_are_conflicts_before_any_validation() {
+    // CouchDB `prep_and_validate_update`: an edit of a live document without
+    // `_rev`, or from a revision that is not a leaf, is a conflict and the
+    // validation functions do not run.
+    for kind in KINDS {
+        let (db, rec, _dir) = open(kind, "conflicts");
+        let r1 = db.put("a", json!({"v": 1})).await.unwrap().rev.unwrap();
+        db.update("a", &r1, json!({"v": 2})).await.unwrap();
+        rec.take();
+
+        let err = db.put("a", json!({"reject": "x"})).await.unwrap_err();
+        assert!(matches!(err, RouchError::Conflict), "{kind:?}: {err:?}");
+        let err = db
+            .update("a", &r1, json!({"reject": "x"}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RouchError::Conflict), "{kind:?}: {err:?}");
+        let err = db
+            .update(
+                "a",
+                "1-ffffffffffffffffffffffffffffffff",
+                json!({"reject": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RouchError::Conflict), "{kind:?}: {err:?}");
+        assert!(rec.take().is_empty(), "{kind:?}: not validated");
+    }
+}
+
+#[tokio::test]
+async fn replicated_revisions_already_stored_are_not_validated_again() {
+    // CouchDB (`prep_and_validate_replicated_updates`) counts a revision it
+    // already has as written, without validating it.
+    for kind in KINDS {
+        let (db, rec, _dir) = open(kind, "dupes");
+        let replicated = Document::from_json(json!({
+            "_id": "a",
+            "_rev": "1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "_revisions": {"start": 1, "ids": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]},
+            "v": 1,
+        }))
+        .unwrap();
+        db.bulk_docs(vec![replicated.clone()], BulkDocsOptions::replication())
+            .await
+            .unwrap();
+        rec.take();
+        let mut again = replicated;
+        again.data["reject"] = json!("seen before");
+        let results = db
+            .bulk_docs(vec![again], BulkDocsOptions::replication())
+            .await
+            .unwrap();
+        assert!(results.iter().all(|r| r.ok), "{kind:?}: {results:?}");
+        assert!(rec.take().is_empty(), "{kind:?}");
+    }
+}
+
+/// Records what `WriteContext` says about the database.
+#[derive(Default)]
+struct DbProbe(Mutex<Vec<serde_json::Value>>);
+
+#[async_trait::async_trait]
+impl Plugin for DbProbe {
+    fn name(&self) -> &str {
+        "probe"
+    }
+    async fn validate_doc_update(
+        &self,
+        _new_doc: &Document,
+        _old_doc: &OldDoc<'_>,
+        ctx: &WriteContext<'_>,
+    ) -> Result<()> {
+        let sec = ctx.security().await?;
+        let user = ctx.user_ctx_json().await?;
+        self.0
+            .lock()
+            .unwrap()
+            .push(json!({"user": user, "members": sec.members.names}));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn the_context_gives_the_database_name_and_security_object() {
+    let probe = Arc::new(DbProbe::default());
+    let db = Database::memory("shop").with_plugin(probe.clone());
+    let mut security = SecurityDocument::default();
+    security.members.names.push("cashier".into());
+    db.put_security(security).await.unwrap();
+    db.as_user(cashier()).put("a", json!({})).await.unwrap();
+    assert_eq!(
+        probe.0.lock().unwrap()[0],
+        json!({
+            "user": {"db": "shop", "name": "cashier", "roles": ["staff"]},
+            "members": ["cashier"],
+        })
+    );
 }
 
 #[tokio::test]

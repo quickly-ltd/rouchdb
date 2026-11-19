@@ -1,13 +1,20 @@
-//! Write validation context: who writes a document, and the revision it
-//! replaces, as CouchDB passes them to `validate_doc_update(newDoc, oldDoc,
-//! userCtx, secObj)`.
+//! Write validation, as CouchDB does it (`couch_db:validate_doc_update` and
+//! `prep_and_validate_update` / `prep_and_validate_replicated_updates`):
+//! who writes a document, the revision it replaces, and the database's
+//! security object, given to `validate_doc_update(newDoc, oldDoc, userCtx,
+//! secObj)`.
+
+use std::collections::HashMap;
 
 use rouchdb_core::adapter::Adapter;
-use rouchdb_core::document::{AllDocsOptions, Document, GetOptions};
+use rouchdb_core::document::{Document, GetOptions, SecurityDocument};
 use rouchdb_core::error::{Result, RouchError};
 
 /// The role CouchDB gives server admins.
 pub const ADMIN_ROLE: &str = "_admin";
+
+/// CouchDB's reason for a design document written by a non-admin.
+pub(crate) const NOT_ADMIN_REASON: &str = "You are not a db or server admin.";
 
 /// Who is writing: CouchDB's `userCtx` (`{name, roles}`).
 ///
@@ -54,6 +61,21 @@ impl UserCtx {
         self.has_role(ADMIN_ROLE)
     }
 
+    /// Whether the user is an admin of a database with this security
+    /// object: a server admin, or listed in its `admins` by name or role
+    /// (CouchDB's `check_is_admin`).
+    pub fn is_db_admin(&self, security: &SecurityDocument) -> bool {
+        self.is_admin()
+            || self
+                .name
+                .as_ref()
+                .is_some_and(|name| security.admins.names.contains(name))
+            || self
+                .roles
+                .iter()
+                .any(|role| security.admins.roles.contains(role))
+    }
+
     /// The context as CouchDB passes it to validation functions:
     /// `{"db": db, "name": name, "roles": roles}`.
     pub fn to_json(&self, db: &str) -> serde_json::Value {
@@ -62,71 +84,100 @@ impl UserCtx {
 }
 
 /// What a [`Plugin::validate_doc_update`](crate::Plugin::validate_doc_update)
-/// call is validating a document for.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// call validates a document for: who writes, whether the revision is
+/// replicated, and the database it is written to (its name and security
+/// object, read once per write when asked for).
 #[non_exhaustive]
-pub struct WriteContext {
+pub struct WriteContext<'a> {
     /// Who is writing.
     pub user_ctx: UserCtx,
     /// `false` for a replicated write (`new_edits: false`), whose revision
     /// comes from the source; `true` for an edit.
     pub new_edits: bool,
+    adapter: &'a dyn Adapter,
+    security: tokio::sync::OnceCell<SecurityDocument>,
+    db_name: tokio::sync::OnceCell<String>,
 }
 
-impl WriteContext {
-    pub fn new(user_ctx: UserCtx, new_edits: bool) -> Self {
+impl<'a> WriteContext<'a> {
+    pub(crate) fn new(adapter: &'a dyn Adapter, user_ctx: UserCtx, new_edits: bool) -> Self {
         Self {
             user_ctx,
             new_edits,
+            adapter,
+            security: tokio::sync::OnceCell::new(),
+            db_name: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// The database's security object (CouchDB's `secObj`).
+    pub async fn security(&self) -> Result<&SecurityDocument> {
+        self.security
+            .get_or_try_init(|| self.adapter.get_security())
+            .await
+    }
+
+    /// The database's name (`userCtx.db` in CouchDB).
+    pub async fn db_name(&self) -> Result<&str> {
+        self.db_name
+            .get_or_try_init(|| async { Ok(self.adapter.info().await?.db_name) })
+            .await
+            .map(String::as_str)
+    }
+
+    /// The `userCtx` object CouchDB passes to validation functions:
+    /// `{"db", "name", "roles"}`.
+    pub async fn user_ctx_json(&self) -> Result<serde_json::Value> {
+        Ok(self.user_ctx.to_json(self.db_name().await?))
     }
 }
 
-/// The revision a written document replaces (CouchDB's `oldDoc`), read from
-/// the database only when a plugin asks for it, and at most once.
+/// The revision a written document replaces (CouchDB's `oldDoc`), as CouchDB
+/// determines it before validating:
+///
+/// - an edit with a `_rev` replaces that leaf revision (a deleted leaf is a
+///   document with `deleted: true`);
+/// - an edit without `_rev` of a document that does not exist, or is
+///   deleted, has none (it creates the document again);
+/// - a replicated revision replaces the newest revision of its `_revisions`
+///   history that the database has, if any (none for a new branch).
 ///
 /// It is read before any document of the write is stored, so every document
 /// of a batch is validated against the database as it was before the batch.
+/// A revision whose body was removed by compaction counts as missing.
 pub struct OldDoc<'a> {
-    adapter: &'a dyn Adapter,
-    new_doc: &'a Document,
-    new_edits: bool,
-    loaded: tokio::sync::OnceCell<Option<Document>>,
+    doc: Option<Document>,
+    _adapter: std::marker::PhantomData<&'a ()>,
 }
 
-impl<'a> OldDoc<'a> {
-    pub(crate) fn new(adapter: &'a dyn Adapter, new_doc: &'a Document, new_edits: bool) -> Self {
-        Self {
-            adapter,
-            new_doc,
-            new_edits,
-            loaded: tokio::sync::OnceCell::new(),
-        }
-    }
-
+impl OldDoc<'_> {
     /// The replaced revision, `None` when the write creates the document
-    /// (or a new branch of it). As in CouchDB:
-    ///
-    /// - an edit with a `_rev` replaces that revision (`None` if it is not
-    ///   in the database: the write will then conflict);
-    /// - an edit without `_rev` replaces the winning revision, including a
-    ///   deleted one (a document with `deleted: true`);
-    /// - a replicated revision replaces the newest revision of its
-    ///   `_revisions` history that the database has.
-    ///
-    /// A revision whose body was removed by compaction counts as missing.
+    /// (or a new branch of it).
     pub async fn get(&self) -> Result<Option<&Document>> {
-        self.loaded
-            .get_or_try_init(|| load_old_doc(self.adapter, self.new_doc, self.new_edits))
-            .await
-            .map(Option::as_ref)
+        Ok(self.doc.as_ref())
     }
+}
+
+/// What CouchDB does with a document before its validation functions run.
+pub(crate) enum Prior<'a> {
+    /// Validate it, replacing this revision.
+    Validate(OldDoc<'a>),
+    /// Write it without validating: the write is a conflict (an edit of a
+    /// live document without `_rev`, or from a revision that is not a leaf),
+    /// or the replicated revision is already stored.
+    Skip,
 }
 
 /// A revision of `id`, or `None` if the database does not have it.
-async fn revision(adapter: &dyn Adapter, id: &str, rev: &str) -> Result<Option<Document>> {
+async fn revision(
+    adapter: &dyn Adapter,
+    id: &str,
+    rev: &str,
+    latest: bool,
+) -> Result<Option<Document>> {
     let opts = GetOptions {
         rev: Some(rev.to_string()),
+        latest,
         ..Default::default()
     };
     match adapter.get(id, opts).await {
@@ -136,48 +187,59 @@ async fn revision(adapter: &dyn Adapter, id: &str, rev: &str) -> Result<Option<D
     }
 }
 
-async fn load_old_doc(
+pub(crate) async fn prior<'a>(
     adapter: &dyn Adapter,
     doc: &Document,
     new_edits: bool,
-) -> Result<Option<Document>> {
+) -> Result<Prior<'a>> {
+    let validate = |doc| {
+        Prior::Validate(OldDoc {
+            doc,
+            _adapter: std::marker::PhantomData,
+        })
+    };
     let id = doc.id.as_str();
     if id.is_empty() {
-        return Ok(None);
+        return Ok(validate(None));
     }
     if !new_edits {
-        // Newest first, skipping the revision being written.
-        for rev in replicated_ancestors(doc).into_iter().skip(1) {
-            if let Some(old) = revision(adapter, id, &rev).await? {
-                return Ok(Some(old));
+        let history = replicated_ancestors(doc);
+        let Some(own) = history.first() else {
+            return Ok(validate(None));
+        };
+        let missing = adapter
+            .revs_diff(HashMap::from([(id.to_string(), history.clone())]))
+            .await?
+            .results
+            .remove(id)
+            .map(|diff| diff.missing)
+            .unwrap_or_default();
+        if !missing.contains(own) {
+            return Ok(Prior::Skip);
+        }
+        for rev in history.iter().skip(1).filter(|rev| !missing.contains(rev)) {
+            if let Some(old) = revision(adapter, id, rev, false).await? {
+                return Ok(validate(Some(old)));
             }
         }
-        return Ok(None);
+        return Ok(validate(None));
     }
-    if let Some(rev) = &doc.rev {
-        return revision(adapter, id, &rev.to_string()).await;
-    }
-    match adapter.get(id, GetOptions::default()).await {
-        Ok(doc) => Ok(Some(doc)),
-        Err(RouchError::NotFound(_)) => {
-            // A deleted document is not found by a plain read: find its
-            // winning revision, then read that.
-            let rows = adapter
-                .all_docs(AllDocsOptions {
-                    keys: Some(vec![id.to_string()]),
-                    ..AllDocsOptions::new()
-                })
-                .await?;
-            let deleted_rev = rows
-                .rows
-                .into_iter()
-                .find_map(|row| row.value.filter(|v| v.deleted == Some(true)).map(|v| v.rev));
-            match deleted_rev {
-                Some(rev) => revision(adapter, id, &rev).await,
-                None => Ok(None),
+    match &doc.rev {
+        Some(rev) => {
+            let rev = rev.to_string();
+            match revision(adapter, id, &rev, true).await? {
+                // `latest` stays on the revision only when it is a leaf.
+                Some(old) if old.rev.as_ref().is_some_and(|r| r.to_string() == rev) => {
+                    Ok(validate(Some(old)))
+                }
+                _ => Ok(Prior::Skip),
             }
         }
-        Err(e) => Err(e),
+        None => match adapter.get(id, GetOptions::default()).await {
+            Ok(_) => Ok(Prior::Skip),
+            Err(RouchError::NotFound(_)) => Ok(validate(None)),
+            Err(e) => Err(e),
+        },
     }
 }
 

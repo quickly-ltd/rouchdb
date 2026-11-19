@@ -19,12 +19,12 @@ pub trait Plugin: Send + Sync {
     }
 
     /// Called for each document about to be written: CouchDB's
-    /// `validate_doc_update(newDoc, oldDoc, userCtx)`. Rejects that document only.
+    /// `validate_doc_update(newDoc, oldDoc, userCtx, secObj)`. Rejects that document only.
     async fn validate_doc_update(
         &self,
         new_doc: &Document,
         old_doc: &OldDoc<'_>,
-        ctx: &WriteContext,
+        ctx: &WriteContext<'_>,
     ) -> Result<()> {
         Ok(()) // default: no-op
     }
@@ -117,8 +117,20 @@ document, after `before_write`, with:
 
 - `ctx.user_ctx`: who writes, CouchDB's `userCtx` (`name` and `roles`);
 - `ctx.new_edits`: `false` for a replicated revision;
-- `old_doc`: the revision the write replaces, read only if you call
-  `old_doc.get().await` (`None` for a new document or a new branch).
+- `ctx.security().await` and `ctx.db_name().await` (CouchDB's `secObj` and
+  `userCtx.db`; `ctx.user_ctx_json()` is the whole `userCtx`);
+- `old_doc.get().await`: the revision the write replaces, as CouchDB
+  determines it: the leaf named by `_rev`, nothing for a document created
+  (again, over a deletion) without `_rev`, and for a replicated revision the
+  newest revision of its history the database has (`None` for a new branch).
+
+As in CouchDB, it is not called for `_local/` documents, for `_design/`
+documents (which only a database admin may write: anyone else gets
+`unauthorized`), for an edit that is a conflict (a live document written
+without `_rev`, or from a revision that is not a leaf: `conflict`), nor for a
+replicated revision the database already has. Two revisions of one document
+in the same batch are both validated against the database as it was before
+the batch, as CouchDB does.
 
 Returning `Forbidden`, `Unauthorized` or `BadRequest` rejects this document
 only: `bulk_docs` and replication report it as `forbidden` (or
@@ -141,7 +153,7 @@ impl Plugin for ImmutableInvoices {
         &self,
         new_doc: &Document,
         old_doc: &OldDoc<'_>,
-        ctx: &WriteContext,
+        ctx: &WriteContext<'_>,
     ) -> Result<()> {
         if ctx.user_ctx.is_admin() || new_doc.data["type"] != "invoice" {
             return Ok(());

@@ -77,6 +77,7 @@ pub use rouchdb_replication::{
 
 mod validate;
 pub use validate::{ADMIN_ROLE, OldDoc, UserCtx, WriteContext};
+use validate::{NOT_ADMIN_REASON, Prior};
 
 /// Plugin trait for extending Database behavior.
 ///
@@ -105,27 +106,41 @@ pub trait Plugin: Send + Sync {
         Ok(())
     }
     /// Called for each document about to be written, after `before_write`:
-    /// CouchDB's `validate_doc_update(newDoc, oldDoc, userCtx)`.
+    /// CouchDB's `validate_doc_update(newDoc, oldDoc, userCtx, secObj)`.
     ///
-    /// `ctx` says who writes ([`UserCtx`]) and whether the revision is
-    /// replicated; `old_doc` reads the revision it replaces, if the plugin
-    /// needs it. Every write path calls it: `bulk_docs`, `put`, `post`,
-    /// `update`, `remove`, design documents, attachments, and replication
-    /// into the database, as well as `rouchdb-server`'s routes that write.
+    /// `ctx` says who writes ([`UserCtx`]), whether the revision is
+    /// replicated, and gives the database's name and security object;
+    /// `old_doc` is the revision the write replaces. Every write path calls
+    /// it: `bulk_docs`, `put`, `post`, `update`, `remove`, attachments, and
+    /// replication into the database, as well as `rouchdb-server`'s routes
+    /// that write.
+    ///
+    /// As in CouchDB (`couch_db:validate_doc_update`,
+    /// `prep_and_validate_update`), it is not called for:
+    ///
+    /// - `_local/` documents;
+    /// - `_design/` documents, which only a database admin may write (a
+    ///   non-admin gets `unauthorized`, "You are not a db or server admin.");
+    /// - an edit that is a conflict (of a live document without `_rev`, or
+    ///   from a revision that is not a leaf), which fails with `conflict`;
+    /// - a replicated revision the database already has, which counts as
+    ///   written.
     ///
     /// Returning `Forbidden`, `Unauthorized` or `BadRequest` rejects this
     /// document only, as a failing `validate_doc_update` does in CouchDB:
-    /// `bulk_docs` and replication report it (`forbidden` or
-    /// `unauthorized`, with the error's reason) and write the others, and a
-    /// single-document write returns the error. Any other error fails the
-    /// whole write. Nothing is written before every document is validated,
-    /// so all of them are checked against the database as it was before the
-    /// write.
+    /// `bulk_docs` and replication report it (`forbidden` with the error's
+    /// reason, or `unauthorized`: `RouchError::Unauthorized` carries no
+    /// reason) and write the others, and a single-document write returns the
+    /// error. Any other error fails the whole write. Nothing is written
+    /// before every document is validated, so all of them are checked
+    /// against the database as it was before the write: two revisions of a
+    /// document in one batch are both validated against what was stored
+    /// before it, as in CouchDB.
     async fn validate_doc_update(
         &self,
         _new_doc: &Document,
         _old_doc: &OldDoc<'_>,
-        _ctx: &WriteContext,
+        _ctx: &WriteContext<'_>,
     ) -> Result<()> {
         Ok(())
     }
@@ -150,10 +165,11 @@ struct PluginAdapter {
     user_ctx: UserCtx,
 }
 
-/// The per-doc result a plugin rejection is reported as, if it is a
-/// rejection that retrying cannot fix: `forbidden` or `unauthorized`, with
-/// the error's own reason.
-fn denial(id: &str, error: &RouchError) -> Option<DocResult> {
+/// The per-doc result a rejection is reported as, if it is a rejection
+/// that retrying cannot fix: `forbidden` or `unauthorized`, with the
+/// error's own reason. A replicated document's result names its revision,
+/// as CouchDB's does.
+fn denial(doc: &Document, replicated: bool, error: &RouchError) -> Option<DocResult> {
     let (kind, reason) = match error {
         RouchError::Forbidden(reason) | RouchError::BadRequest(reason) => {
             ("forbidden", reason.as_str())
@@ -161,22 +177,56 @@ fn denial(id: &str, error: &RouchError) -> Option<DocResult> {
         RouchError::Unauthorized => ("unauthorized", "unauthorized"),
         _ => return None,
     };
-    Some(DocResult::error(id, kind, reason))
+    Some(denied(doc, replicated, kind, reason))
 }
 
-/// Run every plugin's `validate_doc_update` on `doc`, about to be written
-/// to `adapter`.
+fn denied(doc: &Document, replicated: bool, kind: &str, reason: &str) -> DocResult {
+    let mut result = DocResult::error(doc.id.clone(), kind, reason);
+    if replicated {
+        result.rev = doc.rev.as_ref().map(|r| r.to_string());
+    }
+    result
+}
+
+/// Validate `doc`, about to be written to `adapter`, as CouchDB does: the
+/// denial to report instead of writing it, or `None` to write it. Errors
+/// that are not a rejection fail the whole write.
 async fn validate_doc(
     plugins: &[Arc<dyn Plugin>],
     adapter: &dyn Adapter,
     doc: &Document,
-    ctx: &WriteContext,
-) -> Result<()> {
-    let old_doc = OldDoc::new(adapter, doc, ctx.new_edits);
-    for plugin in plugins {
-        plugin.validate_doc_update(doc, &old_doc, ctx).await?;
+    ctx: &WriteContext<'_>,
+) -> Result<Option<DocResult>> {
+    let replicated = !ctx.new_edits;
+    if rouchdb_core::write::local_doc_id(&doc.id).is_some() {
+        return Ok(None);
     }
-    Ok(())
+    if doc.id.starts_with("_design/") {
+        let admin = ctx.user_ctx.is_admin() || ctx.user_ctx.is_db_admin(ctx.security().await?);
+        return Ok((!admin).then(|| denied(doc, replicated, "unauthorized", NOT_ADMIN_REASON)));
+    }
+    if plugins.is_empty() {
+        return Ok(None);
+    }
+    let old_doc = match validate::prior(adapter, doc, ctx.new_edits).await? {
+        Prior::Skip => return Ok(None),
+        Prior::Validate(old_doc) => old_doc,
+    };
+    for plugin in plugins {
+        if let Err(e) = plugin.validate_doc_update(doc, &old_doc, ctx).await {
+            return match denial(doc, replicated, &e) {
+                Some(result) => Ok(Some(result)),
+                None => Err(e),
+            };
+        }
+    }
+    Ok(None)
+}
+
+/// Whether writes as `user_ctx` with these plugins need validating: plugins
+/// validate every write, and a non-admin may not write design documents.
+fn validates(plugins: &[Arc<dyn Plugin>], user_ctx: &UserCtx) -> bool {
+    !plugins.is_empty() || !user_ctx.is_admin()
 }
 
 /// Put the results of the written documents back among the denied ones, in
@@ -237,8 +287,11 @@ impl PluginAdapter {
                 )));
             }
         }
-        let ctx = WriteContext::new(self.user_ctx.clone(), true);
-        validate_doc(&self.plugins, self.inner.as_ref(), &doc, &ctx).await
+        let ctx = WriteContext::new(self.inner.as_ref(), self.user_ctx.clone(), true);
+        match validate_doc(&self.plugins, self.inner.as_ref(), &doc, &ctx).await? {
+            Some(denied) => Err(doc_result_error(denied)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -266,7 +319,7 @@ impl Adapter for PluginAdapter {
         // Plugins only accept or reject replicated docs: the original body
         // is written, since a changed body stored under the source's
         // revision id would silently diverge from it for good.
-        let ctx = WriteContext::new(self.user_ctx.clone(), opts.new_edits);
+        let ctx = WriteContext::new(self.inner.as_ref(), self.user_ctx.clone(), opts.new_edits);
         let mut accepted = Vec::with_capacity(docs.len());
         let mut denied = Vec::new();
         for doc in docs {
@@ -285,15 +338,16 @@ impl Adapter for PluginAdapter {
                     break;
                 }
             }
-            if outcome.is_ok() {
-                outcome = validate_doc(&self.plugins, self.inner.as_ref(), &doc, &ctx).await;
-            }
-            match outcome {
-                Ok(()) => accepted.push(doc),
-                Err(e) => match denial(&doc.id, &e) {
-                    Some(result) => denied.push(result),
+            let verdict = match outcome {
+                Ok(()) => validate_doc(&self.plugins, self.inner.as_ref(), &doc, &ctx).await?,
+                Err(e) => match denial(&doc, !opts.new_edits, &e) {
+                    Some(result) => Some(result),
                     None => return Err(e),
                 },
+            };
+            match verdict {
+                None => accepted.push(doc),
+                Some(result) => denied.push(result),
             }
         }
 
@@ -601,7 +655,7 @@ impl Database {
     /// The adapter writes from outside `bulk_docs` (replication, attachment
     /// updates) go through, so they run this database's plugins.
     fn plugin_adapter(&self) -> Arc<dyn Adapter> {
-        if self.plugins.is_empty() {
+        if !validates(&self.plugins, &self.user_ctx) {
             self.adapter.clone()
         } else {
             Arc::new(PluginAdapter {
@@ -751,24 +805,21 @@ impl Database {
         for plugin in &self.plugins {
             plugin.before_write(&mut docs).await?;
         }
-        if self.plugins.is_empty() {
+        if !validates(&self.plugins, &self.user_ctx) {
             return self.adapter.bulk_docs(docs, opts).await;
         }
         // Validate every document before writing any, and leave the
         // rejected ones out of the write.
-        let ctx = WriteContext::new(self.user_ctx.clone(), opts.new_edits);
+        let ctx = WriteContext::new(self.adapter.as_ref(), self.user_ctx.clone(), opts.new_edits);
         let mut slots = Vec::with_capacity(docs.len());
         let mut accepted = Vec::with_capacity(docs.len());
         for doc in docs {
-            match validate_doc(&self.plugins, self.adapter.as_ref(), &doc, &ctx).await {
-                Ok(()) => {
+            match validate_doc(&self.plugins, self.adapter.as_ref(), &doc, &ctx).await? {
+                None => {
                     slots.push(None);
                     accepted.push(doc);
                 }
-                Err(e) => match denial(&doc.id, &e) {
-                    Some(result) => slots.push(Some(result)),
-                    None => return Err(e),
-                },
+                Some(result) => slots.push(Some(result)),
             }
         }
         let written = if accepted.is_empty() {
@@ -3199,16 +3250,31 @@ mod tests {
         assert_eq!(
             summary(&results),
             vec![
-                ("b1".to_string(), false, None, Some("forbidden".to_string())),
-                ("f1".to_string(), false, None, Some("forbidden".to_string())),
+                (
+                    "b1".to_string(),
+                    false,
+                    Some("1-aaa".to_string()),
+                    Some("forbidden".to_string())
+                ),
+                (
+                    "f1".to_string(),
+                    false,
+                    Some("1-aaa".to_string()),
+                    Some("forbidden".to_string())
+                ),
                 ("ok".to_string(), true, Some("1-aaa".to_string()), None),
                 (
                     "u1".to_string(),
                     false,
-                    None,
+                    Some("1-aaa".to_string()),
                     Some("unauthorized".to_string())
                 ),
-                ("x1".to_string(), false, None, Some("forbidden".to_string())),
+                (
+                    "x1".to_string(),
+                    false,
+                    Some("1-aaa".to_string()),
+                    Some("forbidden".to_string())
+                ),
             ]
         );
         let dropped = results.iter().find(|r| r.id == "x1").unwrap();

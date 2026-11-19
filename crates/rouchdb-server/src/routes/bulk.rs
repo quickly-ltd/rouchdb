@@ -49,8 +49,8 @@ fn revision_from_history(json: &serde_json::Value) -> Option<Revision> {
 /// POST /{db}/_bulk_docs — write multiple documents.
 ///
 /// With `new_edits: false` (replication) the response only lists the
-/// documents that could not be written, so it is `[]` when all were, as in
-/// CouchDB.
+/// documents that could not be written (with their `rev`), so it is `[]`
+/// when all were, as in CouchDB.
 pub async fn bulk_docs(
     State(state): State<AppState>,
     Writer(writer): Writer,
@@ -73,6 +73,14 @@ pub async fn bulk_docs(
         new_edits: body.new_edits,
     };
 
+    // CouchDB names the revision of a replicated document that failed.
+    let revs: std::collections::HashMap<String, String> = if body.new_edits {
+        Default::default()
+    } else {
+        docs.iter()
+            .filter_map(|d| Some((d.id.clone(), d.rev.as_ref()?.to_string())))
+            .collect()
+    };
     let results = writer.bulk_docs(docs, opts).await?;
 
     let response: Vec<serde_json::Value> = results
@@ -85,9 +93,17 @@ pub async fn bulk_docs(
                     "id": r.id,
                     "rev": r.rev,
                 })
-            } else {
+            } else if body.new_edits {
                 serde_json::json!({
                     "id": r.id,
+                    "error": r.error,
+                    "reason": r.reason,
+                })
+            } else {
+                let rev = r.rev.clone().or_else(|| revs.get(&r.id).cloned());
+                serde_json::json!({
+                    "id": r.id,
+                    "rev": rev,
                     "error": r.error,
                     "reason": r.reason,
                 })

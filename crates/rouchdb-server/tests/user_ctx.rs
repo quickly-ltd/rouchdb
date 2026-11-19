@@ -36,7 +36,7 @@ impl Plugin for Recorder {
         &self,
         new_doc: &Document,
         _old_doc: &OldDoc<'_>,
-        ctx: &WriteContext,
+        ctx: &WriteContext<'_>,
     ) -> rouchdb::Result<()> {
         self.0
             .lock()
@@ -106,6 +106,13 @@ async fn authenticated_admin_writes_with_its_name() {
 #[tokio::test]
 async fn every_write_route_passes_the_embedders_user_on() {
     let (app, rec) = app_recording(&config());
+    // The embedder's users are database admins, so they may write design
+    // documents (which plugins do not validate).
+    let security = json!({"admins": {"names": [], "roles": ["satellite"]}});
+    assert_eq!(
+        put(&app, "/db/_security", security).await.status,
+        StatusCode::OK
+    );
     let app = behind_embedder_auth(app);
 
     let posted = post(&app, "/db", json!({"_id": "p"})).await;
@@ -154,22 +161,7 @@ async fn every_write_route_passes_the_embedders_user_on() {
 
     let seen = rec.take();
     let ids: Vec<&str> = seen.iter().map(|(id, _, _)| id.as_str()).collect();
-    assert_eq!(
-        ids,
-        [
-            "p",
-            "a",
-            "a",
-            "a",
-            "a",
-            "_design/d",
-            "_design/d",
-            &ddoc,
-            &ddoc,
-            "b"
-        ],
-        "{seen:?}"
-    );
+    assert_eq!(ids, ["p", "a", "a", "a", "a", "b"], "{seen:?}");
     assert!(
         seen.iter().all(|(_, user, _)| *user == satellite()),
         "{seen:?}"
@@ -217,7 +209,12 @@ async fn rejected_documents_are_denied_one_by_one() {
     assert_eq!(resp.status, StatusCode::CREATED);
     assert_eq!(
         resp.json(),
-        json!([{"id": "r2", "error": "forbidden", "reason": "closed day"}])
+        json!([{
+            "id": "r2",
+            "rev": "1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "error": "forbidden",
+            "reason": "closed day",
+        }])
     );
     assert_eq!(get(&app, "/db/r1").await.status, StatusCode::OK);
     assert_eq!(get(&app, "/db/r2").await.status, StatusCode::NOT_FOUND);
@@ -229,4 +226,54 @@ async fn rejected_documents_are_denied_one_by_one() {
         .map(|(_, _, new_edits)| new_edits)
         .collect();
     assert_eq!(replicated, [false, false]);
+}
+
+#[tokio::test]
+async fn design_documents_need_an_admin_and_skip_plugins() {
+    let (app, rec) = app_recording(&config());
+    // The embedder's user is not an admin.
+    let lan = behind_embedder_auth(app.clone());
+    let resp = put(&lan, "/db/_design/d", json!({"views": {}})).await;
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "{:?}", resp.body);
+    // A single write keeps the error kind; `RouchError::Unauthorized` has no
+    // reason, so the server's own message replaces CouchDB's.
+    assert_eq!(resp.json()["error"], "unauthorized");
+    let bulk = post(
+        &lan,
+        "/db/_bulk_docs",
+        json!({"docs": [{"_id": "_design/e"}]}),
+    )
+    .await;
+    assert_eq!(
+        bulk.json(),
+        json!([{"id": "_design/e", "error": "unauthorized", "reason": "You are not a db or server admin."}])
+    );
+    // The admin party may, and plugins do not see design or local docs.
+    assert_eq!(
+        put(&app, "/db/_design/d", json!({"views": {}}))
+            .await
+            .status,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        put(&lan, "/db/_local/x", json!({"reject": "no"}))
+            .await
+            .status,
+        StatusCode::CREATED
+    );
+    assert!(rec.take().is_empty());
+}
+
+#[tokio::test]
+async fn routes_without_require_auth_default_to_the_same_user() {
+    use rouchdb_server::routes::build_routes;
+    use rouchdb_server::state::AppState;
+    let recorder = Arc::new(Recorder::default());
+    let db = Arc::new(Database::memory(DB).with_plugin(recorder.clone()));
+    let routes = build_routes(AppState::new(db, DB.to_string(), None));
+    assert_eq!(
+        put(&routes, "/db/a", json!({})).await.status,
+        StatusCode::CREATED
+    );
+    assert_eq!(recorder.take()[0].1, UserCtx::admin());
 }
