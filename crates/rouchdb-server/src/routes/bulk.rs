@@ -8,6 +8,7 @@ use rouchdb_core::error::RouchError;
 
 use crate::error::AppError;
 use crate::extract::JsonBody;
+use crate::extract::Writer;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -52,6 +53,7 @@ fn revision_from_history(json: &serde_json::Value) -> Option<Revision> {
 /// CouchDB.
 pub async fn bulk_docs(
     State(state): State<AppState>,
+    Writer(writer): Writer,
     Path(db): Path<String>,
     JsonBody(body): JsonBody<BulkDocsBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
@@ -71,7 +73,7 @@ pub async fn bulk_docs(
         new_edits: body.new_edits,
     };
 
-    let results = state.db.bulk_docs(docs, opts).await?;
+    let results = writer.bulk_docs(docs, opts).await?;
 
     let response: Vec<serde_json::Value> = results
         .into_iter()

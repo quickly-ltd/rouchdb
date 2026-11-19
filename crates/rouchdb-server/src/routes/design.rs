@@ -9,6 +9,7 @@ use super::document::{GetDocQuery, etag_header, get_doc, resolve_rev};
 use super::set_location;
 
 use crate::error::AppError;
+use crate::extract::Writer;
 use crate::state::AppState;
 
 #[derive(Deserialize, Default)]
@@ -30,6 +31,7 @@ pub async fn get_design(
 /// PUT /{db}/_design/{ddoc} — create or update a design document.
 pub async fn put_design(
     State(state): State<AppState>,
+    Writer(writer): Writer,
     Path((db, ddoc)): Path<(String, String)>,
     Query(query): Query<DesignDeleteQuery>,
     headers: HeaderMap,
@@ -56,7 +58,7 @@ pub async fn put_design(
         ))
     })?;
 
-    let result = super::write_result(state.db.put_design(design).await?)?;
+    let result = super::write_result(writer.put_design(design).await?)?;
 
     let mut resp = (
         StatusCode::CREATED,
@@ -77,6 +79,7 @@ pub async fn put_design(
 /// DELETE /{db}/_design/{ddoc} — delete a design document.
 pub async fn delete_design(
     State(state): State<AppState>,
+    Writer(writer): Writer,
     Path((db, ddoc)): Path<(String, String)>,
     Query(query): Query<DesignDeleteQuery>,
     headers: HeaderMap,
@@ -87,7 +90,7 @@ pub async fn delete_design(
     let rev = resolve_rev(query.rev, None, &headers)?
         .ok_or(AppError(rouchdb_core::error::RouchError::Conflict))?;
 
-    let result = state.db.delete_design(&ddoc, &rev).await?;
+    let result = writer.delete_design(&ddoc, &rev).await?;
     Ok(Json(serde_json::json!({
         "ok": result.ok,
         "id": result.id,

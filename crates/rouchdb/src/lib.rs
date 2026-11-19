@@ -75,6 +75,9 @@ pub use rouchdb_replication::{
     replicate, replicate_live, replicate_with_events,
 };
 
+mod validate;
+pub use validate::{ADMIN_ROLE, OldDoc, UserCtx, WriteContext};
+
 /// Plugin trait for extending Database behavior.
 ///
 /// Plugins receive lifecycle hooks during database operations, including
@@ -101,6 +104,31 @@ pub trait Plugin: Send + Sync {
     async fn before_write(&self, _docs: &mut Vec<Document>) -> Result<()> {
         Ok(())
     }
+    /// Called for each document about to be written, after `before_write`:
+    /// CouchDB's `validate_doc_update(newDoc, oldDoc, userCtx)`.
+    ///
+    /// `ctx` says who writes ([`UserCtx`]) and whether the revision is
+    /// replicated; `old_doc` reads the revision it replaces, if the plugin
+    /// needs it. Every write path calls it: `bulk_docs`, `put`, `post`,
+    /// `update`, `remove`, design documents, attachments, and replication
+    /// into the database, as well as `rouchdb-server`'s routes that write.
+    ///
+    /// Returning `Forbidden`, `Unauthorized` or `BadRequest` rejects this
+    /// document only, as a failing `validate_doc_update` does in CouchDB:
+    /// `bulk_docs` and replication report it (`forbidden` or
+    /// `unauthorized`, with the error's reason) and write the others, and a
+    /// single-document write returns the error. Any other error fails the
+    /// whole write. Nothing is written before every document is validated,
+    /// so all of them are checked against the database as it was before the
+    /// write.
+    async fn validate_doc_update(
+        &self,
+        _new_doc: &Document,
+        _old_doc: &OldDoc<'_>,
+        _ctx: &WriteContext,
+    ) -> Result<()> {
+        Ok(())
+    }
     /// Called after documents (or attachments) were written. The write is
     /// already committed: an error is returned to the caller but does not
     /// undo it, so retrying the same write will conflict.
@@ -118,16 +146,55 @@ pub trait Plugin: Send + Sync {
 struct PluginAdapter {
     inner: Arc<dyn Adapter>,
     plugins: Vec<Arc<dyn Plugin>>,
+    /// Who the writes are validated as.
+    user_ctx: UserCtx,
 }
 
-/// The per-doc error a plugin rejection is reported as, if it is a
-/// rejection that retrying cannot fix.
-fn denial(error: &RouchError) -> Option<&'static str> {
-    match error {
-        RouchError::Forbidden(_) | RouchError::BadRequest(_) => Some("forbidden"),
-        RouchError::Unauthorized => Some("unauthorized"),
-        _ => None,
+/// The per-doc result a plugin rejection is reported as, if it is a
+/// rejection that retrying cannot fix: `forbidden` or `unauthorized`, with
+/// the error's own reason.
+fn denial(id: &str, error: &RouchError) -> Option<DocResult> {
+    let (kind, reason) = match error {
+        RouchError::Forbidden(reason) | RouchError::BadRequest(reason) => {
+            ("forbidden", reason.as_str())
+        }
+        RouchError::Unauthorized => ("unauthorized", "unauthorized"),
+        _ => return None,
+    };
+    Some(DocResult::error(id, kind, reason))
+}
+
+/// Run every plugin's `validate_doc_update` on `doc`, about to be written
+/// to `adapter`.
+async fn validate_doc(
+    plugins: &[Arc<dyn Plugin>],
+    adapter: &dyn Adapter,
+    doc: &Document,
+    ctx: &WriteContext,
+) -> Result<()> {
+    let old_doc = OldDoc::new(adapter, doc, ctx.new_edits);
+    for plugin in plugins {
+        plugin.validate_doc_update(doc, &old_doc, ctx).await?;
     }
+    Ok(())
+}
+
+/// Put the results of the written documents back among the denied ones, in
+/// the order of the request. When the adapter did not answer for every
+/// written document (CouchDB answers `new_edits: false` writes with the
+/// failures only), the denials follow its results.
+fn merge_results(slots: Vec<Option<DocResult>>, written: Vec<DocResult>) -> Vec<DocResult> {
+    let expected = slots.iter().filter(|slot| slot.is_none()).count();
+    if written.len() != expected {
+        let mut results = written;
+        results.extend(slots.into_iter().flatten());
+        return results;
+    }
+    let mut written = written.into_iter();
+    slots
+        .into_iter()
+        .filter_map(|slot| slot.or_else(|| written.next()))
+        .collect()
 }
 
 impl PluginAdapter {
@@ -160,7 +227,7 @@ impl PluginAdapter {
         };
         doc.deleted = false;
         edit(&mut doc.attachments);
-        let mut docs = vec![doc];
+        let mut docs = vec![doc.clone()];
         for plugin in &self.plugins {
             plugin.before_write(&mut docs).await?;
             if docs.is_empty() {
@@ -170,7 +237,8 @@ impl PluginAdapter {
                 )));
             }
         }
-        Ok(())
+        let ctx = WriteContext::new(self.user_ctx.clone(), true);
+        validate_doc(&self.plugins, self.inner.as_ref(), &doc, &ctx).await
     }
 }
 
@@ -198,6 +266,7 @@ impl Adapter for PluginAdapter {
         // Plugins only accept or reject replicated docs: the original body
         // is written, since a changed body stored under the source's
         // revision id would silently diverge from it for good.
+        let ctx = WriteContext::new(self.user_ctx.clone(), opts.new_edits);
         let mut accepted = Vec::with_capacity(docs.len());
         let mut denied = Vec::new();
         for doc in docs {
@@ -216,10 +285,13 @@ impl Adapter for PluginAdapter {
                     break;
                 }
             }
+            if outcome.is_ok() {
+                outcome = validate_doc(&self.plugins, self.inner.as_ref(), &doc, &ctx).await;
+            }
             match outcome {
                 Ok(()) => accepted.push(doc),
-                Err(e) => match denial(&e) {
-                    Some(kind) => denied.push(DocResult::error(doc.id, kind, e.to_string())),
+                Err(e) => match denial(&doc.id, &e) {
+                    Some(result) => denied.push(result),
                     None => return Err(e),
                 },
             }
@@ -365,6 +437,8 @@ pub struct Database {
     remote: Option<Arc<HttpAdapter>>,
     indexes: Arc<RwLock<HashMap<String, MangoIndex>>>,
     plugins: Vec<Arc<dyn Plugin>>,
+    /// Who this handle writes as (see [`Database::as_user`]).
+    user_ctx: UserCtx,
 }
 
 /// A Mango index kept up to date from the changes feed.
@@ -402,6 +476,7 @@ impl Database {
             remote: None,
             indexes: Arc::new(RwLock::new(HashMap::new())),
             plugins: Vec::new(),
+            user_ctx: UserCtx::admin(),
         }
     }
 
@@ -449,6 +524,7 @@ impl Database {
             remote: None,
             indexes: Arc::new(RwLock::new(HashMap::new())),
             plugins: Vec::new(),
+            user_ctx: UserCtx::admin(),
         })
     }
 
@@ -474,6 +550,7 @@ impl Database {
             remote: Some(adapter),
             indexes: Arc::new(RwLock::new(HashMap::new())),
             plugins: Vec::new(),
+            user_ctx: UserCtx::admin(),
         }
     }
 
@@ -484,6 +561,7 @@ impl Database {
             remote: None,
             indexes: Arc::new(RwLock::new(HashMap::new())),
             plugins: Vec::new(),
+            user_ctx: UserCtx::admin(),
         }
     }
 
@@ -491,6 +569,28 @@ impl Database {
     pub fn with_plugin(mut self, plugin: Arc<dyn Plugin>) -> Self {
         self.plugins.push(plugin);
         self
+    }
+
+    /// A handle to the same database that writes as `user_ctx`: plugins'
+    /// [`Plugin::validate_doc_update`] sees it in its [`WriteContext`] for
+    /// every write made through the handle, including replication into it
+    /// (`replicate_from`, or `replicate_to` with it as the target).
+    ///
+    /// The handle shares everything else (storage, plugins, Mango indexes)
+    /// with `self`. A database writes as [`UserCtx::admin`] by default.
+    pub fn as_user(&self, user_ctx: UserCtx) -> Database {
+        Database {
+            adapter: self.adapter.clone(),
+            remote: self.remote.clone(),
+            indexes: self.indexes.clone(),
+            plugins: self.plugins.clone(),
+            user_ctx,
+        }
+    }
+
+    /// Who this handle writes as (see [`Database::as_user`]).
+    pub fn user_ctx(&self) -> &UserCtx {
+        &self.user_ctx
     }
 
     /// Get a reference to the underlying adapter.
@@ -507,6 +607,7 @@ impl Database {
             Arc::new(PluginAdapter {
                 inner: self.adapter.clone(),
                 plugins: self.plugins.clone(),
+                user_ctx: self.user_ctx.clone(),
             })
         }
     }
@@ -650,11 +751,35 @@ impl Database {
         for plugin in &self.plugins {
             plugin.before_write(&mut docs).await?;
         }
-        let results = self.adapter.bulk_docs(docs, opts).await?;
-        for plugin in &self.plugins {
-            plugin.after_write(&results).await?;
+        if self.plugins.is_empty() {
+            return self.adapter.bulk_docs(docs, opts).await;
         }
-        Ok(results)
+        // Validate every document before writing any, and leave the
+        // rejected ones out of the write.
+        let ctx = WriteContext::new(self.user_ctx.clone(), opts.new_edits);
+        let mut slots = Vec::with_capacity(docs.len());
+        let mut accepted = Vec::with_capacity(docs.len());
+        for doc in docs {
+            match validate_doc(&self.plugins, self.adapter.as_ref(), &doc, &ctx).await {
+                Ok(()) => {
+                    slots.push(None);
+                    accepted.push(doc);
+                }
+                Err(e) => match denial(&doc.id, &e) {
+                    Some(result) => slots.push(Some(result)),
+                    None => return Err(e),
+                },
+            }
+        }
+        let written = if accepted.is_empty() {
+            Vec::new()
+        } else {
+            self.adapter.bulk_docs(accepted, opts).await?
+        };
+        for plugin in &self.plugins {
+            plugin.after_write(&written).await?;
+        }
+        Ok(merge_results(slots, written))
     }
 
     /// Query all documents.
@@ -2832,6 +2957,7 @@ mod tests {
         PluginAdapter {
             inner: spy.clone(),
             plugins,
+            user_ctx: UserCtx::admin(),
         }
     }
 

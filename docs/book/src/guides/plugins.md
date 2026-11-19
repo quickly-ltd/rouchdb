@@ -5,7 +5,7 @@ RouchDB has a plugin system that lets you hook into the document lifecycle. Plug
 ## The Plugin Trait
 
 ```rust
-use rouchdb::{Plugin, Document, DocResult, Result};
+use rouchdb::{Plugin, Document, DocResult, OldDoc, Result, WriteContext};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -15,6 +15,17 @@ pub trait Plugin: Send + Sync {
 
     /// Called before documents are written. Can modify or reject documents.
     async fn before_write(&self, docs: &mut Vec<Document>) -> Result<()> {
+        Ok(()) // default: no-op
+    }
+
+    /// Called for each document about to be written: CouchDB's
+    /// `validate_doc_update(newDoc, oldDoc, userCtx)`. Rejects that document only.
+    async fn validate_doc_update(
+        &self,
+        new_doc: &Document,
+        old_doc: &OldDoc<'_>,
+        ctx: &WriteContext,
+    ) -> Result<()> {
         Ok(()) // default: no-op
     }
 
@@ -99,11 +110,82 @@ impl Plugin for RequireTypeField {
 }
 ```
 
+## Example: `validate_doc_update`
+
+`validate_doc_update` is CouchDB's validation function. It is called once per
+document, after `before_write`, with:
+
+- `ctx.user_ctx`: who writes, CouchDB's `userCtx` (`name` and `roles`);
+- `ctx.new_edits`: `false` for a replicated revision;
+- `old_doc`: the revision the write replaces, read only if you call
+  `old_doc.get().await` (`None` for a new document or a new branch).
+
+Returning `Forbidden`, `Unauthorized` or `BadRequest` rejects this document
+only: `bulk_docs` and replication report it as `forbidden` (or
+`unauthorized`) with your reason and write the others, and `put` returns the
+error. Every document of a batch is validated before any is written.
+
+```rust
+use rouchdb::{Document, OldDoc, Plugin, Result, RouchError, WriteContext};
+use async_trait::async_trait;
+
+/// Documents of type "invoice" can be created but never changed, except by
+/// a server admin.
+struct ImmutableInvoices;
+
+#[async_trait]
+impl Plugin for ImmutableInvoices {
+    fn name(&self) -> &str { "immutable-invoices" }
+
+    async fn validate_doc_update(
+        &self,
+        new_doc: &Document,
+        old_doc: &OldDoc<'_>,
+        ctx: &WriteContext,
+    ) -> Result<()> {
+        if ctx.user_ctx.is_admin() || new_doc.data["type"] != "invoice" {
+            return Ok(());
+        }
+        match old_doc.get().await? {
+            Some(old) if !old.deleted => Err(RouchError::Forbidden("invoices are immutable".into())),
+            _ => Ok(()),
+        }
+    }
+}
+```
+
+### Who writes
+
+A `Database` writes as `UserCtx::admin()` (`{name: null, roles: ["_admin"]}`,
+the context of CouchDB's internal writes) unless you ask for another user:
+
+```rust
+use rouchdb::{Database, UserCtx};
+
+let db = Database::memory("mydb");
+let cashier = db.as_user(UserCtx::new(Some("cashier".into()), vec!["staff".into()]));
+cashier.put("doc", serde_json::json!({})).await?; // validated as "cashier"
+```
+
+`as_user` returns a handle to the same database (storage, plugins and
+indexes are shared). Replication into a database writes with that handle's
+context, so `remote.replicate_to(&db.as_user(ctx))` (or
+`db.as_user(ctx).replicate_from(&remote)`) validates every replicated
+document as `ctx`, like CouchDB's replicator runs as the `user_ctx` of its
+replication document.
+
+`rouchdb-server` sets the context of each request from authentication: the
+configured admin (`{name, roles: ["_admin"]}`), or the admin party
+(`{name: null, roles: ["_admin"]}`) when no admin is configured. An embedder
+that authenticates requests itself puts a `UserCtx` in the request's
+extensions from a layer around the router; the server keeps it.
+
 ## Plugin Hooks
 
 | Hook | When | Can Modify? | Can Reject? |
 |------|------|-------------|-------------|
 | `before_write` | Before `bulk_docs` writes | Yes (mutable `&mut Vec<Document>`) | Yes (return `Err`) |
+| `validate_doc_update` | For each document, after `before_write` | No | Yes, that document only |
 | `after_write` | After successful writes | No (read-only `&[DocResult]`) | Yes (return `Err`) |
 | `on_destroy` | When `db.destroy()` is called | N/A | Yes (return `Err`) |
 

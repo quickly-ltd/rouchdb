@@ -11,6 +11,8 @@ use base64::Engine;
 // advance it to exercise session expiry.
 use tokio::time::Instant;
 
+use rouchdb::UserCtx;
+
 use crate::state::AppState;
 
 /// Name of the session cookie, matching CouchDB.
@@ -287,8 +289,18 @@ fn is_public(method: &Method, path: &str) -> bool {
 ///
 /// A request authenticated by its session cookie gets the cookie back with a
 /// fresh `Max-Age`, so an active session is not dropped by the browser.
-pub async fn require_auth(State(state): State<AppState>, req: Request, next: Next) -> Response {
+///
+/// It also gives the request its [`UserCtx`], which the routes that write
+/// pass to plugins (see [`Writer`](crate::extract::Writer)): the admin
+/// (`{name: admin, roles: ["_admin"]}`) for valid credentials, anonymous
+/// (`{name: null, roles: []}`) on a public route without them, and, without
+/// configured credentials, CouchDB's admin party (`{name: null, roles:
+/// ["_admin"]}`). A `UserCtx` already in the request extensions, put there
+/// by a layer around the router that authenticates requests itself, is
+/// kept.
+pub async fn require_auth(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let Some(auth) = state.auth.as_deref() else {
+        set_user_ctx(&mut req, UserCtx::admin());
         return next.run(req).await;
     };
     if session_cookie(req.headers()).is_some_and(|v| !v.is_empty() && is_malformed_session(v)) {
@@ -304,7 +316,10 @@ pub async fn require_auth(State(state): State<AppState>, req: Request, next: Nex
         AuthOutcome::BadCredentials => {
             return unauthorized("Name or password is incorrect.");
         }
-        AuthOutcome::Anonymous if is_public(req.method(), path) => return next.run(req).await,
+        AuthOutcome::Anonymous if is_public(req.method(), path) => {
+            set_user_ctx(&mut req, UserCtx::anonymous());
+            return next.run(req).await;
+        }
         // Server-level endpoints need a server admin; the others a database member.
         AuthOutcome::Anonymous if path.starts_with("/_") => {
             return unauthorized("You are not a server admin.");
@@ -314,6 +329,11 @@ pub async fn require_auth(State(state): State<AppState>, req: Request, next: Nex
         }
         AuthOutcome::Admin => {}
     }
+    let admin = UserCtx::new(
+        Some(auth.username().to_string()),
+        vec![rouchdb::ADMIN_ROLE.to_string()],
+    );
+    set_user_ctx(&mut req, admin);
 
     // Basic credentials take precedence over the cookie in `authenticate`.
     let cookie = if basic_credentials(req.headers()).is_none() {
@@ -329,6 +349,14 @@ pub async fn require_auth(State(state): State<AppState>, req: Request, next: Nex
         resp.headers_mut().insert(header::SET_COOKIE, cookie);
     }
     resp
+}
+
+/// Give the request `user_ctx`, unless a layer around the router already
+/// gave it one.
+fn set_user_ctx(req: &mut Request, user_ctx: UserCtx) {
+    if req.extensions().get::<UserCtx>().is_none() {
+        req.extensions_mut().insert(user_ctx);
+    }
 }
 
 pub fn unauthorized(reason: &str) -> Response {

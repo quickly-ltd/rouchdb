@@ -22,7 +22,7 @@ RouchDB is the Rust equivalent of [PouchDB](https://pouchdb.com/) — it stores 
 - **Changes feed** — one-shot, live streaming, selector/filter/doc_ids filtering
 - **Attachments** — binary data stored alongside documents (memory + redb backends)
 - **Design documents & views** — Rust-native ViewEngine with map/reduce
-- **Plugin system** — before_write, after_write, on_destroy hooks
+- **Plugin system** — before_write, validate_doc_update (with the writer's userCtx), after_write, on_destroy hooks
 - **Partitioned databases** — scoped queries by ID prefix
 - **CouchDB-compatible HTTP server** — browse databases with Fauxton, use any CouchDB client
 - **CLI tool** — inspect, query, and modify redb databases from the terminal
