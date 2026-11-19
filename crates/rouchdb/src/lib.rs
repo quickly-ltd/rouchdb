@@ -498,13 +498,6 @@ impl Database {
         self.adapter.as_ref()
     }
 
-    /// A shared handle to the underlying adapter, for work that outlives a
-    /// borrow of this database (e.g. a spawned task). Writes through it
-    /// bypass this database's plugins.
-    pub fn adapter_arc(&self) -> Arc<dyn Adapter> {
-        self.adapter.clone()
-    }
-
     /// The adapter writes from outside `bulk_docs` (replication, attachment
     /// updates) go through, so they run this database's plugins.
     fn plugin_adapter(&self) -> Arc<dyn Adapter> {

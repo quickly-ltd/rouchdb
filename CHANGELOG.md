@@ -16,8 +16,8 @@ This project follows [Semantic Versioning](https://semver.org/). Since we are pr
 ### Added
 
 - **`_changes?filter=_selector` (rouchdb-server):** the selector may also be given in a GET as a JSON-encoded `selector` query parameter (the POST body wins). The opt-in `ServerConfig::selector_index_fields` / `--selector-index-field` keeps an in-memory projection of those top-level fields for the changes feed, so a selector feed skips changes that cannot match without reading their bodies; results are unchanged.
-- **Sync-status summary (rouchdb-server):** `SyncStatusSummary` reports `doc_write_failures`, `push_failures`, `pull_failures`, `docs_denied` (kept across replication restarts), `last_push_at` and, through `ActiveTasks::sync_status_with_pending`, `pending_changes`.
-- `Database::adapter_arc()`: a shared handle to the underlying adapter.
+- **Sync-status summary (rouchdb-server):** `SyncStatusSummary` reports `doc_write_failures`, `push_failures`, `pull_failures`, `docs_denied` (only the documents the far side denied, kept across replication restarts), `last_push_at` and, through `ActiveTasks::sync_status_with_pending`, `pending_changes`.
+- **Replication events (rouchdb-replication):** `ReplicationEvent::Change` also reports `docs_denied`, the write failures the target denied for good (`forbidden`/`unauthorized`); a live replication sends `ReplicationEvent::CaughtUp { last_seq }` right before each `Paused`.
 - **PouchDB 9 Replication Surface Compatibility (rouchdb-server):**
   - Added `/{db}/` trailing-slash database route.
   - Implemented `POST /{db}/_revs_diff` endpoint for missing revision checks.

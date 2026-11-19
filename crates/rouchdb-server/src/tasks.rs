@@ -71,7 +71,9 @@ pub struct SyncStatusSummary {
     /// life of the process.
     pub last_push_at: Option<String>,
     /// Local changes not yet pushed: the source's `update_seq` minus the
-    /// sequence it had when the push last caught up (`Paused`). Only
+    /// source sequence the push had processed when it last caught up
+    /// ([`ReplicationEvent::CaughtUp`]), so a write landing while the push
+    /// catches up still counts as pending. Only
     /// [`ActiveTasks::sync_status_with_pending`] fills it, and only once a
     /// push has caught up at least once.
     pub pending_changes: Option<u64>,
@@ -82,7 +84,8 @@ pub struct SyncStatusSummary {
 #[derive(Debug, Clone, Default)]
 struct PushProgress {
     last_push_ms: Option<u64>,
-    /// The source's `update_seq` when the push last caught up (`Paused`).
+    /// The source sequence the push had processed when it last caught up
+    /// ([`ReplicationEvent::CaughtUp`]).
     caught_up_seq: Option<u64>,
 }
 
@@ -135,8 +138,10 @@ static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Default)]
 pub struct ActiveTasks {
     inner: Arc<RwLock<HashMap<u64, ActiveTaskInfo>>>,
-    /// `doc_write_failures` of push tasks that have ended, by target label,
-    /// so [`SyncStatusSummary::docs_denied`] survives a replication restart.
+    /// Documents denied to running tasks: task id → (target label, count).
+    live_denied: Arc<RwLock<HashMap<u64, (String, u64)>>>,
+    /// Documents denied to tasks that have ended, by target label, so
+    /// [`SyncStatusSummary::docs_denied`] survives a replication restart.
     retired_denied: Arc<RwLock<HashMap<String, u64>>>,
     /// Push progress by target label, kept after the task ends.
     push_progress: Arc<RwLock<HashMap<String, PushProgress>>>,
@@ -232,7 +237,7 @@ impl ActiveTasks {
             doc_write_failures: push_failures + pull_failures,
             push_failures,
             pull_failures,
-            docs_denied: self.retired_denied_for(remote_label) + push_failures,
+            docs_denied: self.retired_denied_for(remote_label) + self.live_denied_for(remote_label),
             last_push_at: self.last_push_at_for(remote_label),
             pending_changes: None,
         }
@@ -267,6 +272,16 @@ impl ActiveTasks {
             .get(remote_label)
             .and_then(|p| p.last_push_ms)
             .map(iso_utc_ms)
+    }
+
+    fn live_denied_for(&self, remote_label: &str) -> u64 {
+        self.live_denied
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|(target, _)| target == remote_label)
+            .map(|(_, denied)| denied)
+            .sum()
     }
 
     fn retired_denied_for(&self, remote_label: &str) -> u64 {
@@ -323,15 +338,13 @@ impl ActiveTasks {
             .insert(task_id, info);
 
         let registry = self.inner.clone();
+        let live_denied = self.live_denied.clone();
         let retired_denied = self.retired_denied.clone();
         let push_progress = self.push_progress.clone();
-        let source_adapter = source.adapter_arc();
         tokio::spawn(async move {
-            let mut previous = (0u64, 0u64, 0u64);
+            let mut previous = (0u64, 0u64, 0u64, 0u64);
             while let Some(event) = rx.recv().await {
-                let caught_up = matches!(event, ReplicationEvent::Paused);
-                // The registry lock is released before the `.await` below.
-                let target_label = {
+                {
                     let mut tasks = registry.write().unwrap_or_else(|e| e.into_inner());
                     let Some(entry) = tasks.get_mut(&task_id) else {
                         break;
@@ -341,6 +354,7 @@ impl ActiveTasks {
                             docs_read,
                             docs_written,
                             doc_write_failures,
+                            docs_denied,
                             ..
                         } => {
                             let written = docs_written.saturating_sub(previous.1);
@@ -348,7 +362,16 @@ impl ActiveTasks {
                             entry.docs_written += written;
                             entry.doc_write_failures +=
                                 doc_write_failures.saturating_sub(previous.2);
-                            previous = (docs_read, docs_written, doc_write_failures);
+                            let denied = docs_denied.saturating_sub(previous.3);
+                            previous = (docs_read, docs_written, doc_write_failures, docs_denied);
+                            if denied > 0 {
+                                live_denied
+                                    .write()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .entry(task_id)
+                                    .or_insert_with(|| (entry.target.clone(), 0))
+                                    .1 += denied;
+                            }
                             entry.status = "syncing";
                             entry.updated_on = now_unix();
                             if written > 0 {
@@ -361,9 +384,19 @@ impl ActiveTasks {
                             }
                         }
                         ReplicationEvent::Active => {
-                            previous = (0, 0, 0);
+                            previous = (0, 0, 0, 0);
                             entry.status = "syncing";
                             entry.updated_on = now_unix();
+                        }
+                        // Every source change up to `last_seq` was
+                        // processed (written, denied or filtered out).
+                        ReplicationEvent::CaughtUp { last_seq, .. } => {
+                            push_progress
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .entry(entry.target.clone())
+                                .or_default()
+                                .caught_up_seq = Some(last_seq.as_num());
                         }
                         ReplicationEvent::Paused => {
                             entry.status = "idle";
@@ -380,28 +413,22 @@ impl ActiveTasks {
                         ReplicationEvent::Complete(_) => break,
                         _ => {}
                     }
-                    entry.target.clone()
-                };
-                // Caught up: everything the source had is on the far side.
-                if caught_up && let Ok(info) = source_adapter.info().await {
-                    push_progress
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .entry(target_label)
-                        .or_default()
-                        .caught_up_seq = Some(info.update_seq.as_num());
                 }
             }
             let finished = registry
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&task_id);
-            if let Some(task) = finished.filter(|t| t.doc_write_failures > 0) {
+            let denied = live_denied
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&task_id);
+            if let (Some(_), Some((target, denied))) = (finished, denied) {
                 *retired_denied
                     .write()
                     .unwrap_or_else(|e| e.into_inner())
-                    .entry(task.target)
-                    .or_insert(0) += task.doc_write_failures;
+                    .entry(target)
+                    .or_insert(0) += denied;
             }
         });
 
@@ -570,9 +597,9 @@ mod tests {
         assert_eq!(summary.push_failures, 2);
         assert_eq!(summary.pull_failures, 1);
         assert_eq!(summary.doc_write_failures, 3);
-        // Only the push direction counts as denied by the far side; a pull
-        // failure is a local write error.
-        assert_eq!(summary.docs_denied, 2);
+        // Write failures are not denials: only a `forbidden`/`unauthorized`
+        // reply of the far side is (see the live-replication tests below).
+        assert_eq!(summary.docs_denied, 0);
         assert_eq!(summary.last_error, None);
     }
 
