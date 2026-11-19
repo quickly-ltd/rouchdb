@@ -8,6 +8,8 @@ This project follows [Semantic Versioning](https://semver.org/). Since we are pr
 
 ### Fixed
 
+- **`PUT` with `_deleted: true` keeps its body (rouchdb-server).** The other members of the body are stored in the tombstone, as in CouchDB; they were dropped. A plain `DELETE` still writes an empty tombstone.
+- **Exact number collation with `arbitrary-precision`.** Numbers that are not `i64`/`u64` were compared (and encoded by `to_indexable_string`) as `f64`, so `$eq: 18446744073709551616` also matched `18446744073709551617`, with or without an index. They are now compared by their exact decimal value.
 - HTTP adapter errors include their cause (`... error sending request for url (...): client error (Connect): tcp connect error: Connection refused`), so a replication's `last_error` says why a request failed.
 - Serialize HTTP database deletion and recreation so `PUT /{db}` cannot acknowledge a new database before an in-flight deletion clears its storage.
 - Cancel live replication while adapter I/O or event delivery is pending; a full event queue no longer prevents the worker from stopping. Terminal completion on cancellation is best-effort when the queue is full.

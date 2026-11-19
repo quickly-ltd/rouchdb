@@ -128,3 +128,78 @@ async fn big_integers_round_trip_through_couchdb() {
         }
     }
 }
+
+/// Mango compares numbers by their exact value: with the feature, adjacent
+/// integers beyond `u64` and long decimals stay distinct in `$eq`, ranges
+/// and sorting, with or without an index (`1.0` still equals `1`, as in
+/// CouchDB). Without it they were rounded to the same `f64` when parsed.
+#[tokio::test]
+async fn mango_compares_big_numbers_exactly() {
+    use rouchdb::{FindOptions, IndexDefinition, SortField};
+
+    let db = Database::memory("mango_numbers");
+    for (id, text) in [
+        ("one", "18446744073709551616"),
+        ("two", "18446744073709551617"),
+        ("neg", "-18446744073709551617"),
+        ("pi", "3.141592653589793238462643383279"),
+        ("pi2", "3.141592653589793238462643383280"),
+        ("whole", "1.0"),
+        // Out of the `f64` range: only parsed with the feature.
+        ("exp", "1e400"),
+    ] {
+        if id == "exp" && !cfg!(feature = "arbitrary-precision") {
+            continue;
+        }
+        let doc: serde_json::Value = serde_json::from_str(&format!(r#"{{"n":{text}}}"#)).unwrap();
+        db.put(id, doc).await.unwrap();
+    }
+    let ids = |docs: Vec<serde_json::Value>| -> Vec<String> {
+        docs.iter()
+            .map(|d| d["_id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let find = |selector: &str| {
+        let db = &db;
+        let selector: serde_json::Value = serde_json::from_str(selector).unwrap();
+        async move {
+            let opts = FindOptions {
+                selector,
+                sort: Some(vec![SortField::Simple("n".into())]),
+                ..Default::default()
+            };
+            ids(db.find(opts).await.unwrap().docs)
+        }
+    };
+
+    for indexed in [false, true] {
+        if indexed {
+            db.create_index(IndexDefinition {
+                name: "by_n".into(),
+                fields: vec![SortField::Simple("n".into())],
+                ddoc: None,
+            })
+            .await
+            .unwrap();
+        }
+        let eq = find(r#"{"n":{"$eq":18446744073709551616}}"#).await;
+        let gt = find(r#"{"n":{"$gt":18446744073709551616}}"#).await;
+        let pi = find(r#"{"n":{"$eq":3.141592653589793238462643383279}}"#).await;
+        let all = find(r#"{"n":{"$gt":null}}"#).await;
+        let whole = find(r#"{"n":{"$eq":1}}"#).await;
+        assert_eq!(whole, ["whole"], "indexed: {indexed}");
+        if cfg!(feature = "arbitrary-precision") {
+            assert_eq!(eq, ["one"], "indexed: {indexed}");
+            assert_eq!(gt, ["two", "exp"], "indexed: {indexed}");
+            assert_eq!(pi, ["pi"], "indexed: {indexed}");
+            assert_eq!(
+                all,
+                ["neg", "whole", "pi", "pi2", "one", "two", "exp"],
+                "indexed: {indexed}"
+            );
+        } else {
+            assert_eq!(eq, ["one", "two"], "indexed: {indexed}");
+            assert_eq!(pi, ["pi", "pi2"], "indexed: {indexed}");
+        }
+    }
+}

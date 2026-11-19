@@ -59,9 +59,13 @@ was written with, through storage, replication and the HTTP adapter: big
 integers round-trip with CouchDB, and decimals are kept more precisely than
 by CouchDB, which rewrites them as doubles (`1.50` as `1.5`, `-0.0` as
 `0.0`). It turns on `serde_json`'s
-`arbitrary_precision` for the whole build: numbers then compare by their
-text (`1.0` is not `1.00`), and revision ids of documents holding such
-numbers differ from those computed without the feature. See
+`arbitrary_precision` for the whole build: `serde_json::Number` values
+then compare by their text (`1.0` is not `1.00`), and revision ids of
+documents holding such numbers differ from those computed without the
+feature. Collation (Mango selectors, sorting, indexes, views) compares
+their exact decimal value, as CouchDB does for integers:
+`18446744073709551617` sorts after `18446744073709551616`, and `1.00`
+equals `1`. See
 [Installation](../getting-started/installation.md#exact-numbers); pinned by
 `big_numbers.rs`.
 
