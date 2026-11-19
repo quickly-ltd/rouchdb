@@ -244,27 +244,30 @@ pub async fn put_doc(
     let body_rev = body.get("_rev").and_then(|v| v.as_str()).map(String::from);
     let rev = resolve_rev(query.rev, body_rev, &headers)?;
 
-    let result = if is_deleted {
-        let rev_str = rev.ok_or_else(|| {
-            AppError(rouchdb_core::error::RouchError::BadRequest(
+    if is_deleted {
+        if rev.is_none() {
+            return Err(AppError(RouchError::BadRequest(
                 "Missing _rev for delete".to_string(),
-            ))
-        })?;
-        writer.remove(&docid, &rev_str).await
-    } else if let Some(rev_str) = rev {
-        // Strip _id and _rev from body data
-        if let Some(obj) = body.as_object_mut() {
-            obj.remove("_id");
-            obj.remove("_rev");
+            )));
         }
-        writer.update(&docid, &rev_str, body).await
-    } else {
-        // Strip _id from body data
-        if let Some(obj) = body.as_object_mut() {
-            obj.remove("_id");
-            obj.remove("_rev");
+        // CouchDB answers 409 when the document is already deleted.
+        match writer.get(&docid).await {
+            Err(RouchError::NotFound(_)) => return Err(AppError(RouchError::Conflict)),
+            other => {
+                other?;
+            }
         }
-        writer.put(&docid, body).await
+    }
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("_id");
+        obj.remove("_rev");
+    }
+    // A `_deleted: true` body stays in `body`: `update` writes it as the
+    // tombstone, so its other members are stored like CouchDB does (a plain
+    // `DELETE` writes an empty tombstone).
+    let result = match rev {
+        Some(rev_str) => writer.update(&docid, &rev_str, body).await,
+        None => writer.put(&docid, body).await,
     };
     let result = match result {
         // Only an edit of a given revision can miss its document: editing a

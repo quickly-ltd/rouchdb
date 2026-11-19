@@ -312,3 +312,57 @@ async fn big_numbers_are_served_as_stored() {
     );
     assert_eq!(body.contains(r#""dec":1.50"#), exact, "{body}");
 }
+
+/// A `PUT` with `_deleted: true` stores the rest of its body in the
+/// tombstone, as CouchDB does; a plain `DELETE` still writes an empty one.
+#[tokio::test]
+async fn delete_via_put_keeps_the_tombstone_body() {
+    let (db, app, rev) = with_doc().await;
+    let rev = db
+        .put_attachment("a", "note.txt", &rev, b"hi".to_vec(), "text/plain")
+        .await
+        .unwrap()
+        .rev
+        .unwrap();
+    let resp = put(
+        &app,
+        "/db/a",
+        json!({"_rev": rev, "_deleted": true, "kind": "order", "deleted_at": "2026-11-14"}),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::CREATED);
+    let tomb_rev = resp.json()["rev"].as_str().unwrap().to_string();
+
+    let doc = get(&app, &format!("/db/a?rev={tomb_rev}")).await.json();
+    assert_eq!(doc["_deleted"], true);
+    assert_eq!(doc["kind"], "order");
+    assert_eq!(doc["deleted_at"], "2026-11-14");
+    assert!(
+        doc.get("_attachments").is_none(),
+        "tombstones carry no attachments"
+    );
+
+    let changes = get(&app, "/db/_changes?include_docs=true").await.json();
+    let row = &changes["results"][0];
+    assert_eq!(row["deleted"], true);
+    assert_eq!(row["doc"]["kind"], "order");
+
+    // Deleting the tombstone again is a conflict, as before.
+    let again = put(&app, "/db/a", json!({"_rev": tomb_rev, "_deleted": true})).await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+
+    let rev_b = db.put("b", json!({"v": 1})).await.unwrap().rev.unwrap();
+    let resp = delete(&app, &format!("/db/b?rev={rev_b}")).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let rev_b = resp.json()["rev"].as_str().unwrap().to_string();
+    let doc = get(&app, &format!("/db/b?rev={rev_b}")).await.json();
+    assert_eq!(doc.as_object().unwrap().len(), 3, "{doc}");
+}
+
+#[tokio::test]
+async fn delete_via_put_needs_a_revision() {
+    let (db, app, _rev) = with_doc().await;
+    let resp = put(&app, "/db/a", json!({"_deleted": true, "kind": "x"})).await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert!(db.get("a").await.is_ok());
+}
