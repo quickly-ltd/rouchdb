@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rouchdb_core::adapter::{Adapter, ChangeNotice, ChangeWait};
+use rouchdb_core::adapter::{Adapter, ChangeNotice};
 use rouchdb_core::document::*;
 use rouchdb_core::error::Result;
 use tokio::sync::{broadcast, mpsc};
@@ -165,7 +165,9 @@ pub enum ReplicationEvent {
     Error(String),
     /// A condition that does not stop the replication, also listed in
     /// [`ReplicationResult::warnings`]. A live replication sends it once
-    /// per session, not on every pass.
+    /// per session, not on every pass. A live replication also sends one
+    /// when waiting on the source's longpoll feed fails (once per distinct
+    /// error; it then polls every `poll_interval`).
     Warning(String),
 }
 
@@ -335,13 +337,23 @@ const LONGPOLL_TIMEOUT: Duration = Duration::from_secs(25);
 /// the source supports it, and never less than `poll_interval` in any case.
 /// A source that answers at once (no longpoll, an error, or a change already
 /// there because it is busy) is thus not read faster than when it was
-/// polled.
-async fn idle_wait(source: &dyn Adapter, since: Option<Seq>, poll_interval: Duration) {
+/// polled. Returns the wait's error, if it failed: the replication then
+/// polls, and reports it (once per distinct error) as a warning.
+async fn idle_wait(
+    source: &dyn Adapter,
+    since: Option<Seq>,
+    poll_interval: Duration,
+) -> Option<String> {
     let started = tokio::time::Instant::now();
-    if let Some(since) = since {
-        let _: Result<ChangeWait> = source.wait_for_changes(since, LONGPOLL_TIMEOUT).await;
-    }
+    let failed = match since {
+        Some(since) => match source.wait_for_changes(since, LONGPOLL_TIMEOUT).await {
+            Ok(_) => None,
+            Err(e) => Some(e.to_string()),
+        },
+        None => None,
+    };
     tokio::time::sleep_until(started + poll_interval).await;
+    failed
 }
 
 /// Per-doc write errors that will never succeed on retry.
@@ -755,6 +767,8 @@ pub fn replicate_live(
             // A peer announced a reset (`ChangeNotice::reset`) since the last
             // pass.
             let mut reset = false;
+            // The last error of the longpoll wait, reported once.
+            let mut wait_error: Option<String> = None;
 
             'live: loop {
                 let result = async {
@@ -907,7 +921,18 @@ pub fn replicate_live(
                             }
                             break;
                         }
-                        _ = &mut idle, if notices.is_none() => break,
+                        failed = &mut idle, if notices.is_none() => {
+                            if let Some(message) = &failed
+                                && wait_error.as_ref() != Some(message)
+                            {
+                                let warning = format!(
+                                    "waiting for the source's changes failed, polling every poll_interval: {message}"
+                                );
+                                let _ = tx.send(ReplicationEvent::Warning(warning)).await;
+                            }
+                            wait_error = failed;
+                            break;
+                        }
                         notice = next_notice(&mut target_notices), if target_notices.is_some() => {
                             match notice {
                                 Ok(notice) if notice.reset => {

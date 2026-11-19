@@ -132,3 +132,56 @@ async fn a_busy_http_source_is_read_at_most_once_per_poll_interval() {
     assert!(requests <= 15, "{requests} _changes requests in 1 s");
     assert!(paused <= 6, "{paused} Paused events in 1 s");
 }
+
+#[tokio::test]
+async fn a_failing_longpoll_wait_is_reported_once_and_falls_back_to_polling() {
+    let server_db = Arc::new(Database::memory(DB));
+    let app = app_with(server_db.clone(), &config());
+    // A proxy that refuses longpoll feeds.
+    let refusing = app.clone().layer(axum::middleware::from_fn(
+        |req: axum::extract::Request, next: axum::middleware::Next| async move {
+            if req
+                .uri()
+                .query()
+                .is_some_and(|q| q.contains("feed=longpoll"))
+            {
+                return axum::response::IntoResponse::into_response((
+                    axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                    axum::Json(json!({"error": "method_not_allowed", "reason": "no longpoll"})),
+                ));
+            }
+            next.run(req).await
+        },
+    ));
+    let addr = serve(refusing).await;
+    put(&app, "/db/first", json!({})).await;
+
+    let source = Database::http(&format!("http://{addr}/{DB}"));
+    let target = Database::memory("target");
+    let (mut events, handle) = source.replicate_to_live(
+        &target,
+        ReplicationOptions {
+            live: true,
+            poll_interval: Duration::from_millis(50),
+            ..Default::default()
+        },
+    );
+    let mut warnings = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
+        if let ReplicationEvent::Warning(w) = event {
+            warnings.push(w);
+        }
+    }
+    put(&app, "/db/second", json!({})).await;
+    let arrived = tokio::time::timeout(Duration::from_secs(5), async {
+        while target.get("second").await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    handle.cancel();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("polling"), "{warnings:?}");
+    assert!(arrived.is_ok(), "polling still replicates");
+}
