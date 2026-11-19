@@ -11,6 +11,7 @@ use rouchdb_core::error::RouchError;
 use super::set_location;
 
 use crate::error::AppError;
+use crate::extract::Writer;
 use crate::state::AppState;
 
 #[derive(Deserialize, Default)]
@@ -224,6 +225,7 @@ async fn get_open_revs(
 /// PUT /{db}/{docid} — create or update a document.
 pub async fn put_doc(
     State(state): State<AppState>,
+    Writer(writer): Writer,
     Path((db, docid)): Path<(String, String)>,
     Query(query): Query<DeleteDocQuery>,
     headers: HeaderMap,
@@ -248,21 +250,21 @@ pub async fn put_doc(
                 "Missing _rev for delete".to_string(),
             ))
         })?;
-        state.db.remove(&docid, &rev_str).await
+        writer.remove(&docid, &rev_str).await
     } else if let Some(rev_str) = rev {
         // Strip _id and _rev from body data
         if let Some(obj) = body.as_object_mut() {
             obj.remove("_id");
             obj.remove("_rev");
         }
-        state.db.update(&docid, &rev_str, body).await
+        writer.update(&docid, &rev_str, body).await
     } else {
         // Strip _id from body data
         if let Some(obj) = body.as_object_mut() {
             obj.remove("_id");
             obj.remove("_rev");
         }
-        state.db.put(&docid, body).await
+        writer.put(&docid, body).await
     };
     let result = match result {
         // Only an edit of a given revision can miss its document: editing a
@@ -303,6 +305,7 @@ pub async fn put_doc(
 /// DELETE /{db}/{docid} — delete a document.
 pub async fn delete_doc(
     State(state): State<AppState>,
+    Writer(writer): Writer,
     Path((db, docid)): Path<(String, String)>,
     Query(query): Query<DeleteDocQuery>,
     headers: HeaderMap,
@@ -312,7 +315,7 @@ pub async fn delete_doc(
     // Without any revision CouchDB reports a conflict.
     let rev = resolve_rev(query.rev, None, &headers)?.ok_or(AppError(RouchError::Conflict))?;
 
-    let result = match state.db.remove(&docid, &rev).await {
+    let result = match writer.remove(&docid, &rev).await {
         Err(RouchError::NotFound(_)) => {
             return Err(AppError(RouchError::NotFound("missing".into())));
         }

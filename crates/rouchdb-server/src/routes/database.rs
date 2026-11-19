@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::set_location;
 use crate::error::AppError;
-use crate::extract::JsonBody;
+use crate::extract::{JsonBody, Writer};
 use crate::state::{AppState, db_not_found};
 
 /// GET /{db} — database info with CouchDB-compatible fields.
@@ -97,13 +97,14 @@ pub async fn delete_db(
 /// POST /{db} — create a new document with auto-generated ID.
 pub async fn post_doc(
     State(state): State<AppState>,
+    Writer(writer): Writer,
     Path(db): Path<String>,
     headers: HeaderMap,
     JsonBody(body): JsonBody<serde_json::Value>,
 ) -> Result<Response, AppError> {
     state.check_db(&db)?;
 
-    let result = state.db.post(body).await?;
+    let result = writer.post(body).await?;
     let mut resp = (
         StatusCode::CREATED,
         Json(json!({
