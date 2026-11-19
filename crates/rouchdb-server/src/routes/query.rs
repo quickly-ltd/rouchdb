@@ -10,6 +10,7 @@ use rouchdb_core::error::RouchError;
 
 use crate::error::AppError;
 use crate::extract::JsonBody;
+use crate::extract::Writer;
 use crate::state::AppState;
 
 /// CouchDB's `_find` limit when the request does not set one.
@@ -271,6 +272,7 @@ async fn persist_index(
 /// document, so it survives restarts and replicates.
 pub async fn create_index(
     State(state): State<AppState>,
+    Writer(writer): Writer,
     Path(db): Path<String>,
     JsonBody(body): JsonBody<CreateIndexBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
@@ -290,7 +292,7 @@ pub async fn create_index(
     });
     let ddoc_id = design_id(body.ddoc.as_deref().unwrap_or(&name));
 
-    persist_index(&state.db, &ddoc_id, &name, &fields).await?;
+    persist_index(&writer, &ddoc_id, &name, &fields).await?;
     let def = IndexDefinition {
         name,
         fields,
@@ -369,6 +371,7 @@ pub async fn get_indexes(
 /// from its design document (and the document deleted when it was the last).
 pub async fn delete_index(
     State(state): State<AppState>,
+    Writer(writer): Writer,
     Path((db, ddoc, itype, name)): Path<(String, String, String, String)>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     state.check_db(&db)?;
@@ -391,10 +394,9 @@ pub async fn delete_index(
     views.remove(&name);
 
     if views.is_empty() {
-        state.db.remove(&ddoc_id, &rev).await?;
+        writer.remove(&ddoc_id, &rev).await?;
     } else {
-        state
-            .db
+        writer
             .update(&ddoc_id, &rev, serde_json::Value::Object(body))
             .await?;
     }
@@ -411,6 +413,7 @@ pub struct BulkDeleteIndexBody {
 /// POST /{db}/_index/_bulk_delete — delete index design documents.
 pub async fn bulk_delete_indexes(
     State(state): State<AppState>,
+    Writer(writer): Writer,
     Path(db): Path<String>,
     JsonBody(body): JsonBody<BulkDeleteIndexBody>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -433,7 +436,7 @@ pub async fn bulk_delete_indexes(
             }
         };
         let rev = doc.rev.as_ref().map(|r| r.to_string()).unwrap_or_default();
-        match state.db.remove(&ddoc_id, &rev).await {
+        match writer.remove(&ddoc_id, &rev).await {
             Ok(r) if r.ok => {
                 if let Some(views) = doc.data.get("views").and_then(|v| v.as_object()) {
                     for name in views.keys() {

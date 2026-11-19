@@ -12,6 +12,7 @@ use rouchdb_core::error::RouchError;
 use super::document::{check_rev_format, get_or_not_found, resolve_rev};
 use super::set_location;
 use crate::error::{AppError, couch_error};
+use crate::extract::Writer;
 use crate::state::AppState;
 
 #[derive(Deserialize, Default)]
@@ -111,6 +112,7 @@ pub async fn get_attachment(
 /// CouchDB; on an existing document that is a conflict.
 pub async fn put_attachment(
     State(state): State<AppState>,
+    Writer(writer): Writer,
     Path((db, docid, attname)): Path<(String, String, String)>,
     Query(query): Query<AttachmentQuery>,
     headers: HeaderMap,
@@ -128,8 +130,7 @@ pub async fn put_attachment(
             // Checked first, as in CouchDB: a malformed revision is a 400
             // even when the document does not exist.
             check_rev_format(Some(&rev))?;
-            let result = state
-                .db
+            let result = writer
                 .put_attachment(&docid, &attname, &rev, body.to_vec(), content_type)
                 .await;
             match result {
@@ -157,10 +158,7 @@ pub async fn put_attachment(
                 data: serde_json::json!({}),
                 attachments: HashMap::from([(attname.clone(), attachment)]),
             };
-            let mut results = state
-                .db
-                .bulk_docs(vec![doc], BulkDocsOptions::new())
-                .await?;
+            let mut results = writer.bulk_docs(vec![doc], BulkDocsOptions::new()).await?;
             let result = results.pop().ok_or(AppError(RouchError::Conflict))?;
             super::write_result(result)?
         }
@@ -182,6 +180,7 @@ pub async fn put_attachment(
 /// DELETE /{db}/{docid}/{attname}?rev=... — delete an attachment.
 pub async fn delete_attachment(
     State(state): State<AppState>,
+    Writer(writer): Writer,
     Path((db, docid, attname)): Path<(String, String, String)>,
     Query(query): Query<AttachmentQuery>,
     headers: HeaderMap,
@@ -192,7 +191,7 @@ pub async fn delete_attachment(
     let rev = resolve_rev(query.rev, None, &headers)?.ok_or(AppError(RouchError::Conflict))?;
     check_rev_format(Some(&rev))?;
 
-    let result = match state.db.remove_attachment(&docid, &attname, &rev).await {
+    let result = match writer.remove_attachment(&docid, &attname, &rev).await {
         Err(RouchError::NotFound(_) | RouchError::Conflict)
             if rev_is_unknown(&state, &docid, &rev).await =>
         {

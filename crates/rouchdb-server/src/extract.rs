@@ -83,6 +83,41 @@ where
     }
 }
 
+/// The served database as the request's writer: a handle that writes as the
+/// request's [`UserCtx`](rouchdb::UserCtx), so plugins'
+/// `validate_doc_update` knows who writes.
+///
+/// The context comes from the request extensions: [`require_auth`] sets it
+/// from authentication (see there) unless a layer around the router already
+/// put one, which is how an embedder that authenticates requests itself
+/// passes its users on. Without one (routes served without `require_auth`)
+/// it is what `require_auth` would give: the admin party without configured
+/// credentials, an anonymous user with them.
+///
+/// [`require_auth`]: crate::auth::require_auth
+pub struct Writer(pub rouchdb::Database);
+
+impl axum::extract::FromRequestParts<crate::state::AppState> for Writer {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &crate::state::AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let user_ctx = parts
+            .extensions
+            .get::<rouchdb::UserCtx>()
+            .cloned()
+            // Without `require_auth` in front (routes served on their own):
+            // the same default it would give.
+            .unwrap_or_else(|| match state.auth {
+                Some(_) => rouchdb::UserCtx::anonymous(),
+                None => rouchdb::UserCtx::admin(),
+            });
+        Ok(Writer(state.db.as_user(user_ctx)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
