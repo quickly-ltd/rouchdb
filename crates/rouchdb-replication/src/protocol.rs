@@ -2049,6 +2049,39 @@ mod tests {
         assert_eq!(target.info().await.unwrap().doc_count, 3);
     }
 
+    /// The event path counts CouchDB-style replies (failures only) the same
+    /// way: `Change` reports what was sent minus what failed. Ported from the
+    /// QuicklySystems copy (#591).
+    #[tokio::test]
+    async fn change_events_count_couchdb_style_replies() {
+        let source = MemoryAdapter::new("source");
+        let target = CouchLikeTarget {
+            inner: MemoryAdapter::new("target"),
+            reject: Some("x"),
+        };
+        for id in ["a", "x", "b"] {
+            put_doc(&source, id, serde_json::json!({})).await;
+        }
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let result = replicate_with_events(&source, &target, ReplicationOptions::default(), tx)
+            .await
+            .unwrap();
+        assert_eq!((result.docs_written, result.errors.len()), (2, 1));
+        let mut last_change = None;
+        while let Ok(event) = rx.try_recv() {
+            if let ReplicationEvent::Change {
+                docs_written,
+                doc_write_failures,
+                ..
+            } = event
+            {
+                last_change = Some((docs_written, doc_write_failures));
+            }
+        }
+        assert_eq!(last_change, Some((2, 1)));
+    }
+
     #[tokio::test]
     async fn docs_written_excludes_docs_couchdb_rejected_in_a_batch() {
         let source = MemoryAdapter::new("source");
@@ -2773,6 +2806,39 @@ mod tests {
         // ...but the progress is kept, so the next run does not rescan.
         let r2 = replicate(&b, &a, opts()).await.unwrap();
         assert_eq!(r2.docs_read, 0);
+    }
+
+    /// A target that already got every doc some other way (here a run with
+    /// `checkpoint: false`) makes the next run write nothing; its progress
+    /// is still checkpointed, so a live replication does not re-compare the
+    /// whole feed on every pass. Ported from the QuicklySystems copy (#589).
+    #[tokio::test]
+    async fn checkpoint_saved_when_target_already_has_everything() {
+        let source = MemoryAdapter::new("source");
+        let target = MemoryAdapter::new("target");
+        for i in 1..=4 {
+            put_doc(&source, &format!("doc{i}"), serde_json::json!({ "v": i })).await;
+        }
+        let unsaved = ReplicationOptions {
+            checkpoint: false,
+            ..Default::default()
+        };
+        replicate(&source, &target, unsaved).await.unwrap();
+        let checkpointer = new_checkpointer(&source, &target, &None).await.unwrap();
+        let stored = || checkpointer.read_checkpoint(&source, &target);
+        assert_eq!(stored().await.unwrap(), Seq::default());
+
+        let first = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert_eq!((first.docs_read, first.docs_written), (4, 0));
+        assert_eq!(stored().await.unwrap(), Seq::Num(4));
+
+        let (tx, _rx) = mpsc::channel(16);
+        let second = replicate_with_events(&source, &target, ReplicationOptions::default(), tx)
+            .await
+            .unwrap();
+        assert_eq!(second.docs_read, 0, "the same changes are not re-read");
     }
 
     #[tokio::test]
