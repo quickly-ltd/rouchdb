@@ -3,6 +3,7 @@ pub mod error;
 pub mod extract;
 pub mod host;
 pub mod routes;
+pub mod selector_index;
 pub mod state;
 pub mod tasks;
 
@@ -70,6 +71,13 @@ pub struct ServerConfig {
     /// says `https`, session cookies get the `Secure` attribute. Only enable
     /// it behind a proxy that sets this header.
     pub trust_proxy: bool,
+    /// Top-level document fields kept in an in-memory projection of the
+    /// changes feed, so `_changes?filter=_selector` skips changes whose
+    /// projected fields cannot match without reading their bodies (see
+    /// [`selector_index`]). Results are unchanged; only selectors that
+    /// constrain these fields (or `_id`) get faster. Empty (the default)
+    /// disables the projection.
+    pub selector_index_fields: Vec<String>,
 }
 
 /// Default request body limit: 64 MiB.
@@ -91,6 +99,7 @@ impl Default for ServerConfig {
             allowed_hosts: Vec::new(),
             allow_unauthenticated: false,
             trust_proxy: false,
+            selector_index_fields: Vec::new(),
         }
     }
 }
@@ -206,6 +215,18 @@ pub fn build_router_with_tasks(
     });
     let mut state = AppState::new(db, config.db_name.clone(), auth);
     state.active_tasks = active_tasks;
+    if !config.selector_index_fields.is_empty() {
+        let index = Arc::new(selector_index::SelectorIndex::new(
+            config.selector_index_fields.iter().cloned(),
+        ));
+        // Build the projection in the background so the first filtered
+        // `_changes` does not pay for the whole history.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let (index, db) = (Arc::clone(&index), Arc::clone(&state.db));
+            runtime.spawn(async move { index.warm(&db).await });
+        }
+        state.selector_index = Some(index);
+    }
 
     let routes = routes::build_routes(state.clone())
         .layer(axum::middleware::from_fn_with_state(

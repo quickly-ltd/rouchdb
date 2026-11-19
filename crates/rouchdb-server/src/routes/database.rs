@@ -88,6 +88,9 @@ pub async fn delete_db(
         state.set_deleted(false);
         return Err(AppError(e));
     }
+    if let Some(index) = &state.selector_index {
+        index.reset().await;
+    }
     Ok(Json(json!({"ok": true})))
 }
 

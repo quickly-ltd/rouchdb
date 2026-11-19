@@ -6,6 +6,7 @@ use rouchdb_core::error::RouchError;
 
 use crate::auth::Auth;
 use crate::error::AppError;
+use crate::selector_index::SelectorIndex;
 use crate::tasks::ActiveTasks;
 
 /// Shared application state for all route handlers.
@@ -26,6 +27,9 @@ pub struct AppState {
     /// Serialize destruction and recreation: PUT must not publish a new
     /// database until the preceding DELETE has finished clearing storage.
     pub(crate) lifecycle: Arc<tokio::sync::Mutex<()>>,
+    /// Projection of the changes feed for `_changes?filter=_selector`, when
+    /// `ServerConfig::selector_index_fields` is set.
+    pub selector_index: Option<Arc<SelectorIndex>>,
 }
 
 impl AppState {
@@ -38,6 +42,7 @@ impl AppState {
             writes: Arc::new(tokio::sync::watch::Sender::new(0)),
             deleted: Arc::new(AtomicBool::new(false)),
             lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            selector_index: None,
         }
     }
 

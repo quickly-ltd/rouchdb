@@ -93,6 +93,19 @@ struct Cli {
     )]
     trust_proxy: bool,
 
+    /// Top-level document field kept in an in-memory projection of the
+    /// changes feed, so `_changes?filter=_selector` can skip changes that
+    /// cannot match without reading them. Repeat the flag (or
+    /// comma-separate) for several fields; without it there is no
+    /// projection
+    #[arg(
+        long = "selector-index-field",
+        value_name = "FIELD",
+        env = "ROUCHDB_SELECTOR_INDEX_FIELDS",
+        value_delimiter = ','
+    )]
+    selector_index_fields: Vec<String>,
+
     /// Largest accepted request body in bytes (documents, `_bulk_docs`
     /// batches, attachments)
     #[arg(long, value_name = "BYTES", default_value_t = rouchdb_server::DEFAULT_MAX_REQUEST_SIZE)]
@@ -184,6 +197,7 @@ async fn run(cli: Cli) {
         allowed_hosts: cli.allowed_hosts,
         allow_unauthenticated: cli.allow_unauthenticated,
         trust_proxy: cli.trust_proxy,
+        selector_index_fields: cli.selector_index_fields,
     };
     // Before touching the database file (which `--upgrade` rewrites).
     if let Err(e) = config.validate() {

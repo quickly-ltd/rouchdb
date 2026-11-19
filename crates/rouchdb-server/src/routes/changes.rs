@@ -11,11 +11,15 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
-use rouchdb_core::document::{ChangeEvent, ChangesOptions, ChangesResponse, ChangesStyle, Seq};
+use rouchdb::CompiledSelector;
+use rouchdb_core::document::{
+    ChangeEvent, ChangesOptions, ChangesResponse, ChangesStyle, GetOptions, Seq,
+};
 use rouchdb_core::error::RouchError;
 
 use crate::error::AppError;
 use crate::extract::JsonBody;
+use crate::selector_index::SelectorIndex;
 use crate::state::AppState;
 
 /// CouchDB's default `timeout` for longpoll and continuous feeds.
@@ -38,6 +42,9 @@ pub struct ChangesQuery {
     pub conflicts: Option<bool>,
     pub doc_ids: Option<String>,
     pub filter: Option<String>,
+    /// JSON-encoded Mango selector for `filter=_selector` in a GET (CouchDB
+    /// only reads it from the POST body, which takes precedence).
+    pub selector: Option<String>,
     pub feed: Option<String>,
     pub timeout: Option<u64>,
     pub heartbeat: Option<String>,
@@ -153,7 +160,17 @@ async fn parse_request(
             (Some(ids), None)
         }
         Some("_selector") => {
+            let from_query = match query.selector.as_deref() {
+                Some(raw) => Some(
+                    serde_json::from_str::<serde_json::Value>(raw)
+                        .ok()
+                        .filter(serde_json::Value::is_object)
+                        .ok_or_else(|| bad_request("`selector` must be a JSON object"))?,
+                ),
+                None => None,
+            };
             let selector = body_selector
+                .or(from_query)
                 .ok_or_else(|| bad_request("Selector must be specified in POST payload"))?;
             (None, Some(selector))
         }
@@ -243,6 +260,16 @@ async fn fetch(
     opts: &ChangesOptions,
     design_only: bool,
 ) -> Result<ChangesResponse, RouchError> {
+    if let (Some(index), Some(selector), Seq::Num(since), false, None) = (
+        &state.selector_index,
+        &opts.selector,
+        &opts.since,
+        opts.descending,
+        &opts.doc_ids,
+    ) && !design_only
+    {
+        return indexed_selector_changes(state, index, opts, selector, *since).await;
+    }
     if !design_only {
         return state.db.changes(opts.clone()).await;
     }
@@ -258,6 +285,78 @@ async fn fetch(
         response.last_seq = response.results.last().unwrap().seq.clone();
     }
     Ok(response)
+}
+
+/// `filter=_selector` answered from the projection of the changes feed
+/// ([`SelectorIndex`]): only the bodies of candidates the projection cannot
+/// rule out are read and matched in full, so the results are those of
+/// [`Database::changes`](rouchdb::Database::changes) with the selector.
+/// `limit` counts matching changes; `last_seq` is the seq of the last
+/// returned change when the limit cut the result, otherwise the last indexed
+/// seq (so an empty result never rescans the same range).
+async fn indexed_selector_changes(
+    state: &AppState,
+    index: &SelectorIndex,
+    opts: &ChangesOptions,
+    selector: &serde_json::Value,
+    since: u64,
+) -> Result<ChangesResponse, RouchError> {
+    let compiled = CompiledSelector::new(selector)?;
+    let (upto, candidates) = {
+        let inner = index.refreshed(&state.db).await?;
+        (inner.upto(), index.candidates(&inner, since, selector))
+    };
+    let all_leaves = opts.style == ChangesStyle::AllDocs;
+    let mut results = Vec::new();
+    for (seq, change) in candidates {
+        // Body gone (compacted or removed since the index read): it cannot
+        // match, and its successor has a later seq.
+        let Ok(doc) = state
+            .db
+            .adapter()
+            .get(
+                &change.id,
+                GetOptions {
+                    rev: Some(change.rev.clone()),
+                    conflicts: opts.conflicts || all_leaves,
+                    ..Default::default()
+                },
+            )
+            .await
+        else {
+            continue;
+        };
+        let mut body = doc.to_json();
+        let conflicts: Vec<String> = body
+            .as_object_mut()
+            .and_then(|map| map.remove("_conflicts"))
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
+        if !compiled.matches(&body) {
+            continue;
+        }
+        let mut revs = vec![change.rev.clone()];
+        if all_leaves {
+            revs.extend(conflicts.iter().cloned());
+        }
+        let has_conflicts = opts.conflicts && !conflicts.is_empty();
+        if has_conflicts && let Some(map) = body.as_object_mut() {
+            map.insert("_conflicts".into(), serde_json::json!(conflicts));
+        }
+        results.push(
+            ChangeEvent::new(seq, change.id, revs)
+                .with_deleted(change.deleted)
+                .with_doc(opts.include_docs.then_some(body))
+                .with_conflicts(has_conflicts.then_some(conflicts)),
+        );
+        if opts
+            .limit
+            .is_some_and(|limit| results.len() as u64 >= limit)
+        {
+            return Ok(ChangesResponse::new(results, seq));
+        }
+    }
+    Ok(ChangesResponse::new(results, upto.max(since)))
 }
 
 fn normal_body(results: &[ChangeEvent], last_seq: &Seq, pending: u64) -> serde_json::Value {

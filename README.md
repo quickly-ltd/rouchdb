@@ -223,6 +223,7 @@ Options:
       --allowed-host <HOST>        Also accept this name in the Host header (repeatable) [env: ROUCHDB_ALLOWED_HOSTS]
       --allow-unauthenticated      Serve on a non-loopback --host without --admin [env: ROUCHDB_ALLOW_UNAUTHENTICATED]
       --trust-proxy                Trust X-Forwarded-Proto from a reverse proxy [env: ROUCHDB_TRUST_PROXY]
+      --selector-index-field <FIELD>  Project this field for faster _changes?filter=_selector (repeatable) [env: ROUCHDB_SELECTOR_INDEX_FIELDS]
       --max-request-size <BYTES>   Largest accepted request body [default: 67108864]
       --session-timeout <SECONDS>  Idle lifetime of a _session cookie [default: 600]
 ```
