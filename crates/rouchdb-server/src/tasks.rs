@@ -51,6 +51,20 @@ pub struct SyncStatusSummary {
     pub last_error: Option<String>,
     pub docs_pushed: u64,
     pub docs_pulled: u64,
+    /// `push_failures + pull_failures` of the running tasks.
+    pub doc_write_failures: u64,
+    /// Documents the far side refused to write in the running push task.
+    pub push_failures: u64,
+    /// Documents the local side failed to write in the running pull task.
+    pub pull_failures: u64,
+    /// Documents the far side denied (push direction), including those of
+    /// earlier push tasks to the same label that have since ended, so the
+    /// count survives an embedder tearing down and restarting replication
+    /// (e.g. on every credential refresh). A denial advances the checkpoint,
+    /// so the document is not retried on its own; the count is kept in
+    /// memory for the life of the process only. Pull failures are local
+    /// write errors and are not counted here.
+    pub docs_denied: u64,
 }
 
 fn now_unix() -> u64 {
@@ -71,6 +85,9 @@ static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Default)]
 pub struct ActiveTasks {
     inner: Arc<RwLock<HashMap<u64, ActiveTaskInfo>>>,
+    /// `doc_write_failures` of push tasks that have ended, by target label,
+    /// so [`SyncStatusSummary::docs_denied`] survives a replication restart.
+    retired_denied: Arc<RwLock<HashMap<String, u64>>>,
 }
 
 impl ActiveTasks {
@@ -116,19 +133,19 @@ impl ActiveTasks {
                 last_error: None,
                 docs_pushed: 0,
                 docs_pulled: 0,
+                doc_write_failures: 0,
+                push_failures: 0,
+                pull_failures: 0,
+                docs_denied: self.retired_denied_for(remote_label),
             };
         }
 
-        let docs_pushed = tasks
-            .iter()
-            .find(|t| t.target == remote_label)
-            .map(|t| t.docs_written)
-            .unwrap_or(0);
-        let docs_pulled = tasks
-            .iter()
-            .find(|t| t.source == remote_label)
-            .map(|t| t.docs_written)
-            .unwrap_or(0);
+        let push_task = tasks.iter().find(|t| t.target == remote_label);
+        let pull_task = tasks.iter().find(|t| t.source == remote_label);
+        let docs_pushed = push_task.map(|t| t.docs_written).unwrap_or(0);
+        let docs_pulled = pull_task.map(|t| t.docs_written).unwrap_or(0);
+        let push_failures = push_task.map(|t| t.doc_write_failures).unwrap_or(0);
+        let pull_failures = pull_task.map(|t| t.doc_write_failures).unwrap_or(0);
 
         // Worst-first: an error or an unconnected task anywhere in the pair
         // outweighs another task quietly being idle.
@@ -158,7 +175,20 @@ impl ActiveTasks {
             last_error,
             docs_pushed,
             docs_pulled,
+            doc_write_failures: push_failures + pull_failures,
+            push_failures,
+            pull_failures,
+            docs_denied: self.retired_denied_for(remote_label) + push_failures,
         }
+    }
+
+    fn retired_denied_for(&self, remote_label: &str) -> u64 {
+        self.retired_denied
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(remote_label)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Starts a live (continuous) replication and keeps this registry
@@ -206,6 +236,7 @@ impl ActiveTasks {
             .insert(task_id, info);
 
         let registry = self.inner.clone();
+        let retired_denied = self.retired_denied.clone();
         tokio::spawn(async move {
             let mut previous = (0u64, 0u64, 0u64);
             while let Some(event) = rx.recv().await {
@@ -242,17 +273,23 @@ impl ActiveTasks {
                         entry.last_error = Some(message);
                         entry.updated_on = now_unix();
                     }
-                    ReplicationEvent::Complete(_) => {
-                        tasks.remove(&task_id);
-                        break;
-                    }
+                    // The entry is removed once, below, so its failures
+                    // are retired exactly once.
+                    ReplicationEvent::Complete(_) => break,
                     _ => {}
                 }
             }
-            registry
+            let finished = registry
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&task_id);
+            if let Some(task) = finished.filter(|t| t.doc_write_failures > 0) {
+                *retired_denied
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .entry(task.target)
+                    .or_insert(0) += task.doc_write_failures;
+            }
         });
 
         handle
@@ -385,6 +422,10 @@ mod tests {
                 last_error: None,
                 docs_pushed: 0,
                 docs_pulled: 0,
+                doc_write_failures: 0,
+                push_failures: 0,
+                pull_failures: 0,
+                docs_denied: 0,
             }
         );
     }
@@ -396,15 +437,145 @@ mod tests {
     #[test]
     fn sync_status_summary_maps_push_pull_and_worst_state() {
         let active_tasks = ActiveTasks::new();
-        insert_task(&active_tasks, 1, task("alldata", "remote", "idle", 5));
-        insert_task(&active_tasks, 2, task("remote", "alldata", "syncing", 3));
+        let mut push_task = task("alldata", "remote", "idle", 5);
+        push_task.doc_write_failures = 2;
+        insert_task(&active_tasks, 1, push_task);
+        let mut pull_task = task("remote", "alldata", "syncing", 3);
+        pull_task.doc_write_failures = 1;
+        insert_task(&active_tasks, 2, pull_task);
+        let mut unrelated_task = task("alldata", "other-remote", "idle", 99);
+        unrelated_task.doc_write_failures = 42;
+        insert_task(&active_tasks, 3, unrelated_task);
 
         let summary = active_tasks.sync_status_summary("remote");
         assert_eq!(summary.state, "syncing");
         assert!(summary.remote_configured);
         assert_eq!(summary.docs_pushed, 5);
         assert_eq!(summary.docs_pulled, 3);
+        assert_eq!(summary.push_failures, 2);
+        assert_eq!(summary.pull_failures, 1);
+        assert_eq!(summary.doc_write_failures, 3);
+        // Only the push direction counts as denied by the far side; a pull
+        // failure is a local write error.
+        assert_eq!(summary.docs_denied, 2);
         assert_eq!(summary.last_error, None);
+    }
+
+    /// Denies replicated documents carrying `"bad": true`, like a CouchDB
+    /// `validate_doc_update` throwing `forbidden`.
+    struct DenyBad;
+
+    #[async_trait::async_trait]
+    impl rouchdb::Plugin for DenyBad {
+        fn name(&self) -> &str {
+            "deny-bad"
+        }
+        async fn before_write(&self, docs: &mut Vec<rouchdb::Document>) -> rouchdb::Result<()> {
+            if docs
+                .iter()
+                .any(|d| d.data["bad"] == serde_json::json!(true))
+            {
+                return Err(rouchdb::RouchError::Forbidden("no bad docs".into()));
+            }
+            Ok(())
+        }
+    }
+
+    fn fast_opts() -> ReplicationOptions {
+        ReplicationOptions {
+            poll_interval: Duration::from_millis(20),
+            ..Default::default()
+        }
+    }
+
+    async fn wait_for_summary(
+        active_tasks: &ActiveTasks,
+        what: &str,
+        done: impl Fn(&SyncStatusSummary) -> bool,
+    ) -> SyncStatusSummary {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let s = active_tasks.sync_status_summary("remote");
+                if done(&s) {
+                    break s;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{what}"))
+    }
+
+    /// A document the far side denies during a real live replication shows
+    /// up as `docs_denied` (JSON `docsDenied`) and stays counted once the
+    /// task is idle again, while the valid document is written.
+    #[tokio::test]
+    async fn sync_status_summary_reports_denied_docs_from_real_replication() {
+        let local = Database::memory("alldata");
+        let remote = Database::memory("remote-db").with_plugin(Arc::new(DenyBad));
+        local
+            .put("denied", serde_json::json!({"bad": true}))
+            .await
+            .unwrap();
+        local.put("ok", serde_json::json!({"v": 1})).await.unwrap();
+
+        let active_tasks = ActiveTasks::new();
+        let handle =
+            active_tasks.start_live_replication(&local, &remote, "alldata", "remote", fast_opts());
+
+        let summary = wait_for_summary(&active_tasks, "denial should be reported", |s| {
+            s.docs_denied > 0 && s.state == "idle"
+        })
+        .await;
+        assert_eq!(summary.docs_denied, 1);
+        assert_eq!(summary.docs_pushed, 1, "the valid doc is written");
+        assert!(remote.get("ok").await.is_ok());
+        assert!(remote.get("denied").await.is_err());
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["docsDenied"], 1);
+
+        handle.cancel();
+    }
+
+    /// Restarting the replication (the old task ends, a new one starts for
+    /// the same pair) must not reset `docs_denied`: the denied document is
+    /// not retried, so the new task alone would report zero.
+    #[tokio::test]
+    async fn docs_denied_survives_replication_restart() {
+        let local = Database::memory("alldata");
+        let remote = Database::memory("remote-db").with_plugin(Arc::new(DenyBad));
+        local
+            .put("denied", serde_json::json!({"bad": true}))
+            .await
+            .unwrap();
+
+        let active_tasks = ActiveTasks::new();
+        let first =
+            active_tasks.start_live_replication(&local, &remote, "alldata", "remote", fast_opts());
+        wait_for_summary(&active_tasks, "denial should be reported", |s| {
+            s.docs_denied > 0
+        })
+        .await;
+
+        first.cancel();
+        timeout(Duration::from_secs(5), async {
+            while !active_tasks.snapshot().is_empty() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the old task should be removed");
+        assert_eq!(active_tasks.sync_status_summary("remote").docs_denied, 1);
+
+        let second =
+            active_tasks.start_live_replication(&local, &remote, "alldata", "remote", fast_opts());
+        let summary = wait_for_summary(&active_tasks, "the new task should settle", |s| {
+            s.state == "idle"
+        })
+        .await;
+        assert_eq!(summary.docs_denied, 1, "kept across the restart");
+        assert_eq!(summary.push_failures, 0, "the denied doc is not retried");
+        second.cancel();
     }
 
     #[test]
@@ -441,6 +612,10 @@ mod tests {
                 last_error: None,
                 docs_pushed: 0,
                 docs_pulled: 0,
+                doc_write_failures: 0,
+                push_failures: 0,
+                pull_failures: 0,
+                docs_denied: 0,
             }
         );
     }

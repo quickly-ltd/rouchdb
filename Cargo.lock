@@ -1778,6 +1778,7 @@ dependencies = [
 name = "rouchdb-server"
 version = "0.5.1"
 dependencies = [
+ "async-trait",
  "axum",
  "base64",
  "clap",
