@@ -143,7 +143,18 @@ pub enum ReplicationEvent {
     Change {
         docs_read: u64,
         docs_written: u64,
+        /// Every document the target failed to store, denied or not.
         doc_write_failures: u64,
+        /// The part of `doc_write_failures` the target denied for good
+        /// (`forbidden` or `unauthorized`, e.g. a `validate_doc_update`
+        /// rejection); those do not stop the replication.
+        docs_denied: u64,
+    },
+    /// Sent right before each [`Paused`](Self::Paused) of a live
+    /// replication: every source change up to `last_seq` has been processed.
+    #[non_exhaustive]
+    CaughtUp {
+        last_seq: Seq,
     },
     Paused,
     Active,
@@ -420,6 +431,7 @@ async fn run_replication(
     let mut total_docs_read = 0u64;
     let mut total_docs_written = 0u64;
     let mut total_write_failures = 0u64;
+    let mut total_denied = 0u64;
     let mut errors = Vec::new();
     let mut current_seq = since;
     // Last sequence stored in (or read from) the checkpoint.
@@ -551,6 +563,7 @@ async fn run_replication(
                     wr.reason.as_deref().unwrap_or("unknown")
                 );
                 if is_denied(error) {
+                    total_denied += 1;
                     // Rejected for good (validation or permissions). Like
                     // PouchDB's `denied`, report it and move on so a single
                     // doc cannot stall the replication forever.
@@ -575,6 +588,7 @@ async fn run_replication(
                 docs_read: total_docs_read,
                 docs_written: total_docs_written,
                 doc_write_failures: total_write_failures,
+                docs_denied: total_denied,
             },
         )
         .await;
@@ -766,6 +780,11 @@ pub fn replicate_live(
                             attempt = 0; // Reset retry counter on success
                             if outcome.result.docs_read == 0 {
                                 // No changes — emit Paused and wait
+                                let _ = tx
+                                    .send(ReplicationEvent::CaughtUp {
+                                        last_seq: outcome.result.last_seq.clone(),
+                                    })
+                                    .await;
                                 let _ = tx.send(ReplicationEvent::Paused).await;
                             } else {
                                 caught_up = true;
@@ -837,6 +856,9 @@ pub fn replicate_live(
                 // notifications, or its id checked every poll_interval without
                 // them) or cancellation.
                 if caught_up && notices.is_some() {
+                    if let Some(last_seq) = since.clone() {
+                        let _ = tx.send(ReplicationEvent::CaughtUp { last_seq }).await;
+                    }
                     let _ = tx.send(ReplicationEvent::Paused).await;
                 }
                 let mut deadline = tokio::time::Instant::now() + poll_interval;
@@ -2049,6 +2071,74 @@ mod tests {
         assert_eq!(target.info().await.unwrap().doc_count, 3);
     }
 
+    /// The event path counts CouchDB-style replies (failures only) the same
+    /// way: `Change` reports what was sent minus what failed. Ported from the
+    /// QuicklySystems copy (#591).
+    #[tokio::test]
+    async fn change_events_count_couchdb_style_replies() {
+        let source = MemoryAdapter::new("source");
+        let target = CouchLikeTarget {
+            inner: MemoryAdapter::new("target"),
+            reject: Some("x"),
+        };
+        for id in ["a", "x", "b"] {
+            put_doc(&source, id, serde_json::json!({})).await;
+        }
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let result = replicate_with_events(&source, &target, ReplicationOptions::default(), tx)
+            .await
+            .unwrap();
+        assert_eq!((result.docs_written, result.errors.len()), (2, 1));
+        let mut last_change = None;
+        while let Ok(event) = rx.try_recv() {
+            if let ReplicationEvent::Change {
+                docs_written,
+                doc_write_failures,
+                ..
+            } = event
+            {
+                last_change = Some((docs_written, doc_write_failures));
+            }
+        }
+        assert_eq!(last_change, Some((2, 1)));
+    }
+
+    /// `docs_denied` counts only the failures the target denied for good;
+    /// any other write error is a failure but not a denial.
+    #[tokio::test]
+    async fn change_events_separate_denied_from_other_write_failures() {
+        for (error, denied) in [("forbidden", 1), ("unauthorized", 1), ("conflict", 0)] {
+            let source = MemoryAdapter::new("source");
+            for id in ["a", "x", "b"] {
+                put_doc(&source, id, serde_json::json!({})).await;
+            }
+            let target = Faulty::new(
+                MemoryAdapter::new("target"),
+                Faults {
+                    write_error: Some(("x".into(), error.into())),
+                    ..Default::default()
+                },
+            );
+            let (tx, mut rx) = mpsc::channel(16);
+            replicate_with_events(&source, &target, ReplicationOptions::default(), tx)
+                .await
+                .unwrap();
+            let mut last_change = None;
+            while let Ok(event) = rx.try_recv() {
+                if let ReplicationEvent::Change {
+                    doc_write_failures,
+                    docs_denied,
+                    ..
+                } = event
+                {
+                    last_change = Some((doc_write_failures, docs_denied));
+                }
+            }
+            assert_eq!(last_change, Some((1, denied)), "{error}");
+        }
+    }
+
     #[tokio::test]
     async fn docs_written_excludes_docs_couchdb_rejected_in_a_batch() {
         let source = MemoryAdapter::new("source");
@@ -2673,6 +2763,44 @@ mod tests {
         handle.cancel();
     }
 
+    /// `CaughtUp` carries the sequence the pass processed, not the source's
+    /// current one: a write landing right after the pass read an empty feed
+    /// is announced as `Paused` too, yet it is still to be replicated.
+    #[tokio::test(start_paused = true)]
+    async fn caught_up_reports_the_processed_seq_not_the_source_seq() {
+        let source = Arc::new(WritesDuringFirstPass {
+            inner: MemoryAdapter::new("source"),
+            written: std::sync::atomic::AtomicBool::new(false),
+        });
+        let target = Arc::new(MemoryAdapter::new("target"));
+        let (mut rx, handle) = replicate_live(
+            source.clone(),
+            target.clone(),
+            ReplicationOptions {
+                live: true,
+                poll_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+        );
+        let mut caught_up = Vec::new();
+        while caught_up.len() < 2 {
+            match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                Ok(Some(ReplicationEvent::CaughtUp { last_seq, .. })) => {
+                    caught_up.push(last_seq.as_num());
+                    if caught_up.len() == 1 {
+                        // The late write is already on the source.
+                        assert_eq!(source.info().await.unwrap().update_seq.as_num(), 1);
+                    }
+                }
+                Ok(Some(_)) => {}
+                other => panic!("no CaughtUp: {other:?}"),
+            }
+        }
+        assert_eq!(caught_up, [0, 1]);
+        assert!(target.get("late", GetOptions::default()).await.is_ok());
+        handle.cancel();
+    }
+
     /// F96: a local source announces its changes, so live replication
     /// replicates them without waiting for a poll (on a paused clock a poll
     /// would take an hour, and `wait_for` gives up after 5 s), and a change
@@ -2773,6 +2901,39 @@ mod tests {
         // ...but the progress is kept, so the next run does not rescan.
         let r2 = replicate(&b, &a, opts()).await.unwrap();
         assert_eq!(r2.docs_read, 0);
+    }
+
+    /// A target that already got every doc some other way (here a run with
+    /// `checkpoint: false`) makes the next run write nothing; its progress
+    /// is still checkpointed, so a live replication does not re-compare the
+    /// whole feed on every pass. Ported from the QuicklySystems copy (#589).
+    #[tokio::test]
+    async fn checkpoint_saved_when_target_already_has_everything() {
+        let source = MemoryAdapter::new("source");
+        let target = MemoryAdapter::new("target");
+        for i in 1..=4 {
+            put_doc(&source, &format!("doc{i}"), serde_json::json!({ "v": i })).await;
+        }
+        let unsaved = ReplicationOptions {
+            checkpoint: false,
+            ..Default::default()
+        };
+        replicate(&source, &target, unsaved).await.unwrap();
+        let checkpointer = new_checkpointer(&source, &target, &None).await.unwrap();
+        let stored = || checkpointer.read_checkpoint(&source, &target);
+        assert_eq!(stored().await.unwrap(), Seq::default());
+
+        let first = replicate(&source, &target, ReplicationOptions::default())
+            .await
+            .unwrap();
+        assert_eq!((first.docs_read, first.docs_written), (4, 0));
+        assert_eq!(stored().await.unwrap(), Seq::Num(4));
+
+        let (tx, _rx) = mpsc::channel(16);
+        let second = replicate_with_events(&source, &target, ReplicationOptions::default(), tx)
+            .await
+            .unwrap();
+        assert_eq!(second.docs_read, 0, "the same changes are not re-read");
     }
 
     #[tokio::test]
