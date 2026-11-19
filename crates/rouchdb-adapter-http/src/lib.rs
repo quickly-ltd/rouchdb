@@ -293,6 +293,13 @@ impl HttpAdapter {
 
     /// Create a new HTTP adapter with a custom reqwest client. The client's
     /// own timeouts apply (reqwest has none by default).
+    ///
+    /// The adapter does not know the client's read timeout, so
+    /// [`wait_for_changes`](Adapter::wait_for_changes) keeps a request open
+    /// for the whole timeout it is given (25 s for live replication). With a
+    /// shorter read timeout that wait fails, and live replication falls back
+    /// to polling every `poll_interval`; use [`HttpAdapter::with_options`]
+    /// to have the wait cut to half the read timeout.
     pub fn with_client(url: &str, client: Client) -> Self {
         let base_url = url.trim_end_matches('/').to_string();
         Self {
@@ -781,7 +788,8 @@ impl Adapter for HttpAdapter {
 
     /// `_changes?feed=longpoll&limit=1`: the server answers as soon as there
     /// is a change after `since`, or with no result after `timeout` (cut to
-    /// half the read timeout, so a silent wait never trips it).
+    /// half the read timeout when it is known, so a silent wait never trips
+    /// it; not for [`HttpAdapter::with_client`]).
     async fn wait_for_changes(&self, since: Seq, timeout: Duration) -> Result<ChangeWait> {
         self.ensure_setup().await?;
         let timeout = self.max_wait.map_or(timeout, |max| timeout.min(max));
