@@ -12,9 +12,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
 use rouchdb::CompiledSelector;
-use rouchdb_core::document::{
-    ChangeEvent, ChangesOptions, ChangesResponse, ChangesStyle, GetOptions, Seq,
-};
+use rouchdb_core::document::{ChangeEvent, ChangesOptions, ChangesResponse, ChangesStyle, Seq};
 use rouchdb_core::error::RouchError;
 
 use crate::error::AppError;
@@ -306,49 +304,33 @@ async fn indexed_selector_changes(
         let inner = index.refreshed(&state.db).await?;
         (inner.upto(), index.candidates(&inner, since, selector))
     };
-    let all_leaves = opts.style == ChangesStyle::AllDocs;
     let mut results = Vec::new();
-    for (seq, change) in candidates {
-        // Body gone (compacted or removed since the index read): it cannot
-        // match, and its successor has a later seq.
-        let Ok(doc) = state
+    for (seq, _) in candidates {
+        // The candidate's change as the feed itself reports it (same body,
+        // `changes` list and `_conflicts` as a full scan); a later write moved
+        // the document to a newer seq, which a later request will see.
+        let page = state
             .db
             .adapter()
-            .get(
-                &change.id,
-                GetOptions {
-                    rev: Some(change.rev.clone()),
-                    conflicts: opts.conflicts || all_leaves,
-                    ..Default::default()
-                },
-            )
-            .await
-        else {
+            .changes(ChangesOptions {
+                since: Seq::Num(seq - 1),
+                limit: Some(1),
+                include_docs: true,
+                conflicts: opts.conflicts,
+                style: opts.style.clone(),
+                ..Default::default()
+            })
+            .await?;
+        let Some(mut event) = page.results.into_iter().next() else {
             continue;
         };
-        let mut body = doc.to_json();
-        let conflicts: Vec<String> = body
-            .as_object_mut()
-            .and_then(|map| map.remove("_conflicts"))
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default();
-        if !compiled.matches(&body) {
+        if event.seq.as_num() != seq || !event.doc.as_ref().is_some_and(|d| compiled.matches(d)) {
             continue;
         }
-        let mut revs = vec![change.rev.clone()];
-        if all_leaves {
-            revs.extend(conflicts.iter().cloned());
+        if !opts.include_docs {
+            event.doc = None;
         }
-        let has_conflicts = opts.conflicts && !conflicts.is_empty();
-        if has_conflicts && let Some(map) = body.as_object_mut() {
-            map.insert("_conflicts".into(), serde_json::json!(conflicts));
-        }
-        results.push(
-            ChangeEvent::new(seq, change.id, revs)
-                .with_deleted(change.deleted)
-                .with_doc(opts.include_docs.then_some(body))
-                .with_conflicts(has_conflicts.then_some(conflicts)),
-        );
+        results.push(event);
         if opts
             .limit
             .is_some_and(|limit| results.len() as u64 >= limit)

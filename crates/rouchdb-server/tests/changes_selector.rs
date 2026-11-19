@@ -310,3 +310,77 @@ async fn descending_and_doc_ids_feeds_are_unchanged() {
         assert_eq!(ids(&body).len(), 22);
     }
 }
+
+/// Documents with conflicts, a deleted conflict branch, attachments and a
+/// tombstone, written through the HTTP API so both variants hold the same
+/// revisions.
+async fn tricky(fields: &[&str]) -> Router {
+    let (db, app) = mixed(fields).await;
+    let resp = post(
+        &app,
+        "/db/_bulk_docs",
+        json!({"new_edits": false, "docs": [
+            {"_id": "c", "_rev": "1-aaa", "kind": "products", "name": "Base"},
+            {"_id": "c", "_revisions": {"start": 2, "ids": ["bbb", "aaa"]},
+             "kind": "products", "name": "B"},
+            {"_id": "c", "_revisions": {"start": 2, "ids": ["ccc", "aaa"]},
+             "kind": "products", "name": "C"},
+            {"_id": "c", "_revisions": {"start": 2, "ids": ["ddd", "aaa"]},
+             "_deleted": true},
+        ]}),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::CREATED);
+    let rev = db
+        .put("a", json!({"kind": "products", "v": 1}))
+        .await
+        .unwrap()
+        .rev
+        .unwrap();
+    db.put_attachment("a", "note.txt", &rev, b"hello".to_vec(), "text/plain")
+        .await
+        .unwrap();
+    let rev = db
+        .put("gone", json!({"kind": "products"}))
+        .await
+        .unwrap()
+        .rev
+        .unwrap();
+    db.remove("gone", &rev).await.unwrap();
+    app
+}
+
+/// The projection is an optimization only: every combination of `style`,
+/// `include_docs` and `conflicts`, and selectors on `_attachments` or
+/// `_deleted`, answer byte for byte what the full scan answers.
+#[tokio::test]
+async fn projection_answers_exactly_like_the_full_scan() {
+    let selectors = [
+        json!({"kind": "products"}),
+        json!({"_attachments": {"$exists": true}}),
+        json!({"_attachments": {"$exists": false}, "kind": "products"}),
+        json!({"_deleted": true}),
+        json!({"kind": {"$exists": false}}),
+        json!({"name": {"$in": ["B", "C"]}}),
+    ];
+    let queries = [
+        "",
+        "&include_docs=true",
+        "&style=all_docs",
+        "&style=all_docs&include_docs=true&conflicts=true",
+        "&conflicts=true",
+        "&limit=1",
+        "&limit=2&style=all_docs&include_docs=true",
+    ];
+    let plain = tricky(VARIANTS[0]).await;
+    let projected = tricky(VARIANTS[1]).await;
+    for selector in &selectors {
+        for query in queries {
+            let uri = format!("/db/_changes?filter=_selector{query}");
+            let body = json!({"selector": selector});
+            let expected = post(&plain, &uri, body.clone()).await.json();
+            let actual = post(&projected, &uri, body).await.json();
+            assert_eq!(actual, expected, "{uri} {selector}");
+        }
+    }
+}
