@@ -1290,6 +1290,50 @@ mod tests {
         }
     }
 
+    /// QuicklySystems 15c7060f: with checkpoints off, a live replication
+    /// must still report Paused once the target has everything, whether the
+    /// source announces its changes or is polled; a first-sync gate waiting
+    /// for it would otherwise wait forever.
+    #[tokio::test]
+    async fn live_replication_pauses_after_writing_without_checkpoints() {
+        for announcing in [true, false] {
+            let memory = MemoryAdapter::new("source");
+            put_doc(&memory, "doc1", serde_json::json!({"v": 1})).await;
+            let source: Arc<dyn Adapter> = if announcing {
+                Arc::new(memory)
+            } else {
+                Arc::new(Quiet(memory))
+            };
+            let target: Arc<dyn Adapter> = Arc::new(MemoryAdapter::new("target"));
+            let (mut rx, handle) = replicate_live(
+                source,
+                target,
+                ReplicationOptions {
+                    live: true,
+                    checkpoint: false,
+                    poll_interval: Duration::from_millis(20),
+                    ..Default::default()
+                },
+            );
+            let paused_after_write = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut written = false;
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        ReplicationEvent::Change { docs_written, .. } if docs_written > 0 => {
+                            written = true
+                        }
+                        ReplicationEvent::Paused if written => return true,
+                        _ => {}
+                    }
+                }
+                false
+            })
+            .await;
+            handle.cancel();
+            assert_eq!(paused_after_write, Ok(true), "announcing: {announcing}");
+        }
+    }
+
     #[tokio::test]
     async fn idle_wait_without_longpoll_waits_the_poll_interval() {
         // A source that cannot wait for its changes (or answers at once) is
