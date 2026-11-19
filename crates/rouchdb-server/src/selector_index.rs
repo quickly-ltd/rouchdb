@@ -16,14 +16,20 @@
 //! indexed sequence. It starts over when the database's identity
 //! ([`Adapter::id`](rouchdb_core::adapter::Adapter::id)) changes, i.e. after
 //! the database was destroyed, whose sequences restart from zero.
+//!
+//! The changes feed is read outside the index lock, which is held only to
+//! apply a page or to collect candidates. One refresh runs at a time; while
+//! the first build of a database runs, a request does not wait for it and is
+//! answered by a full scan instead.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::RwLock;
 
 use rouchdb::{Database, matches_selector};
-use rouchdb_core::document::ChangesOptions;
+use rouchdb_core::document::{ChangeEvent, ChangesOptions};
 use rouchdb_core::error::Result;
 use serde_json::{Map, Value};
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::Mutex;
 
 const REFRESH_CHUNK: u64 = 10_000;
 
@@ -36,25 +42,22 @@ pub struct IndexedChange {
 }
 
 #[derive(Default)]
-pub struct Inner {
+struct Inner {
     /// Identity of the database the entries belong to.
     db_id: Option<String>,
+    /// Whether a refresh of this database completed at least once.
+    built: bool,
     upto: u64,
     by_seq: BTreeMap<u64, IndexedChange>,
     seq_of: HashMap<String, u64>,
 }
 
-impl Inner {
-    /// Last indexed sequence.
-    pub fn upto(&self) -> u64 {
-        self.upto
-    }
-}
-
 pub struct SelectorIndex {
     /// Projected top-level fields; `_deleted` is always projected.
     fields: Vec<String>,
-    inner: Mutex<Inner>,
+    inner: RwLock<Inner>,
+    /// Held by the one refresh reading the changes feed.
+    refresh: Mutex<()>,
 }
 
 impl SelectorIndex {
@@ -67,95 +70,131 @@ impl SelectorIndex {
         }
         Self {
             fields,
-            inner: Mutex::new(Inner::default()),
+            inner: RwLock::new(Inner::default()),
+            refresh: Mutex::new(()),
         }
     }
 
-    /// Changes after `since` whose projection may match `selector`, in seq
-    /// order.
-    pub fn candidates(
-        &self,
-        inner: &Inner,
-        since: u64,
-        selector: &Value,
-    ) -> Vec<(u64, IndexedChange)> {
-        inner
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Inner> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Inner> {
+        self.inner.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The last indexed sequence and the changes after `since` whose
+    /// projection may match `selector`, in seq order.
+    pub fn candidates(&self, since: u64, selector: &Value) -> (u64, Vec<(u64, IndexedChange)>) {
+        let inner = self.read();
+        let found = inner
             .by_seq
             .range(since.saturating_add(1)..)
             .filter(|(_, change)| self.eval(change, selector) != Tri::False)
             .map(|(seq, change)| (*seq, change.clone()))
-            .collect()
+            .collect();
+        (inner.upto, found)
     }
 
-    /// Brings the index up to the database's current changes and returns it
-    /// locked.
-    pub async fn refreshed(&self, db: &Database) -> Result<MutexGuard<'_, Inner>> {
-        let mut inner = self.inner.lock().await;
+    /// Brings the index up to the database's current changes. `Ok(false)`
+    /// when it cannot be used right now: the first build runs in another
+    /// task (waiting for it would cost as much as a full scan), or the
+    /// database was reset during the refresh.
+    pub async fn refresh(&self, db: &Database) -> Result<bool> {
         let db_id = db.adapter().id().await?;
-        if inner.db_id.as_deref() != Some(db_id.as_str()) {
-            *inner = Inner {
-                db_id: Some(db_id),
-                ..Default::default()
-            };
-        }
+        let built = {
+            let inner = self.read();
+            inner.built && inner.db_id.as_deref() == Some(db_id.as_str())
+        };
+        let _refreshing = if built {
+            self.refresh.lock().await
+        } else {
+            match self.refresh.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => return Ok(false),
+            }
+        };
+        let mut upto = {
+            let mut inner = self.write();
+            if inner.db_id.as_deref() != Some(db_id.as_str()) {
+                *inner = Inner {
+                    db_id: Some(db_id.clone()),
+                    ..Default::default()
+                };
+            }
+            inner.upto
+        };
         loop {
             let page = db
                 .adapter()
                 .changes(ChangesOptions {
-                    since: inner.upto.into(),
+                    since: upto.into(),
                     limit: Some(REFRESH_CHUNK),
                     include_docs: true,
                     ..Default::default()
                 })
                 .await?;
             let scanned = page.results.len() as u64;
-            for event in page.results {
-                let seq = event.seq.as_num();
-                if let Some(old) = inner.seq_of.insert(event.id.clone(), seq) {
+            let entries: Vec<(u64, IndexedChange)> =
+                page.results.into_iter().map(|e| self.project(e)).collect();
+            let mut inner = self.write();
+            // Reset (or destroyed and reused) while the page was read.
+            if inner.db_id.as_deref() != Some(db_id.as_str()) || inner.upto != upto {
+                return Ok(false);
+            }
+            for (seq, change) in entries {
+                if let Some(old) = inner.seq_of.insert(change.id.clone(), seq) {
                     inner.by_seq.remove(&old);
                 }
-                let mut fields = Map::new();
-                if let Some(Value::Object(doc)) = &event.doc {
-                    for key in &self.fields {
-                        if let Some(value) = doc.get(key) {
-                            fields.insert(key.clone(), value.clone());
-                        }
-                    }
-                }
-                if event.deleted {
-                    fields.insert("_deleted".into(), Value::Bool(true));
-                }
-                let rev = event
-                    .changes
-                    .first()
-                    .map(|c| c.rev.clone())
-                    .unwrap_or_default();
-                inner.by_seq.insert(
-                    seq,
-                    IndexedChange {
-                        id: event.id,
-                        rev,
-                        deleted: event.deleted,
-                        fields,
-                    },
-                );
+                inner.by_seq.insert(seq, change);
                 inner.upto = inner.upto.max(seq);
             }
+            upto = inner.upto;
             if scanned < REFRESH_CHUNK {
-                return Ok(inner);
+                inner.built = true;
+                return Ok(true);
             }
         }
     }
 
+    fn project(&self, event: ChangeEvent) -> (u64, IndexedChange) {
+        let mut fields = Map::new();
+        if let Some(Value::Object(doc)) = &event.doc {
+            for key in &self.fields {
+                if let Some(value) = doc.get(key) {
+                    fields.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        if event.deleted {
+            fields.insert("_deleted".into(), Value::Bool(true));
+        }
+        let rev = event
+            .changes
+            .first()
+            .map(|c| c.rev.clone())
+            .unwrap_or_default();
+        (
+            event.seq.as_num(),
+            IndexedChange {
+                id: event.id,
+                rev,
+                deleted: event.deleted,
+                fields,
+            },
+        )
+    }
+
     /// Forgets every indexed change (e.g. right after the database was
     /// destroyed; a changed identity is also detected on the next refresh).
+    /// A refresh running meanwhile discards what it read.
     pub async fn reset(&self) {
-        *self.inner.lock().await = Inner::default();
+        *self.write() = Inner::default();
     }
 
     /// Builds the index ahead of the first filtered request.
     pub async fn warm(&self, db: &Database) {
-        let _ = self.refreshed(db).await;
+        let _ = self.refresh(db).await;
     }
 
     /// Three-valued Mango evaluation over the projection: `False` only when
@@ -359,16 +398,49 @@ mod tests {
         }
         db.put("p", json!({"kind": "products"})).await.unwrap();
         let index = SelectorIndex::new(["kind"]);
-        let inner = index.refreshed(&db).await.unwrap();
-        assert_eq!(inner.upto(), 6);
-        let found = index.candidates(&inner, 0, &json!({"kind": "products"}));
+        assert!(index.refresh(&db).await.unwrap());
+        let (upto, found) = index.candidates(0, &json!({"kind": "products"}));
+        assert_eq!(upto, 6);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].1.id, "p");
         assert!(
             index
-                .candidates(&inner, 6, &json!({"kind": "products"}))
+                .candidates(6, &json!({"kind": "products"}))
+                .1
                 .is_empty()
         );
-        assert_eq!(index.candidates(&inner, 0, &json!({"name": "x"})).len(), 6);
+        assert_eq!(index.candidates(0, &json!({"name": "x"})).1.len(), 6);
+    }
+
+    /// A request arriving while the first build runs elsewhere is not held
+    /// up by it (it falls back to a full scan); once built, a refresh only
+    /// waits for another incremental refresh.
+    #[tokio::test]
+    async fn request_does_not_wait_for_a_running_first_build() {
+        let db = Database::memory("db");
+        db.put("p", json!({"kind": "products"})).await.unwrap();
+        let index = SelectorIndex::new(["kind"]);
+        let building = index.refresh.lock().await; // a build reading the feed
+        let answer =
+            tokio::time::timeout(std::time::Duration::from_millis(200), index.refresh(&db)).await;
+        assert!(!answer.expect("not held up by the build").unwrap());
+        drop(building);
+        assert!(index.refresh(&db).await.unwrap());
+        assert_eq!(index.candidates(0, &json!({"kind": "products"})).1.len(), 1);
+    }
+
+    /// A reset forgets the database's entries; the next refresh rebuilds.
+    #[tokio::test]
+    async fn reset_forgets_and_the_next_refresh_rebuilds() {
+        let db = Database::memory("db");
+        db.put("p", json!({"kind": "products"})).await.unwrap();
+        let index = SelectorIndex::new(["kind"]);
+        assert!(index.refresh(&db).await.unwrap());
+        index.reset().await;
+        let (upto, found) = index.candidates(0, &json!({"name": "x"}));
+        assert_eq!(upto, 0);
+        assert!(found.is_empty());
+        assert!(index.refresh(&db).await.unwrap());
+        assert_eq!(index.candidates(0, &json!({"name": "x"})).1.len(), 1);
     }
 }

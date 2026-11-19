@@ -265,8 +265,10 @@ async fn fetch(
         opts.descending,
         &opts.doc_ids,
     ) && !design_only
+        && let Some(response) =
+            indexed_selector_changes(state, index, opts, selector, *since).await?
     {
-        return indexed_selector_changes(state, index, opts, selector, *since).await;
+        return Ok(response);
     }
     if !design_only {
         return state.db.changes(opts.clone()).await;
@@ -291,19 +293,21 @@ async fn fetch(
 /// [`Database::changes`](rouchdb::Database::changes) with the selector.
 /// `limit` counts matching changes; `last_seq` is the seq of the last
 /// returned change when the limit cut the result, otherwise the last indexed
-/// seq (so an empty result never rescans the same range).
+/// seq (so an empty result never rescans the same range). `None` when the
+/// projection cannot be used right now (its first build runs elsewhere): the
+/// caller scans in full.
 async fn indexed_selector_changes(
     state: &AppState,
     index: &SelectorIndex,
     opts: &ChangesOptions,
     selector: &serde_json::Value,
     since: u64,
-) -> Result<ChangesResponse, RouchError> {
+) -> Result<Option<ChangesResponse>, RouchError> {
     let compiled = CompiledSelector::new(selector)?;
-    let (upto, candidates) = {
-        let inner = index.refreshed(&state.db).await?;
-        (inner.upto(), index.candidates(&inner, since, selector))
-    };
+    if !index.refresh(&state.db).await? {
+        return Ok(None);
+    }
+    let (upto, candidates) = index.candidates(since, selector);
     let mut results = Vec::new();
     for (seq, _) in candidates {
         // The candidate's change as the feed itself reports it (same body,
@@ -335,10 +339,10 @@ async fn indexed_selector_changes(
             .limit
             .is_some_and(|limit| results.len() as u64 >= limit)
         {
-            return Ok(ChangesResponse::new(results, seq));
+            return Ok(Some(ChangesResponse::new(results, seq)));
         }
     }
-    Ok(ChangesResponse::new(results, upto.max(since)))
+    Ok(Some(ChangesResponse::new(results, upto.max(since))))
 }
 
 fn normal_body(results: &[ChangeEvent], last_seq: &Seq, pending: u64) -> serde_json::Value {
