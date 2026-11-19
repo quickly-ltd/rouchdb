@@ -244,13 +244,11 @@ pub async fn put_doc(
     let body_rev = body.get("_rev").and_then(|v| v.as_str()).map(String::from);
     let rev = resolve_rev(query.rev, body_rev, &headers)?;
 
-    if is_deleted {
-        if rev.is_none() {
-            return Err(AppError(RouchError::BadRequest(
-                "Missing _rev for delete".to_string(),
-            )));
-        }
-        // CouchDB answers 409 when the document is already deleted.
+    // CouchDB answers 409 when a revision of an already deleted document is
+    // deleted again. Without a revision, `put` creates a tombstone for a new
+    // id and is a conflict for an existing (live or deleted) one, as in
+    // CouchDB.
+    if is_deleted && rev.is_some() {
         match writer.get(&docid).await {
             Err(RouchError::NotFound(_)) => return Err(AppError(RouchError::Conflict)),
             other => {
@@ -289,8 +287,14 @@ pub async fn put_doc(
     }
 
     let etag = result.rev.as_deref().and_then(etag_header);
+    // A deletion is 200 OK in CouchDB, like `DELETE`; other writes are 201.
+    let status = if is_deleted {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
     let mut resp = (
-        StatusCode::CREATED,
+        status,
         Json(serde_json::json!({
             "ok": result.ok,
             "id": result.id,

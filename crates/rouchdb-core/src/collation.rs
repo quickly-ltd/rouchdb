@@ -116,7 +116,7 @@ fn utf16_units(c: char) -> (u16, u16) {
     }
 }
 
-/// Compare two JSON numbers exactly.
+/// Compare two JSON numbers like CouchDB.
 ///
 /// `serde_json::Number` can hold `u64`, `i64`, or `f64`. Converting straight
 /// to `f64` (as a naive implementation does) collapses integers larger than
@@ -125,23 +125,56 @@ fn utf16_units(c: char) -> (u16, u16) {
 /// integer and a float are compared exactly, and `-0.0` equals `0`.
 ///
 /// With serde_json's `arbitrary_precision` (the `rouchdb/arbitrary-precision`
-/// feature) a number that is not an `i64`/`u64` keeps the text it was
-/// written with, which `f64` would round: such numbers are compared by their
-/// exact decimal value instead (`18446744073709551616 < 18446744073709551617`,
-/// `1.0 == 1.00`).
+/// feature) a number keeps the text it was written with. CouchDB keeps an
+/// integer written without `.` or an exponent exactly and reads every other
+/// number as the nearest double; so does this comparison:
+/// `18446744073709551616 < 18446744073709551617`, while `1.8446744073709552e19`
+/// equals `18446744073709551616` and `0.1` equals
+/// `0.1000000000000000055511151231257827`.
 fn compare_numbers(a: &serde_json::Number, b: &serde_json::Number) -> Ordering {
-    match (as_i128(a), as_i128(b)) {
-        (Some(ia), Some(ib)) => ia.cmp(&ib),
-        _ if arbitrary_precision() => Decimal::of(a).cmp(&Decimal::of(b)),
-        (Some(ia), None) => compare_int_float(ia, b.as_f64().unwrap_or(0.0)),
-        (None, Some(ib)) => compare_int_float(ib, a.as_f64().unwrap_or(0.0)).reverse(),
-        (None, None) => {
-            let fa = a.as_f64().unwrap_or(0.0);
-            let fb = b.as_f64().unwrap_or(0.0);
-            // JSON numbers are finite, so only -0.0 vs 0.0 needs care, and
-            // partial_cmp treats them as equal.
-            fa.partial_cmp(&fb).unwrap_or(Ordering::Equal)
+    match (Num::of(a), Num::of(b)) {
+        (Num::Int(ia), Num::Int(ib)) => ia.cmp(&ib),
+        (Num::Int(i), Num::Big(d)) => Decimal::integer(&i.to_string()).cmp(&d),
+        (Num::Big(d), Num::Int(i)) => d.cmp(&Decimal::integer(&i.to_string())),
+        (Num::Big(da), Num::Big(db)) => da.cmp(&db),
+        (Num::Int(i), Num::Float(f)) => compare_int_float(i, f),
+        (Num::Float(f), Num::Int(i)) => compare_int_float(i, f).reverse(),
+        (Num::Big(d), Num::Float(f)) => compare_big_float(&d, f),
+        (Num::Float(f), Num::Big(d)) => compare_big_float(&d, f).reverse(),
+        // JSON numbers are finite (only an `arbitrary_precision` literal
+        // beyond the `f64` range reads as an infinity), so only -0.0 vs 0.0
+        // needs care, and partial_cmp treats them as equal.
+        (Num::Float(fa), Num::Float(fb)) => fa.partial_cmp(&fb).unwrap_or(Ordering::Equal),
+    }
+}
+
+/// A JSON number as CouchDB compares it.
+enum Num {
+    Int(i128),
+    /// An integer beyond `i64`/`u64` kept as written (`arbitrary_precision`).
+    Big(Decimal),
+    Float(f64),
+}
+
+impl Num {
+    fn of(n: &serde_json::Number) -> Num {
+        if let Some(i) = as_i128(n) {
+            return Num::Int(i);
         }
+        if arbitrary_precision() {
+            let text = n.to_string();
+            if !text.contains(['.', 'e', 'E']) {
+                return Num::Big(Decimal::integer(&text));
+            }
+            // `as_f64` is `None` for a literal beyond the `f64` range.
+            let overflow = if text.starts_with('-') {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+            return Num::Float(n.as_f64().unwrap_or(overflow));
+        }
+        Num::Float(n.as_f64().unwrap_or(0.0))
     }
 }
 
@@ -155,9 +188,9 @@ fn arbitrary_precision() -> bool {
     })
 }
 
-/// The exact value of a JSON number: `0.d1d2d3... × 10^exponent`, with
+/// The exact value of an integer: `0.d1d2d3... × 10^exponent`, with
 /// `digits` free of leading and trailing zeros (empty for zero, whose sign
-/// is dropped so that `-0.0 == 0`).
+/// is dropped so that `-0 == 0`).
 #[derive(Debug, PartialEq, Eq)]
 struct Decimal {
     negative: bool,
@@ -166,41 +199,21 @@ struct Decimal {
 }
 
 impl Decimal {
-    /// Read the number's text (`-?int(.frac)?([eE][+-]?exp)?`, as serde_json
-    /// prints it). An exponent beyond `i64` saturates.
-    fn of(n: &serde_json::Number) -> Decimal {
-        let text = n.to_string();
-        let (negative, rest) = match text.strip_prefix('-') {
-            Some(r) => (true, r),
-            None => (false, text.as_str()),
+    /// Read an integer's text (`-?[0-9]+`).
+    fn integer(text: &str) -> Decimal {
+        let (negative, magnitude) = match text.strip_prefix('-') {
+            Some(m) => (true, m),
+            None => (false, text),
         };
-        let (mantissa, exp) = match rest.find(['e', 'E']) {
-            Some(i) => (&rest[..i], &rest[i + 1..]),
-            None => (rest, "0"),
-        };
-        let exp_negative = exp.starts_with('-');
-        let exp_digits = exp.trim_start_matches(['+', '-']);
-        let mut written: i128 = 0;
-        for d in exp_digits.bytes() {
-            written = (written * 10 + i128::from(d - b'0')).min(i128::from(i64::MAX));
-        }
-        if exp_negative {
-            written = -written;
-        }
-        let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-        let all: String = int.chars().chain(frac.chars()).collect();
-        let lead = all.len() - all.trim_start_matches('0').len();
-        let digits = all.trim_matches('0').to_string();
-        if digits.is_empty() {
-            return Decimal {
-                negative: false,
-                digits,
-                exponent: 0,
-            };
-        }
+        let magnitude = magnitude.trim_start_matches('0');
+        let digits = magnitude.trim_end_matches('0').to_string();
         Decimal {
-            negative,
-            exponent: int.len() as i128 - lead as i128 + written,
+            negative: negative && !digits.is_empty(),
+            exponent: if digits.is_empty() {
+                0
+            } else {
+                magnitude.len() as i128
+            },
             digits,
         }
     }
@@ -233,6 +246,24 @@ impl PartialOrd for Decimal {
     }
 }
 
+/// Compare an integer beyond `i64`/`u64` with a float exactly (like
+/// [`compare_int_float`]): an integral `f64` prints its exact value with
+/// `{:.0}`.
+fn compare_big_float(d: &Decimal, f: f64) -> Ordering {
+    if f.is_infinite() {
+        return if f > 0.0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+    let whole = f.trunc();
+    match d.cmp(&Decimal::integer(&format!("{whole:.0}"))) {
+        Ordering::Equal => whole.partial_cmp(&f).unwrap_or(Ordering::Equal),
+        other => other,
+    }
+}
+
 fn as_i128(n: &serde_json::Number) -> Option<i128> {
     if let Some(i) = n.as_i64() {
         Some(i as i128)
@@ -241,7 +272,6 @@ fn as_i128(n: &serde_json::Number) -> Option<i128> {
     }
 }
 
-/// Compare an integer with a finite float without rounding either.
 fn compare_int_float(i: i128, f: f64) -> Ordering {
     let whole = f.trunc();
     // Saturates beyond the i128 range, where the integer part alone decides.
@@ -348,26 +378,36 @@ fn encode_string(s: &str, out: &mut String) {
 /// floats use the shortest representation that round-trips, which orders
 /// like the float itself.
 fn encode_number(n: &serde_json::Number, out: &mut String) {
-    let (negative, significant, exp) = if let Some(i) = as_i128(n) {
-        let digits = i.unsigned_abs().to_string();
-        let exp = digits.len() as i128 - 1;
-        (i < 0, digits.trim_end_matches('0').to_string(), exp)
-    } else if arbitrary_precision() {
-        let d = Decimal::of(n);
-        (d.negative, d.digits, d.exponent - 1)
-    } else {
-        let f = n.as_f64().unwrap_or(0.0);
-        let digits = if f.fract() == 0.0 {
-            format!("{:.0}", f.abs())
-        } else {
-            format!("{:e}", f.abs())
-        };
-        // Split into significant digits and a decimal exponent (d.ddd × 10^exp).
-        let (mantissa, exp) = match digits.split_once('e') {
-            Some((m, e)) => (m.replace('.', ""), e.parse::<i128>().unwrap_or(0)),
-            None => (digits.clone(), digits.len() as i128 - 1),
-        };
-        (f < 0.0, mantissa.trim_end_matches('0').to_string(), exp)
+    let (negative, significant, exp) = match Num::of(n) {
+        Num::Int(i) => {
+            let digits = i.unsigned_abs().to_string();
+            let exp = digits.len() as i128 - 1;
+            (i < 0, digits.trim_end_matches('0').to_string(), exp)
+        }
+        Num::Big(d) => (d.negative, d.digits, d.exponent - 1),
+        // An `arbitrary_precision` literal beyond the `f64` range: above
+        // (below) every finite number, as in `collate`.
+        Num::Float(f) if f.is_infinite() => {
+            out.push_str(if f > 0.0 {
+                "2:9999999999999999999999999999999"
+            } else {
+                "0/0000000000000000000000000000000:"
+            });
+            return;
+        }
+        Num::Float(f) => {
+            let digits = if f.fract() == 0.0 {
+                format!("{:.0}", f.abs())
+            } else {
+                format!("{:e}", f.abs())
+            };
+            // Split into significant digits and a decimal exponent (d.ddd × 10^exp).
+            let (mantissa, exp) = match digits.split_once('e') {
+                Some((m, e)) => (m.replace('.', ""), e.parse::<i128>().unwrap_or(0)),
+                None => (digits.clone(), digits.len() as i128 - 1),
+            };
+            (f < 0.0, mantissa.trim_end_matches('0').to_string(), exp)
+        }
     };
     if significant.is_empty() {
         out.push('1');
@@ -387,9 +427,10 @@ fn encode_number(n: &serde_json::Number, out: &mut String) {
 }
 
 /// The biased exponent of `encode_number`: three digits for every `f64`
-/// (`000`..=`999`). Only `arbitrary_precision` numbers go beyond; they get
-/// a fixed-width form that sorts below (`/`) or above (`:`) all three-digit
-/// ones, so the encoding still sorts like `collate`.
+/// (`000`..=`999`). Only `arbitrary_precision` integers with more than about
+/// 500 digits go beyond; they get a fixed-width form that sorts below (`/`)
+/// or above (`:`) all three-digit ones, so the encoding still sorts like
+/// `collate`.
 fn push_exponent(biased: i128, out: &mut String) {
     const WIDE: i128 = 1 << 100;
     match biased {
@@ -706,62 +747,73 @@ mod tests {
         }
     }
 
-    fn number(text: &str) -> serde_json::Number {
-        serde_json::from_str(text).unwrap()
-    }
-
     #[test]
-    fn decimal_reads_the_exact_value() {
-        let d = |t: &str| Decimal::of(&number(t));
-        let digits = |t: &str| (d(t).negative, d(t).digits, d(t).exponent);
-        assert_eq!(digits("1.50"), (false, "15".into(), 1));
-        assert_eq!(digits("-0.0025"), (true, "25".into(), -2));
-        assert_eq!(digits("120"), (false, "12".into(), 3));
-        assert_eq!(digits("1.5e-7"), (false, "15".into(), -6));
-        assert_eq!(d("-0.0"), d("0"));
-        assert_eq!(d("1.0").cmp(&d("1")), Ordering::Equal);
-        assert_eq!(d("-2").cmp(&d("-1.5")), Ordering::Less);
-        assert_eq!(d("0.1").cmp(&d("-5")), Ordering::Greater);
+    fn decimal_reads_the_exact_integer() {
+        let d = Decimal::integer;
+        let parts = |t: &str| (d(t).negative, d(t).digits, d(t).exponent);
+        assert_eq!(parts("120"), (false, "12".into(), 3));
+        assert_eq!(parts("-0042"), (true, "42".into(), 2));
+        assert_eq!(d("-0"), d("0"));
+        assert_eq!(d("-2").cmp(&d("-1")), Ordering::Less);
+        assert_eq!(d("1").cmp(&d("-5")), Ordering::Greater);
+        assert_eq!(d("99").cmp(&d("100")), Ordering::Less);
+        assert_eq!(compare_big_float(&d("4"), 3.5), Ordering::Greater);
+        assert_eq!(compare_big_float(&d("-4"), -3.5), Ordering::Less);
+        assert_eq!(compare_big_float(&d("3"), 3.0), Ordering::Equal);
+        assert_eq!(compare_big_float(&d("3"), f64::INFINITY), Ordering::Less);
     }
 
     /// With `arbitrary_precision` (CI runs the suite with the
-    /// `rouchdb/arbitrary-precision` feature), numbers `f64` would merge
-    /// stay distinct, in `collate` and in the encoding, even with exponents
-    /// beyond the `f64` range.
+    /// `rouchdb/arbitrary-precision` feature), integers written without `.`
+    /// or an exponent stay exact and every other number is the nearest
+    /// `f64`, as in CouchDB, in `collate` and in the encoding. Each group
+    /// holds equal values, in ascending order.
     #[test]
-    fn arbitrary_precision_numbers_collate_exactly() {
+    fn arbitrary_precision_numbers_collate_like_couchdb() {
         if !arbitrary_precision() {
             return;
         }
-        let ordered = [
-            "-1e400",
-            "-18446744073709551617",
-            "-18446744073709551616",
-            "-1e-400",
-            "0",
-            "1e-400",
-            "3.141592653589793238462643383279",
-            "3.141592653589793238462643383280",
-            "18446744073709551615",
-            "18446744073709551616",
-            "18446744073709551617",
-            "1e400",
-            "1e401",
+        let big = |sign: &str, zeros: usize| format!("{sign}1{}", "0".repeat(zeros));
+        let groups: Vec<Vec<String>> = vec![
+            vec!["-1e400".into(), "-1e401".into()],
+            vec![big("-", 600)],
+            vec![big("-", 41)],
+            vec!["-18446744073709551617".into()],
+            vec![
+                "-18446744073709551616".into(),
+                "-1.8446744073709552e19".into(),
+            ],
+            vec!["0".into(), "-0".into(), "-1e-400".into(), "0.0".into()],
+            vec!["0.1".into(), "0.1000000000000000055511151231257827".into()],
+            vec!["1".into(), "1.00".into(), "1e0".into()],
+            vec![
+                "3.141592653589793238462643383279".into(),
+                "3.141592653589793238462643383280".into(),
+            ],
+            vec!["18446744073709551615".into()],
+            vec![
+                "18446744073709551616".into(),
+                "1.8446744073709552e19".into(),
+            ],
+            vec!["18446744073709551617".into()],
+            vec![big("", 600)],
+            vec!["1e400".into(), "1e401".into()],
         ];
-        let values: Vec<Value> = ordered.iter().map(|t| Value::Number(number(t))).collect();
-        for (i, a) in values.iter().enumerate() {
-            for (j, b) in values.iter().enumerate() {
-                assert_eq!(collate(a, b), i.cmp(&j), "{a} vs {b}");
+        let values: Vec<(usize, Value)> = groups
+            .iter()
+            .enumerate()
+            .flat_map(|(i, g)| g.iter().map(move |t| (i, serde_json::from_str(t).unwrap())))
+            .collect();
+        for (i, a) in &values {
+            for (j, b) in &values {
+                assert_eq!(collate(a, b), i.cmp(j), "{a} vs {b}");
                 assert_eq!(
                     to_indexable_string(a).cmp(&to_indexable_string(b)),
-                    i.cmp(&j),
+                    i.cmp(j),
                     "encoding of {a} vs {b}"
                 );
             }
         }
-        let one = Value::Number(number("1.00"));
-        assert_eq!(collate(&one, &json!(1)), Ordering::Equal);
-        assert_eq!(to_indexable_string(&one), to_indexable_string(&json!(1)));
     }
 
     mod properties {

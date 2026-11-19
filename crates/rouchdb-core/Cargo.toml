@@ -11,6 +11,13 @@ keywords.workspace = true
 categories.workspace = true
 readme.workspace = true
 
+[features]
+# serde_json's `arbitrary_precision`: numbers keep the text they were written
+# with. Collation reads the mode at run time, so it also follows a build that
+# turns `arbitrary_precision` on through another crate. `rouchdb` forwards its
+# own `arbitrary-precision` feature here.
+arbitrary-precision = ["serde_json/arbitrary_precision"]
+
 [dependencies]
 async-trait = "0.1.68"
 base64 = "0.22.1"

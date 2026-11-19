@@ -1142,8 +1142,18 @@ impl Database {
                 ),
                 None => return Ok(None),
             };
-            let identity = self.adapter.id().await?;
-            if identity != built_from {
+            let changes = self
+                .adapter
+                .changes(ChangesOptions {
+                    since: since.clone(),
+                    include_docs: true,
+                    ..Default::default()
+                })
+                .await?;
+            // Checked after reading the feed: `destroy()` always gives a new
+            // id, so an unchanged id means no reset happened before or while
+            // the feed was read.
+            if self.adapter.id().await? != built_from {
                 // The storage was reset (possibly through another handle):
                 // the index and its sequence describe the old database.
                 let rebuilt = MangoIndex::build(self.adapter.as_ref(), def).await?;
@@ -1155,18 +1165,6 @@ impl Database {
                     Some(_) => {}
                     None => return Ok(None),
                 }
-                continue;
-            }
-            let changes = self
-                .adapter
-                .changes(ChangesOptions {
-                    since: since.clone(),
-                    include_docs: true,
-                    ..Default::default()
-                })
-                .await?;
-            // Reset while the feed was read: `changes` may mix both databases.
-            if self.adapter.id().await? != identity {
                 continue;
             }
 
@@ -1181,8 +1179,9 @@ impl Database {
             let Some(index) = indexes.get_mut(name) else {
                 return Ok(None);
             };
-            // Another query applied changes meanwhile: catch up from there.
-            if index.last_seq != since {
+            // Another query applied changes (or rebuilt the index after a
+            // reset) meanwhile: catch up from there.
+            if index.last_seq != since || index.identity != built_from {
                 continue;
             }
             index.built.apply_changes(&changes.results);
