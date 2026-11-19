@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use reqwest::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 
-use rouchdb_core::adapter::Adapter;
+use rouchdb_core::adapter::{Adapter, ChangeWait};
 use rouchdb_core::document::*;
 use rouchdb_core::error::{Result, RouchError};
 use rouchdb_core::json::MAX_NESTING_DEPTH;
@@ -247,6 +247,9 @@ pub struct HttpAdapter {
     /// The id derived from the server's uuid, once known: it does not change
     /// while the server runs, and live replication asks for it every pass.
     id: tokio::sync::OnceCell<String>,
+    /// The longest `wait_for_changes` may keep a request silent: half the
+    /// client's read timeout, when it is known.
+    max_wait: Option<Duration>,
 }
 
 impl HttpAdapter {
@@ -265,6 +268,7 @@ impl HttpAdapter {
             .unwrap_or_default();
         let mut adapter = Self::with_client(url, client);
         adapter.skip_setup = opts.skip_setup;
+        adapter.max_wait = Some(opts.read_timeout / 2);
         adapter
     }
 
@@ -278,6 +282,7 @@ impl HttpAdapter {
             skip_setup: false,
             setup: Default::default(),
             id: Default::default(),
+            max_wait: None,
         }
     }
 
@@ -286,7 +291,9 @@ impl HttpAdapter {
     /// The `AuthClient` must have been logged in already; its internal
     /// reqwest client (with cookie store) will be shared with this adapter.
     pub fn with_auth_client(url: &str, auth: &auth::AuthClient) -> Self {
-        Self::with_client(url, auth.client().clone())
+        let mut adapter = Self::with_client(url, auth.client().clone());
+        adapter.max_wait = Some(DEFAULT_READ_TIMEOUT / 2);
+        adapter
     }
 
     /// Make sure the remote database exists, creating it when missing, as
@@ -751,6 +758,33 @@ impl Adapter for HttpAdapter {
                 .collect(),
             parse_seq(&result.last_seq),
         ))
+    }
+
+    /// `_changes?feed=longpoll&limit=1`: the server answers as soon as there
+    /// is a change after `since`, or with no result after `timeout` (cut to
+    /// half the read timeout, so a silent wait never trips it).
+    async fn wait_for_changes(&self, since: Seq, timeout: Duration) -> Result<ChangeWait> {
+        self.ensure_setup().await?;
+        let timeout = self.max_wait.map_or(timeout, |max| timeout.min(max));
+        let url = format!(
+            "{}?since={}&feed=longpoll&limit=1&timeout={}",
+            self.url("_changes"),
+            since.to_query_string(),
+            timeout.as_millis()
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| RouchError::DatabaseError(e.to_string()))?;
+        let resp = self.check_error(resp).await?;
+        let result: CouchDbChangesResponse = read_json(resp).await?;
+        Ok(if result.results.is_empty() {
+            ChangeWait::TimedOut
+        } else {
+            ChangeWait::Changed
+        })
     }
 
     async fn revs_diff(&self, revs: HashMap<String, Vec<String>>) -> Result<RevsDiffResponse> {
@@ -1446,6 +1480,73 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1, "{requests:?}");
         requests[0].clone()
+    }
+
+    #[tokio::test]
+    async fn wait_for_changes_uses_a_longpoll_feed() {
+        use rouchdb_core::adapter::ChangeWait;
+        use rouchdb_core::document::Seq;
+        let (url, requests) = scripted_server(vec![
+            ("200 OK", r#"{"results":[],"last_seq":"5-g1"}"#.into()),
+            (
+                "200 OK",
+                r#"{"results":[{"seq":"6-g1","id":"a","changes":[{"rev":"1-x"}]}],"last_seq":"6-g1"}"#
+                    .into(),
+            ),
+        ])
+        .await;
+        let adapter = adapter_at(&url);
+        let since = Seq::Str("5-g1".into());
+        let waited = adapter
+            .wait_for_changes(since.clone(), std::time::Duration::from_secs(25))
+            .await
+            .unwrap();
+        assert_eq!(waited, ChangeWait::TimedOut);
+        let waited = adapter
+            .wait_for_changes(since, std::time::Duration::from_secs(25))
+            .await
+            .unwrap();
+        assert_eq!(waited, ChangeWait::Changed);
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests[0].line(), "GET /db/_changes");
+        assert_eq!(
+            requests[0].query,
+            query(&[
+                ("since", "5-g1"),
+                ("feed", "longpoll"),
+                ("limit", "1"),
+                ("timeout", "25000"),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_changes_stays_within_the_read_timeout() {
+        let (url, requests) =
+            scripted_server(vec![("200 OK", r#"{"results":[],"last_seq":0}"#.into())]).await;
+        let adapter = HttpAdapter::with_options(
+            &format!("{url}/db"),
+            super::HttpAdapterOptions {
+                skip_setup: true,
+                read_timeout: std::time::Duration::from_secs(10),
+                ..Default::default()
+            },
+        );
+        adapter
+            .wait_for_changes(
+                rouchdb_core::document::Seq::Num(0),
+                std::time::Duration::from_secs(25),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            only_request(&requests)
+                .query
+                .get("timeout")
+                .map(String::as_str),
+            Some("5000")
+        );
     }
 
     #[tokio::test]

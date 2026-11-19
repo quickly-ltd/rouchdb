@@ -43,7 +43,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // Re-export core types
-pub use rouchdb_core::adapter::{Adapter, ChangeNotice};
+pub use rouchdb_core::adapter::{Adapter, ChangeNotice, ChangeWait};
 pub use rouchdb_core::document::*;
 pub use rouchdb_core::error::{Result, RouchError};
 pub use rouchdb_core::json::MAX_NESTING_DEPTH;
@@ -336,6 +336,14 @@ impl Adapter for PluginAdapter {
 
     fn subscribe(&self) -> Option<tokio::sync::broadcast::Receiver<ChangeNotice>> {
         self.inner.subscribe()
+    }
+
+    async fn wait_for_changes(
+        &self,
+        since: Seq,
+        timeout: std::time::Duration,
+    ) -> Result<rouchdb_core::adapter::ChangeWait> {
+        self.inner.wait_for_changes(since, timeout).await
     }
 
     async fn close(&self) -> Result<()> {

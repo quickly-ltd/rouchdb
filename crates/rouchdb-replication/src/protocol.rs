@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rouchdb_core::adapter::{Adapter, ChangeNotice};
+use rouchdb_core::adapter::{Adapter, ChangeNotice, ChangeWait};
 use rouchdb_core::document::*;
 use rouchdb_core::error::Result;
 use tokio::sync::{broadcast, mpsc};
@@ -76,7 +76,9 @@ pub struct ReplicationOptions {
     pub retry: bool,
     /// Polling interval for live replication (default: 500ms), used when
     /// the source cannot announce its changes ([`Adapter::subscribe`]
-    /// returns `None`, as for a remote CouchDB).
+    /// returns `None`, as for a remote CouchDB). A source with a longpoll
+    /// feed ([`Adapter::wait_for_changes`], like the HTTP adapter's) is
+    /// waited on instead, and still polled no more often than this.
     pub poll_interval: Duration,
     /// Backoff function for retry: takes attempt number, returns delay.
     pub back_off_function: Option<Box<dyn Fn(u32) -> Duration + Send + Sync>>,
@@ -321,6 +323,26 @@ struct RunOutcome {
     /// Set when the pass stopped at a batch it could not fully replicate
     /// (the checkpoint was not advanced past it), so it must be retried.
     failure: Option<String>,
+}
+
+/// The longest a live replication waits in one request for a change of a
+/// source that cannot announce its changes ([`Adapter::wait_for_changes`]).
+const LONGPOLL_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Wait for a change after `since` on a source that cannot announce its
+/// changes: in one `wait_for_changes` request (CouchDB's longpoll feed) if
+/// the source supports it, and never less than `poll_interval`, so a source
+/// that answers at once (no longpoll, an error) is not polled faster than
+/// without it.
+async fn idle_wait(source: &dyn Adapter, since: Option<Seq>, poll_interval: Duration) {
+    let started = tokio::time::Instant::now();
+    let waited = match since {
+        Some(since) => source.wait_for_changes(since, LONGPOLL_TIMEOUT).await,
+        None => Ok(ChangeWait::Unsupported),
+    };
+    if !matches!(waited, Ok(ChangeWait::Changed)) {
+        tokio::time::sleep_until(started + poll_interval).await;
+    }
 }
 
 /// Per-doc write errors that will never succeed on retry.
@@ -655,7 +677,8 @@ async fn run_replication(
 ///
 /// Performs an initial one-shot replication, then replicates again each
 /// time the source announces a change ([`Adapter::subscribe`]), or, for a
-/// source that cannot, every `poll_interval`. Runs until the returned
+/// source that cannot, when its longpoll feed reports one
+/// ([`Adapter::wait_for_changes`]) or every `poll_interval` without it. Runs until the returned
 /// `ReplicationHandle` is cancelled/dropped.
 ///
 /// Events are emitted through the returned channel receiver.
@@ -852,16 +875,23 @@ pub fn replicate_live(
                 }
 
                 // Wait for a change on the source (its notifications, or
-                // poll_interval without them), a reset of the target (its
+                // `idle_wait` without them), a reset of the target (its
                 // notifications, or its id checked every poll_interval without
-                // them) or cancellation.
-                if caught_up && notices.is_some() {
+                // them) or cancellation. The pass caught up: report it now,
+                // since the wait may be long (a longpoll feed does not answer
+                // before the next change).
+                if caught_up {
                     if let Some(last_seq) = since.clone() {
                         let _ = tx.send(ReplicationEvent::CaughtUp { last_seq }).await;
                     }
                     let _ = tx.send(ReplicationEvent::Paused).await;
                 }
                 let mut deadline = tokio::time::Instant::now() + poll_interval;
+                // Without notices, wait for the source's next change (see
+                // `idle_wait`); one wait spans the loop, so the target's
+                // notices do not restart it.
+                let idle = idle_wait(source.as_ref(), since.clone(), poll_interval);
+                tokio::pin!(idle);
                 loop {
                     tokio::select! {
                         notice = next_notice(&mut notices), if notices.is_some() => {
@@ -877,7 +907,7 @@ pub fn replicate_live(
                             }
                             break;
                         }
-                        _ = tokio::time::sleep_until(deadline), if notices.is_none() => break,
+                        _ = &mut idle, if notices.is_none() => break,
                         notice = next_notice(&mut target_notices), if target_notices.is_some() => {
                             match notice {
                                 Ok(notice) if notice.reset => {
@@ -1258,6 +1288,19 @@ mod tests {
         async fn destroy(&self) -> Result<()> {
             self.0.destroy().await
         }
+    }
+
+    #[tokio::test]
+    async fn idle_wait_without_longpoll_waits_the_poll_interval() {
+        // A source that cannot wait for its changes (or answers at once) is
+        // still polled no faster than poll_interval.
+        let source = Quiet(MemoryAdapter::new("s"));
+        let started = tokio::time::Instant::now();
+        idle_wait(&source, Some(Seq::Num(0)), Duration::from_millis(80)).await;
+        assert!(started.elapsed() >= Duration::from_millis(80));
+        let started = tokio::time::Instant::now();
+        idle_wait(&source, None, Duration::from_millis(80)).await;
+        assert!(started.elapsed() >= Duration::from_millis(80));
     }
 
     #[tokio::test]

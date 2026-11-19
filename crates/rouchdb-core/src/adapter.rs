@@ -48,6 +48,18 @@ impl ChangeNotice {
     }
 }
 
+/// What [`Adapter::wait_for_changes`] saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChangeWait {
+    /// There is at least one change after `since`.
+    Changed,
+    /// The timeout passed without a change.
+    TimedOut,
+    /// The adapter cannot wait for changes: poll its feed instead.
+    Unsupported,
+}
+
 /// The trait all storage adapters must implement.
 ///
 /// This mirrors PouchDB's internal adapter interface (underscore-prefixed
@@ -195,6 +207,21 @@ pub trait Adapter: Send + Sync {
     /// `poll_interval` instead.
     fn subscribe(&self) -> Option<tokio::sync::broadcast::Receiver<ChangeNotice>> {
         None
+    }
+
+    /// Wait until there is a change after `since`, or `timeout` passes:
+    /// CouchDB's `_changes?feed=longpoll`. For an adapter that cannot
+    /// [`subscribe`](Adapter::subscribe) to its changes, it lets a live
+    /// replication wait for the source's next change in one request instead
+    /// of polling its feed every `poll_interval`.
+    ///
+    /// The default is [`ChangeWait::Unsupported`]: the caller polls.
+    async fn wait_for_changes(
+        &self,
+        _since: Seq,
+        _timeout: std::time::Duration,
+    ) -> Result<ChangeWait> {
+        Ok(ChangeWait::Unsupported)
     }
 
     /// Close the database, releasing any held resources.
