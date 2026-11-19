@@ -65,6 +65,56 @@ pub struct SyncStatusSummary {
     /// memory for the life of the process only. Pull failures are local
     /// write errors and are not counted here.
     pub docs_denied: u64,
+    /// When a push last wrote at least one document to the far side (UTC,
+    /// ISO 8601 with milliseconds, as JavaScript's `toISOString()`); `None`
+    /// if nothing was pushed yet. Kept across replication restarts for the
+    /// life of the process.
+    pub last_push_at: Option<String>,
+    /// Local changes not yet pushed: the source's `update_seq` minus the
+    /// sequence it had when the push last caught up (`Paused`). Only
+    /// [`ActiveTasks::sync_status_with_pending`] fills it, and only once a
+    /// push has caught up at least once.
+    pub pending_changes: Option<u64>,
+}
+
+/// Push progress kept per target label for the life of the process, so it
+/// survives a replication restart.
+#[derive(Debug, Clone, Default)]
+struct PushProgress {
+    last_push_ms: Option<u64>,
+    /// The source's `update_seq` when the push last caught up (`Paused`).
+    caught_up_seq: Option<u64>,
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Epoch milliseconds as `YYYY-MM-DDTHH:MM:SS.mmmZ` (UTC), the format of
+/// JavaScript's `Date.prototype.toISOString()`.
+pub fn iso_utc_ms(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    // Howard Hinnant's civil_from_days (days since 1970-01-01).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60,
+        ms % 1000
+    )
 }
 
 fn now_unix() -> u64 {
@@ -88,6 +138,8 @@ pub struct ActiveTasks {
     /// `doc_write_failures` of push tasks that have ended, by target label,
     /// so [`SyncStatusSummary::docs_denied`] survives a replication restart.
     retired_denied: Arc<RwLock<HashMap<String, u64>>>,
+    /// Push progress by target label, kept after the task ends.
+    push_progress: Arc<RwLock<HashMap<String, PushProgress>>>,
 }
 
 impl ActiveTasks {
@@ -137,6 +189,8 @@ impl ActiveTasks {
                 push_failures: 0,
                 pull_failures: 0,
                 docs_denied: self.retired_denied_for(remote_label),
+                last_push_at: self.last_push_at_for(remote_label),
+                pending_changes: None,
             };
         }
 
@@ -179,7 +233,40 @@ impl ActiveTasks {
             push_failures,
             pull_failures,
             docs_denied: self.retired_denied_for(remote_label) + push_failures,
+            last_push_at: self.last_push_at_for(remote_label),
+            pending_changes: None,
         }
+    }
+
+    /// [`Self::sync_status_summary`] plus
+    /// [`SyncStatusSummary::pending_changes`], measured against `local`, the
+    /// source of the push to `remote_label`. `pending_changes` stays `None`
+    /// if that push never caught up or `local`'s info cannot be read.
+    pub async fn sync_status_with_pending(
+        &self,
+        remote_label: &str,
+        local: &Database,
+    ) -> SyncStatusSummary {
+        let mut summary = self.sync_status_summary(remote_label);
+        let caught_up = self
+            .push_progress
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(remote_label)
+            .and_then(|p| p.caught_up_seq);
+        if let (Some(caught_up), Ok(info)) = (caught_up, local.info().await) {
+            summary.pending_changes = Some(info.update_seq.as_num().saturating_sub(caught_up));
+        }
+        summary
+    }
+
+    fn last_push_at_for(&self, remote_label: &str) -> Option<String> {
+        self.push_progress
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(remote_label)
+            .and_then(|p| p.last_push_ms)
+            .map(iso_utc_ms)
     }
 
     fn retired_denied_for(&self, remote_label: &str) -> u64 {
@@ -237,46 +324,72 @@ impl ActiveTasks {
 
         let registry = self.inner.clone();
         let retired_denied = self.retired_denied.clone();
+        let push_progress = self.push_progress.clone();
+        let source_adapter = source.adapter_arc();
         tokio::spawn(async move {
             let mut previous = (0u64, 0u64, 0u64);
             while let Some(event) = rx.recv().await {
-                let mut tasks = registry.write().unwrap_or_else(|e| e.into_inner());
-                let Some(entry) = tasks.get_mut(&task_id) else {
-                    break;
+                let caught_up = matches!(event, ReplicationEvent::Paused);
+                // The registry lock is released before the `.await` below.
+                let target_label = {
+                    let mut tasks = registry.write().unwrap_or_else(|e| e.into_inner());
+                    let Some(entry) = tasks.get_mut(&task_id) else {
+                        break;
+                    };
+                    match event {
+                        ReplicationEvent::Change {
+                            docs_read,
+                            docs_written,
+                            doc_write_failures,
+                            ..
+                        } => {
+                            let written = docs_written.saturating_sub(previous.1);
+                            entry.docs_read += docs_read.saturating_sub(previous.0);
+                            entry.docs_written += written;
+                            entry.doc_write_failures +=
+                                doc_write_failures.saturating_sub(previous.2);
+                            previous = (docs_read, docs_written, doc_write_failures);
+                            entry.status = "syncing";
+                            entry.updated_on = now_unix();
+                            if written > 0 {
+                                push_progress
+                                    .write()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .entry(entry.target.clone())
+                                    .or_default()
+                                    .last_push_ms = Some(now_unix_ms());
+                            }
+                        }
+                        ReplicationEvent::Active => {
+                            previous = (0, 0, 0);
+                            entry.status = "syncing";
+                            entry.updated_on = now_unix();
+                        }
+                        ReplicationEvent::Paused => {
+                            entry.status = "idle";
+                            entry.last_error = None;
+                            entry.updated_on = now_unix();
+                        }
+                        ReplicationEvent::Error(message) => {
+                            entry.status = "error";
+                            entry.last_error = Some(message);
+                            entry.updated_on = now_unix();
+                        }
+                        // The entry is removed once, below, so its failures
+                        // are retired exactly once.
+                        ReplicationEvent::Complete(_) => break,
+                        _ => {}
+                    }
+                    entry.target.clone()
                 };
-                match event {
-                    ReplicationEvent::Change {
-                        docs_read,
-                        docs_written,
-                        doc_write_failures,
-                        ..
-                    } => {
-                        entry.docs_read += docs_read.saturating_sub(previous.0);
-                        entry.docs_written += docs_written.saturating_sub(previous.1);
-                        entry.doc_write_failures += doc_write_failures.saturating_sub(previous.2);
-                        previous = (docs_read, docs_written, doc_write_failures);
-                        entry.status = "syncing";
-                        entry.updated_on = now_unix();
-                    }
-                    ReplicationEvent::Active => {
-                        previous = (0, 0, 0);
-                        entry.status = "syncing";
-                        entry.updated_on = now_unix();
-                    }
-                    ReplicationEvent::Paused => {
-                        entry.status = "idle";
-                        entry.last_error = None;
-                        entry.updated_on = now_unix();
-                    }
-                    ReplicationEvent::Error(message) => {
-                        entry.status = "error";
-                        entry.last_error = Some(message);
-                        entry.updated_on = now_unix();
-                    }
-                    // The entry is removed once, below, so its failures
-                    // are retired exactly once.
-                    ReplicationEvent::Complete(_) => break,
-                    _ => {}
+                // Caught up: everything the source had is on the far side.
+                if caught_up && let Ok(info) = source_adapter.info().await {
+                    push_progress
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .entry(target_label)
+                        .or_default()
+                        .caught_up_seq = Some(info.update_seq.as_num());
                 }
             }
             let finished = registry
@@ -426,6 +539,8 @@ mod tests {
                 push_failures: 0,
                 pull_failures: 0,
                 docs_denied: 0,
+                last_push_at: None,
+                pending_changes: None,
             }
         );
     }
@@ -616,7 +731,75 @@ mod tests {
                 push_failures: 0,
                 pull_failures: 0,
                 docs_denied: 0,
+                last_push_at: None,
+                pending_changes: None,
             }
+        );
+    }
+
+    #[test]
+    fn iso_utc_ms_matches_javascript_to_iso_string() {
+        assert_eq!(iso_utc_ms(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(iso_utc_ms(1_791_763_200_123), "2026-10-12T00:00:00.123Z");
+        assert_eq!(iso_utc_ms(1_709_211_661_005), "2024-02-29T13:01:01.005Z");
+    }
+
+    /// A real replication reports the last push and the pending changes;
+    /// once it stops (far side unreachable) new local writes count as
+    /// pending and the last push time is kept.
+    #[tokio::test]
+    async fn sync_status_reports_last_push_and_pending_changes_from_real_replication() {
+        let local = Database::memory("alldata");
+        let remote = Database::memory("remote-db");
+        local.put("a", serde_json::json!({"v": 1})).await.unwrap();
+        local.put("b", serde_json::json!({"v": 2})).await.unwrap();
+
+        let active_tasks = ActiveTasks::new();
+        let before = active_tasks
+            .sync_status_with_pending("remote", &local)
+            .await;
+        assert_eq!(before.last_push_at, None);
+        assert_eq!(before.pending_changes, None, "unknown until caught up");
+
+        let handle =
+            active_tasks.start_live_replication(&local, &remote, "alldata", "remote", fast_opts());
+        let caught_up = timeout(Duration::from_secs(5), async {
+            loop {
+                let s = active_tasks
+                    .sync_status_with_pending("remote", &local)
+                    .await;
+                if s.state == "idle" && s.pending_changes == Some(0) && s.last_push_at.is_some() {
+                    break s;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the push should catch up");
+        assert_eq!(caught_up.docs_pushed, 2);
+        let json = serde_json::to_value(&caught_up).unwrap();
+        assert_eq!(json["pendingChanges"], 0);
+        assert!(json["lastPushAt"].as_str().unwrap().ends_with('Z'));
+
+        handle.cancel();
+        timeout(Duration::from_secs(5), async {
+            while !active_tasks.snapshot().is_empty() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the task should be removed");
+        for id in ["c", "d", "e"] {
+            local.put(id, serde_json::json!({"v": 3})).await.unwrap();
+        }
+        let offline = active_tasks
+            .sync_status_with_pending("remote", &local)
+            .await;
+        assert_eq!(offline.state, "offline");
+        assert_eq!(offline.pending_changes, Some(3));
+        assert_eq!(
+            offline.last_push_at, caught_up.last_push_at,
+            "the last push time is kept"
         );
     }
 }
