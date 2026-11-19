@@ -135,14 +135,40 @@ static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 /// [`crate::build_router_with_tasks`] (so `GET /_active_tasks` can read it) and keep
 /// another wherever replication is started, so both sides observe the same
 /// tasks.
+#[derive(Default)]
+struct Denied {
+    /// Running tasks: task id → (target label, count).
+    live: HashMap<u64, (String, u64)>,
+    /// Tasks that have ended, by target label, so
+    /// [`SyncStatusSummary::docs_denied`] survives a replication restart.
+    retired: HashMap<String, u64>,
+}
+
+impl Denied {
+    fn total_for(&self, remote_label: &str) -> u64 {
+        let live: u64 = self
+            .live
+            .values()
+            .filter(|(target, _)| target == remote_label)
+            .map(|(_, denied)| denied)
+            .sum();
+        live + self.retired.get(remote_label).copied().unwrap_or(0)
+    }
+
+    /// Moves an ended task's count to its target label.
+    fn retire(&mut self, task_id: u64) {
+        if let Some((target, denied)) = self.live.remove(&task_id) {
+            *self.retired.entry(target).or_insert(0) += denied;
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ActiveTasks {
     inner: Arc<RwLock<HashMap<u64, ActiveTaskInfo>>>,
-    /// Documents denied to running tasks: task id → (target label, count).
-    live_denied: Arc<RwLock<HashMap<u64, (String, u64)>>>,
-    /// Documents denied to tasks that have ended, by target label, so
-    /// [`SyncStatusSummary::docs_denied`] survives a replication restart.
-    retired_denied: Arc<RwLock<HashMap<String, u64>>>,
+    /// Denied documents, under one lock so a task's count moving from
+    /// `live` to `retired` is never seen half-way.
+    denied: Arc<RwLock<Denied>>,
     /// Push progress by target label, kept after the task ends.
     push_progress: Arc<RwLock<HashMap<String, PushProgress>>>,
 }
@@ -193,7 +219,7 @@ impl ActiveTasks {
                 doc_write_failures: 0,
                 push_failures: 0,
                 pull_failures: 0,
-                docs_denied: self.retired_denied_for(remote_label),
+                docs_denied: self.denied_for(remote_label),
                 last_push_at: self.last_push_at_for(remote_label),
                 pending_changes: None,
             };
@@ -237,7 +263,7 @@ impl ActiveTasks {
             doc_write_failures: push_failures + pull_failures,
             push_failures,
             pull_failures,
-            docs_denied: self.retired_denied_for(remote_label) + self.live_denied_for(remote_label),
+            docs_denied: self.denied_for(remote_label),
             last_push_at: self.last_push_at_for(remote_label),
             pending_changes: None,
         }
@@ -274,23 +300,11 @@ impl ActiveTasks {
             .map(iso_utc_ms)
     }
 
-    fn live_denied_for(&self, remote_label: &str) -> u64 {
-        self.live_denied
+    fn denied_for(&self, remote_label: &str) -> u64 {
+        self.denied
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .filter(|(target, _)| target == remote_label)
-            .map(|(_, denied)| denied)
-            .sum()
-    }
-
-    fn retired_denied_for(&self, remote_label: &str) -> u64 {
-        self.retired_denied
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(remote_label)
-            .copied()
-            .unwrap_or(0)
+            .total_for(remote_label)
     }
 
     /// Starts a live (continuous) replication and keeps this registry
@@ -338,8 +352,7 @@ impl ActiveTasks {
             .insert(task_id, info);
 
         let registry = self.inner.clone();
-        let live_denied = self.live_denied.clone();
-        let retired_denied = self.retired_denied.clone();
+        let denied_docs = self.denied.clone();
         let push_progress = self.push_progress.clone();
         tokio::spawn(async move {
             let mut previous = (0u64, 0u64, 0u64, 0u64);
@@ -365,9 +378,10 @@ impl ActiveTasks {
                             let denied = docs_denied.saturating_sub(previous.3);
                             previous = (docs_read, docs_written, doc_write_failures, docs_denied);
                             if denied > 0 {
-                                live_denied
+                                denied_docs
                                     .write()
                                     .unwrap_or_else(|e| e.into_inner())
+                                    .live
                                     .entry(task_id)
                                     .or_insert_with(|| (entry.target.clone(), 0))
                                     .1 += denied;
@@ -415,21 +429,14 @@ impl ActiveTasks {
                     }
                 }
             }
-            let finished = registry
+            registry
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&task_id);
-            let denied = live_denied
+            denied_docs
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
-                .remove(&task_id);
-            if let (Some(_), Some((target, denied))) = (finished, denied) {
-                *retired_denied
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .entry(target)
-                    .or_insert(0) += denied;
-            }
+                .retire(task_id);
         });
 
         handle
@@ -718,6 +725,24 @@ mod tests {
         assert_eq!(summary.docs_denied, 1, "kept across the restart");
         assert_eq!(summary.push_failures, 0, "the denied doc is not retried");
         second.cancel();
+    }
+
+    /// Retiring a task moves its count in one step: the total for its
+    /// label is the same before and after, and other labels are untouched.
+    #[test]
+    fn retiring_a_task_keeps_the_denied_total() {
+        let mut denied = Denied::default();
+        denied.live.insert(1, ("remote".into(), 2));
+        denied.live.insert(2, ("remote".into(), 1));
+        denied.live.insert(3, ("other".into(), 5));
+        denied.retired.insert("remote".into(), 4);
+        assert_eq!(denied.total_for("remote"), 7);
+        denied.retire(1);
+        assert_eq!(denied.total_for("remote"), 7);
+        assert_eq!(denied.retired["remote"], 6);
+        denied.retire(1);
+        assert_eq!(denied.total_for("remote"), 7, "retired once");
+        assert_eq!(denied.total_for("other"), 5);
     }
 
     #[test]
