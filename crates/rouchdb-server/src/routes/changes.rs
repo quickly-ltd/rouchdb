@@ -346,7 +346,10 @@ async fn indexed_selector_changes(
                 })
                 .await?;
             let Some(mut event) = page.results.into_iter().next() else {
-                // Nothing at or after this seq any more.
+                // Nothing at or after this seq any more: the database was
+                // recreated shorter (or the change purged). Refresh rather
+                // than take it for the end of the scan.
+                stale = true;
                 break;
             };
             if event.seq.as_num() != seq || event.id != change.id {

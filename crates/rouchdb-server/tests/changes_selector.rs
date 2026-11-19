@@ -394,6 +394,9 @@ enum Race {
     /// Destroy the database and write a new generation whose seq 11 is
     /// another document.
     Recreate,
+    /// Destroy the database and write a new generation shorter than the
+    /// first candidate's seq (four changes, a product at seq 4).
+    RecreateShort,
 }
 
 /// A memory database that runs a [`Race`] once during a request.
@@ -415,6 +418,17 @@ impl Racy {
                 )
                 .await
                 .unwrap();
+            }
+            Race::RecreateShort => {
+                db.destroy().await.unwrap();
+                for i in 0..3 {
+                    db.put(&format!("x{i}"), json!({"kind": "events"}))
+                        .await
+                        .unwrap();
+                }
+                db.put("intruder", json!({"kind": "products"}))
+                    .await
+                    .unwrap();
             }
             Race::Recreate => {
                 db.destroy().await.unwrap();
@@ -570,5 +584,14 @@ async fn document_moved_during_the_request_is_returned_at_its_new_seq() {
 async fn database_recreated_during_the_request_is_read_anew() {
     let (answer, expected) = raced(Race::Recreate).await;
     assert_eq!(ids(&expected), ["intruder", "another"]);
+    assert_eq!(answer, expected);
+}
+
+/// The database recreated shorter than the first candidate's seq: the
+/// empty candidate page is not taken for the end of the scan.
+#[tokio::test]
+async fn database_recreated_shorter_during_the_request_is_read_anew() {
+    let (answer, expected) = raced(Race::RecreateShort).await;
+    assert_eq!(ids(&expected), ["intruder"]);
     assert_eq!(answer, expected);
 }
