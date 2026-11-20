@@ -120,7 +120,7 @@ let opts = ReplicationOptions {
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `batch_size` | 100 | Number of documents to process in each replication batch. Smaller values mean more frequent checkpoints. |
+| `batch_size` | 100 | Number of documents to process in each replication batch. Smaller values mean more frequent checkpoints. `0` means the default, as in PouchDB. |
 | `batches_limit` | 10 | Maximum number of batches to buffer. Controls memory usage for large replications. |
 | `filter` | `None` | Optional `ReplicationFilter` for selective replication. See [Filtered Replication](#filtered-replication). |
 | `since` | `None` | Override the starting sequence instead of reading from checkpoint. Useful for replaying changes from a known point. |

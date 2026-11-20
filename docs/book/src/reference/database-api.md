@@ -137,9 +137,10 @@ for doc in &result.docs {
 
 | Method | Signature | Return Type | Description |
 |--------|-----------|-------------|-------------|
-| `create_index` | `async fn create_index(&self, def: IndexDefinition)` | `Result<CreateIndexResponse>` | Create a Mango index for faster queries. The index is built immediately by scanning all documents. Returns `"created"` or `"exists"`. |
+| `create_index` | `async fn create_index(&self, def: IndexDefinition)` | `Result<CreateIndexResponse>` | Create a Mango index for faster queries. The index is built immediately by scanning all documents. An index is identified by its design document (`ddoc`, `"x"` meaning `"_design/x"`) and name, as in CouchDB. Returns `"exists"` when that index already has the same fields, otherwise `"created"` (a new index, or new fields replacing the old definition). |
 | `get_indexes` | `async fn get_indexes(&self)` | `Vec<IndexInfo>` | List all indexes defined on this database. |
-| `delete_index` | `async fn delete_index(&self, name: &str)` | `Result<()>` | Delete an index by name. Returns `NotFound` if the index does not exist. |
+| `delete_index` | `async fn delete_index(&self, name: &str)` | `Result<()>` | Delete an index by name. Returns `NotFound` if the index does not exist, `BadRequest` if several design documents have an index with that name. |
+| `delete_index_in_ddoc` | `async fn delete_index_in_ddoc(&self, ddoc: &str, name: &str)` | `Result<()>` | Delete the index `name` of design document `ddoc` (`"x"` or `"_design/x"`). Returns `NotFound` if it does not exist. |
 
 ### Example
 
@@ -186,7 +187,7 @@ All replication methods implement the CouchDB replication protocol: checkpoint r
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `batch_size` | `u64` | `100` | Number of documents to process per batch. |
+| `batch_size` | `u64` | `100` | Number of documents to process per batch (`0` means the default, as in PouchDB). |
 | `batches_limit` | `u64` | `10` | Maximum number of batches to buffer. |
 | `filter` | `Option<ReplicationFilter>` | `None` | Optional filter for selective replication. |
 | `since` | `Option<Seq>` | `None` | Override the starting sequence. Skips checkpoint and starts from this sequence. |
