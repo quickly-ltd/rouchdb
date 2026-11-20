@@ -419,3 +419,63 @@ async fn edit_of_a_tombstone_is_a_conflict() {
     assert_eq!(resp.status, StatusCode::CREATED);
     assert!(resp.json()["rev"].as_str().unwrap().starts_with("3-"));
 }
+
+/// A `_local` `PUT` with `_deleted: true` deletes the document, as in
+/// CouchDB 3.5.1: `200` with `rev: "0-0"`, whatever the revision sent (it
+/// must still be well formed) and also when the document does not exist.
+async fn check_local_delete_via_put(app: axum::Router) {
+    let resp = put(&app, "/db/_local/x", json!({"v": 1})).await;
+    assert_eq!(resp.status, StatusCode::CREATED);
+
+    let resp = put(
+        &app,
+        "/db/_local/x",
+        json!({"_rev": "0-1", "_deleted": true, "k": 1}),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK, "{:?}", resp.body);
+    assert_eq!(
+        resp.json(),
+        json!({"ok": true, "id": "_local/x", "rev": "0-0"})
+    );
+    let resp = get(&app, "/db/_local/x").await;
+    assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        resp.json(),
+        json!({"error": "not_found", "reason": "missing"})
+    );
+
+    // Already gone, without or with any revision: still 200.
+    for uri in ["/db/_local/x", "/db/_local/x?rev=0-18446744073709551615"] {
+        let resp = put(&app, uri, json!({"_deleted": true})).await;
+        assert_eq!(resp.status, StatusCode::OK, "{uri}");
+        assert_eq!(resp.json()["rev"], "0-0");
+    }
+    let resp = put(
+        &app,
+        "/db/_local/x",
+        json!({"_deleted": true, "_rev": "abc"}),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+
+    // `_deleted: false` writes the document, without the member.
+    let resp = put(&app, "/db/_local/w", json!({"_deleted": false, "v": 1})).await;
+    assert_eq!(resp.status, StatusCode::CREATED);
+    assert_eq!(
+        get(&app, "/db/_local/w").await.json(),
+        json!({"_id": "_local/w", "_rev": "0-1", "v": 1})
+    );
+}
+
+#[tokio::test]
+async fn local_delete_via_put_memory() {
+    check_local_delete_via_put(app()).await;
+}
+
+#[tokio::test]
+async fn local_delete_via_put_redb() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::open(dir.path().join("db.redb"), DB).unwrap());
+    check_local_delete_via_put(app_with(db, &config())).await;
+}
