@@ -1,0 +1,7 @@
+    Checking rouchdb-replication v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-replication)
+    Checking rouchdb-adapter-http v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-adapter-http)
+    Checking rouchdb v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb)
+    Checking rouchdb-server v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-server)
+    Checking rouchdb-bench v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-bench)
+    Checking rouchdb-cli v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.85s

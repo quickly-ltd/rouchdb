@@ -49,9 +49,11 @@ pub async fn get_db_info(
 /// is CouchDB's 412 `file_exists`. Other names cannot be created.
 pub async fn put_db(
     State(state): State<AppState>,
+    writer: Writer,
     Path(db): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    writer.require_server_admin()?;
     if db != state.db_name {
         return Err(AppError(RouchError::BadRequest(format!(
             "Cannot create database {db}: single-db mode"
@@ -75,8 +77,10 @@ pub async fn put_db(
 /// database back.
 pub async fn delete_db(
     State(state): State<AppState>,
+    writer: Writer,
     Path(db): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    writer.require_server_admin()?;
     let _lifecycle = state.lifecycle.lock().await;
     state.check_db(&db)?;
     // Mark it deleted first so no new request writes into it while it is

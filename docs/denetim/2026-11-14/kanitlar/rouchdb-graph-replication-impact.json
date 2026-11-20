@@ -1,0 +1,1701 @@
+{
+  "target": {
+    "id": "Function:crates/rouchdb-replication/src/protocol.rs:run_replication",
+    "name": "run_replication",
+    "type": "Function",
+    "filePath": "crates/rouchdb-replication/src/protocol.rs"
+  },
+  "direction": "upstream",
+  "impactedCount": 56,
+  "risk": "CRITICAL",
+  "riskSharedAxes": "MEDIUM",
+  "riskScale": {
+    "comparableAcrossKinds": true,
+    "unusedAxes": []
+  },
+  "epistemic": "exact",
+  "summary": {
+    "direct": 3,
+    "processes_affected": 24,
+    "modules_affected": 2
+  },
+  "byDepthCounts": {
+    "1": 3,
+    "2": 51,
+    "3": 2
+  },
+  "affected_processes": [
+    {
+      "name": "run",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 8,
+      "total_hits": 16,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "checkpoint_saved_after_already_synced_batches",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 7,
+      "total_hits": 14,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "checkpoint_saved_when_filter_matches_nothing",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 7,
+      "total_hits": 14,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "custom_filters_do_not_share_a_checkpoint",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 7,
+      "total_hits": 14,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "peers_with_the_same_id_replicate_without_checkpoints",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 7,
+      "total_hits": 14,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "checkpoint_round_trips_the_couchdb_local_rev",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 7,
+      "total_hits": 13,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "replicate_batched",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 6,
+      "total_hits": 12,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "replicate_filtered_incremental",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 6,
+      "total_hits": 12,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "replicate_no_filter_unchanged",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 6,
+      "total_hits": 12,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "replicate_carries_attachments",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 8,
+      "total_hits": 8,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "live_replication_pauses_only_when_caught_up",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 2,
+      "total_hits": 4,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "replicate_filtered_with_deletes",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 4,
+      "total_hits": 4,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "bulk_get_errors_fail_the_batch",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 3,
+      "total_hits": 3,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "checkpoint_write_conflict_is_retried_once",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 3,
+      "total_hits": 3,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "bulk_get_not_found_for_a_conflicting_leaf_fails_the_batch",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 2,
+      "total_hits": 2,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "bulk_get_not_found_for_a_live_leaf_fails_the_batch",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 2,
+      "total_hits": 2,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "replicate_filtered_by_custom_closure",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 1,
+      "total_hits": 1,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "replicate_filtered_by_doc_ids",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 1,
+      "total_hits": 1,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "replicate_filtered_by_selector",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 1,
+      "total_hits": 1,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "replicate_source_to_target",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 1,
+      "total_hits": 1,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "replicate_with_deletes",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 1,
+      "total_hits": 1,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "selector_on_deleted_replicates_only_tombstones",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 1,
+      "total_hits": 1,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "transient_write_error_stops_without_advancing",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 1,
+      "total_hits": 1,
+      "earliest_broken_step": 1
+    },
+    {
+      "name": "transport_error_mid_run_resumes_from_the_last_checkpointed_batch",
+      "type": "Function",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "affected_process_count": 1,
+      "total_hits": 1,
+      "earliest_broken_step": 1
+    }
+  ],
+  "affected_modules": [
+    {
+      "name": "Cluster_17",
+      "hits": 54,
+      "impact": "direct"
+    },
+    {
+      "name": "Cluster_120",
+      "hits": 2,
+      "impact": "indirect"
+    }
+  ],
+  "byDepth": {
+    "1": [
+      {
+        "depth": 1,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:replicate",
+        "name": "replicate",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_131_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → Session",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_191_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → Info",
+            "processType": "cross_community",
+            "step": 2
+          },
+          {
+            "id": "proc_279_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → New",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_283_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → Session",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_392_replicate_filtered_i",
+            "label": "Replicate_filtered_incremental → Changes",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_144_run",
+            "label": "Run → Bulk_docs",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_210_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → Changes",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_242_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → Session",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_293_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → Bulk_get",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_294_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → Changes",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_330_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → Revs_diff",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_351_replicate_batched",
+            "label": "Replicate_batched → Session",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_409_replicate_no_filter_",
+            "label": "Replicate_no_filter_unchanged → Info",
+            "processType": "cross_community",
+            "step": 2
+          },
+          {
+            "id": "proc_423_replicate_no_filter_",
+            "label": "Replicate_no_filter_unchanged → Revs_diff",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_25_run",
+            "label": "Run → Session",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_124_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → Info",
+            "processType": "cross_community",
+            "step": 2
+          },
+          {
+            "id": "proc_198_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → Session",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_252_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → Bulk_get",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_254_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → Revs_diff",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_379_replicate_filtered_i",
+            "label": "Replicate_filtered_incremental → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_17_run",
+            "label": "Run → Info",
+            "processType": "cross_community",
+            "step": 2
+          },
+          {
+            "id": "proc_278_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_295_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → Revs_diff",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_348_replicate_batched",
+            "label": "Replicate_batched → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_361_replicate_batched",
+            "label": "Replicate_batched → Changes",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_413_replicate_no_filter_",
+            "label": "Replicate_no_filter_unchanged → Session",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_48_run",
+            "label": "Run → Bulk_get",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_211_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → Revs_diff",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_315_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → New",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_349_replicate_batched",
+            "label": "Replicate_batched → New",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_362_replicate_batched",
+            "label": "Replicate_batched → Revs_diff",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_378_replicate_filtered_i",
+            "label": "Replicate_filtered_incremental → Info",
+            "processType": "cross_community",
+            "step": 2
+          },
+          {
+            "id": "proc_380_replicate_filtered_i",
+            "label": "Replicate_filtered_incremental → New",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_393_replicate_filtered_i",
+            "label": "Replicate_filtered_incremental → Revs_diff",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_49_run",
+            "label": "Run → Changes",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_125_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_126_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → New",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_147_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → Bulk_get",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_148_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → Changes",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_149_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → Revs_diff",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_237_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_238_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → New",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_314_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_410_replicate_no_filter_",
+            "label": "Replicate_no_filter_unchanged → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_411_replicate_no_filter_",
+            "label": "Replicate_no_filter_unchanged → New",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_18_run",
+            "label": "Run → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_50_run",
+            "label": "Run → Revs_diff",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_192_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_193_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → New",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_209_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → Bulk_get",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_253_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → Changes",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_313_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → Info",
+            "processType": "cross_community",
+            "step": 2
+          },
+          {
+            "id": "proc_422_replicate_no_filter_",
+            "label": "Replicate_no_filter_unchanged → Changes",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_19_run",
+            "label": "Run → New",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_236_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → Info",
+            "processType": "cross_community",
+            "step": 2
+          },
+          {
+            "id": "proc_277_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → Info",
+            "processType": "cross_community",
+            "step": 2
+          },
+          {
+            "id": "proc_319_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → Session",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_329_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → Changes",
+            "processType": "intra_community",
+            "step": 2
+          },
+          {
+            "id": "proc_347_replicate_batched",
+            "label": "Replicate_batched → Info",
+            "processType": "cross_community",
+            "step": 2
+          },
+          {
+            "id": "proc_382_replicate_filtered_i",
+            "label": "Replicate_filtered_incremental → Session",
+            "processType": "intra_community",
+            "step": 2
+          }
+        ]
+      },
+      {
+        "depth": 1,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:replicate_live",
+        "name": "replicate_live",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_91_live_replication_pau",
+            "label": "Live_replication_pauses_only_when_caught_up → Subscribe",
+            "processType": "cross_community",
+            "step": 2
+          },
+          {
+            "id": "proc_438_live_replication_pau",
+            "label": "Live_replication_pauses_only_when_caught_up → New",
+            "processType": "intra_community",
+            "step": 2
+          }
+        ]
+      },
+      {
+        "depth": 1,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:replicate_with_events",
+        "name": "replicate_with_events",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      }
+    ],
+    "2": [
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:replicate_selector_sees_reserved_fields.run@1679:8",
+        "name": "run",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_144_run",
+            "label": "Run → Bulk_docs",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_25_run",
+            "label": "Run → Session",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_17_run",
+            "label": "Run → Info",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_48_run",
+            "label": "Run → Bulk_get",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_49_run",
+            "label": "Run → Changes",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_18_run",
+            "label": "Run → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_50_run",
+            "label": "Run → Revs_diff",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_19_run",
+            "label": "Run → New",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.a_short_batch_ends_the_pass_without_another_changes_request",
+        "name": "a_short_batch_ends_the_pass_without_another_changes_request",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.audit_regression_cancel_closes_full_event_queue",
+        "name": "audit_regression_cancel_closes_full_event_queue",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.audit_regression_cancel_interrupts_pending_adapter_call",
+        "name": "audit_regression_cancel_interrupts_pending_adapter_call",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.bulk_get_errors_fail_the_batch",
+        "name": "bulk_get_errors_fail_the_batch",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_88_bulk_get_errors_fail",
+            "label": "Bulk_get_errors_fail_the_batch → Default",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_488_bulk_get_errors_fail",
+            "label": "Bulk_get_errors_fail_the_batch → Bulk_docs",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_461_bulk_get_errors_fail",
+            "label": "Bulk_get_errors_fail_the_batch → New",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.bulk_get_not_found_for_a_conflicting_leaf_fails_the_batch",
+        "name": "bulk_get_not_found_for_a_conflicting_leaf_fails_the_batch",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_505_bulk_get_not_found_f",
+            "label": "Bulk_get_not_found_for_a_conflicting_leaf_fails_the_batch → Bulk_docs",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_165_bulk_get_not_found_f",
+            "label": "Bulk_get_not_found_for_a_conflicting_leaf_fails_the_batch → Default",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.bulk_get_not_found_for_a_live_leaf_fails_the_batch",
+        "name": "bulk_get_not_found_for_a_live_leaf_fails_the_batch",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_483_bulk_get_not_found_f",
+            "label": "Bulk_get_not_found_for_a_live_leaf_fails_the_batch → New",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_222_bulk_get_not_found_f",
+            "label": "Bulk_get_not_found_for_a_live_leaf_fails_the_batch → Default",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.bulk_get_not_found_for_superseded_rev_is_skipped",
+        "name": "bulk_get_not_found_for_superseded_rev_is_skipped",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.checkpoint_read_errors_are_surfaced",
+        "name": "checkpoint_read_errors_are_surfaced",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.checkpoint_round_trips_the_couchdb_local_rev",
+        "name": "checkpoint_round_trips_the_couchdb_local_rev",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_131_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → Session",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_124_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → Info",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_89_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → Get_local",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_125_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_126_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → New",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_148_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → Changes",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_149_checkpoint_round_tri",
+            "label": "Checkpoint_round_trips_the_couchdb_local_rev → Revs_diff",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.checkpoint_saved_after_already_synced_batches",
+        "name": "checkpoint_saved_after_already_synced_batches",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_210_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → Changes",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_191_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → Info",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_211_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → Revs_diff",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_192_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_193_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → New",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_198_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → Session",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_147_checkpoint_saved_aft",
+            "label": "Checkpoint_saved_after_already_synced_batches → Bulk_get",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.checkpoint_saved_when_filter_matches_nothing",
+        "name": "checkpoint_saved_when_filter_matches_nothing",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_254_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → Revs_diff",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_242_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → Session",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_237_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_238_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → New",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_236_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → Info",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_209_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → Bulk_get",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_253_checkpoint_saved_whe",
+            "label": "Checkpoint_saved_when_filter_matches_nothing → Changes",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.checkpoint_write_conflict_is_retried_once",
+        "name": "checkpoint_write_conflict_is_retried_once",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_166_checkpoint_write_con",
+            "label": "Checkpoint_write_conflict_is_retried_once → Get_local",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_90_checkpoint_write_con",
+            "label": "Checkpoint_write_conflict_is_retried_once → Check_online",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_501_checkpoint_write_con",
+            "label": "Checkpoint_write_conflict_is_retried_once → New",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.checkpoint_write_errors_are_reported",
+        "name": "checkpoint_write_errors_are_reported",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.custom_filter_keeps_scanning_past_a_fully_rejected_batch",
+        "name": "custom_filter_keeps_scanning_past_a_fully_rejected_batch",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.custom_filters_do_not_share_a_checkpoint",
+        "name": "custom_filters_do_not_share_a_checkpoint",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_277_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → Info",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_278_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_295_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → Revs_diff",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_279_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → New",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_283_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → Session",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_252_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → Bulk_get",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_294_custom_filters_do_no",
+            "label": "Custom_filters_do_not_share_a_checkpoint → Changes",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.denied_doc_does_not_stall_replication",
+        "name": "denied_doc_does_not_stall_replication",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.docs_written_counts_couchdb_style_empty_replies",
+        "name": "docs_written_counts_couchdb_style_empty_replies",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.docs_written_excludes_docs_couchdb_rejected_in_a_batch",
+        "name": "docs_written_excludes_docs_couchdb_rejected_in_a_batch",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.failed_probe_of_a_replaced_source_rescans_from_the_start",
+        "name": "failed_probe_of_a_replaced_source_rescans_from_the_start",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.idle_live_replication",
+        "name": "idle_live_replication",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.live_replication_checks_the_id_of_a_target_without_notices",
+        "name": "live_replication_checks_the_id_of_a_target_without_notices",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.live_replication_honors_since",
+        "name": "live_replication_honors_since",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.live_replication_pauses_only_when_caught_up",
+        "name": "live_replication_pauses_only_when_caught_up",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_438_live_replication_pau",
+            "label": "Live_replication_pauses_only_when_caught_up → New",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_91_live_replication_pau",
+            "label": "Live_replication_pauses_only_when_caught_up → Subscribe",
+            "processType": "cross_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.live_replication_reports_write_failures",
+        "name": "live_replication_reports_write_failures",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.live_replication_started_offline_checkpoints_under_the_real_id",
+        "name": "live_replication_started_offline_checkpoints_under_the_real_id",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.live_replication_wakes_on_source_notifications",
+        "name": "live_replication_wakes_on_source_notifications",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.live_replication_without_checkpoints_does_not_rescan",
+        "name": "live_replication_without_checkpoints_does_not_rescan",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.live_retry_backs_off_exponentially_by_default",
+        "name": "live_retry_backs_off_exponentially_by_default",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.peers_with_the_same_id_replicate_without_checkpoints",
+        "name": "peers_with_the_same_id_replicate_without_checkpoints",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_319_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → Session",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_329_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → Changes",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_314_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_313_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → Info",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_293_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → Bulk_get",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_330_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → Revs_diff",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_315_peers_with_the_same_",
+            "label": "Peers_with_the_same_id_replicate_without_checkpoints → New",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.push_then_pull_converges_on_conflicts",
+        "name": "push_then_pull_converges_on_conflicts",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.read_only_source_still_checkpoints",
+        "name": "read_only_source_still_checkpoints",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_already_synced",
+        "name": "replicate_already_synced",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_batched",
+        "name": "replicate_batched",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_349_replicate_batched",
+            "label": "Replicate_batched → New",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_362_replicate_batched",
+            "label": "Replicate_batched → Revs_diff",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_347_replicate_batched",
+            "label": "Replicate_batched → Info",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_351_replicate_batched",
+            "label": "Replicate_batched → Session",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_348_replicate_batched",
+            "label": "Replicate_batched → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_361_replicate_batched",
+            "label": "Replicate_batched → Changes",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_carries_attachments",
+        "name": "replicate_carries_attachments",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_494_replicate_carries_at",
+            "label": "Replicate_carries_attachments → Invalid",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_495_replicate_carries_at",
+            "label": "Replicate_carries_attachments → AttachmentMeta",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_493_replicate_carries_at",
+            "label": "Replicate_carries_attachments → New",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_500_replicate_carries_at",
+            "label": "Replicate_carries_attachments → Parse_rev_value",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_496_replicate_carries_at",
+            "label": "Replicate_carries_attachments → Inner",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_499_replicate_carries_at",
+            "label": "Replicate_carries_attachments → Parse_doc_id",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_497_replicate_carries_at",
+            "label": "Replicate_carries_attachments → StoredDoc",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_498_replicate_carries_at",
+            "label": "Replicate_carries_attachments → Parse_deleted_value",
+            "processType": "cross_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_empty_databases",
+        "name": "replicate_empty_databases",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_filtered_by_custom_closure",
+        "name": "replicate_filtered_by_custom_closure",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_164_replicate_filtered_b",
+            "label": "Replicate_filtered_by_custom_closure → Parse_rev",
+            "processType": "cross_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_filtered_by_doc_ids",
+        "name": "replicate_filtered_by_doc_ids",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_221_replicate_filtered_b",
+            "label": "Replicate_filtered_by_doc_ids → Parse_rev",
+            "processType": "cross_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_filtered_by_selector",
+        "name": "replicate_filtered_by_selector",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_263_replicate_filtered_b",
+            "label": "Replicate_filtered_by_selector → Parse_rev",
+            "processType": "cross_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_filtered_incremental",
+        "name": "replicate_filtered_incremental",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_392_replicate_filtered_i",
+            "label": "Replicate_filtered_incremental → Changes",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_379_replicate_filtered_i",
+            "label": "Replicate_filtered_incremental → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_378_replicate_filtered_i",
+            "label": "Replicate_filtered_incremental → Info",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_380_replicate_filtered_i",
+            "label": "Replicate_filtered_incremental → New",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_393_replicate_filtered_i",
+            "label": "Replicate_filtered_incremental → Revs_diff",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_382_replicate_filtered_i",
+            "label": "Replicate_filtered_incremental → Session",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_filtered_with_deletes",
+        "name": "replicate_filtered_with_deletes",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_300_replicate_filtered_w",
+            "label": "Replicate_filtered_with_deletes → Parse_rev",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_507_replicate_filtered_w",
+            "label": "Replicate_filtered_with_deletes → New",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_509_replicate_filtered_w",
+            "label": "Replicate_filtered_with_deletes → AttachmentMeta",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_508_replicate_filtered_w",
+            "label": "Replicate_filtered_with_deletes → Invalid",
+            "processType": "cross_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_incremental",
+        "name": "replicate_incremental",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_no_filter_unchanged",
+        "name": "replicate_no_filter_unchanged",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_422_replicate_no_filter_",
+            "label": "Replicate_no_filter_unchanged → Changes",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_413_replicate_no_filter_",
+            "label": "Replicate_no_filter_unchanged → Session",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_410_replicate_no_filter_",
+            "label": "Replicate_no_filter_unchanged → Filter_fingerprint",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_411_replicate_no_filter_",
+            "label": "Replicate_no_filter_unchanged → New",
+            "processType": "intra_community",
+            "step": 1
+          },
+          {
+            "id": "proc_409_replicate_no_filter_",
+            "label": "Replicate_no_filter_unchanged → Info",
+            "processType": "cross_community",
+            "step": 1
+          },
+          {
+            "id": "proc_423_replicate_no_filter_",
+            "label": "Replicate_no_filter_unchanged → Revs_diff",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_propagates_conflict_branches",
+        "name": "replicate_propagates_conflict_branches",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_source_to_target",
+        "name": "replicate_source_to_target",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_335_replicate_source_to_",
+            "label": "Replicate_source_to_target → Parse_rev",
+            "processType": "cross_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.replicate_with_deletes",
+        "name": "replicate_with_deletes",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_366_replicate_with_delet",
+            "label": "Replicate_with_deletes → Parse_rev",
+            "processType": "cross_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.selector_on_deleted_replicates_only_tombstones",
+        "name": "selector_on_deleted_replicates_only_tombstones",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_397_selector_on_deleted_",
+            "label": "Selector_on_deleted_replicates_only_tombstones → Parse_rev",
+            "processType": "cross_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.source_checkpoint_write_errors_are_reported",
+        "name": "source_checkpoint_write_errors_are_reported",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.transient_write_error_stops_without_advancing",
+        "name": "transient_write_error_stops_without_advancing",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_264_transient_write_erro",
+            "label": "Transient_write_error_stops_without_advancing → Default",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.transport_error_mid_run_resumes_from_the_last_checkpointed_batch",
+        "name": "transport_error_mid_run_resumes_from_the_last_checkpointed_batch",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": [
+          {
+            "id": "proc_301_transport_error_mid_",
+            "label": "Transport_error_mid_run_resumes_from_the_last_checkpointed_batch → Default",
+            "processType": "intra_community",
+            "step": 1
+          }
+        ]
+      },
+      {
+        "depth": 2,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.unauthorized_write_is_denied_like_forbidden",
+        "name": "unauthorized_write_is_denied_like_forbidden",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      }
+    ],
+    "3": [
+      {
+        "depth": 3,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.cancel_ends_live_replication_with_one_complete",
+        "name": "cancel_ends_live_replication_with_one_complete",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      },
+      {
+        "depth": 3,
+        "id": "Function:crates/rouchdb-replication/src/protocol.rs:tests.dropping_the_handle_ends_live_replication",
+        "name": "dropping_the_handle_ends_live_replication",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs",
+        "relationType": "CALLS",
+        "confidence": 0.85,
+        "processes": []
+      }
+    ]
+  }
+}

@@ -277,3 +277,173 @@ async fn routes_without_require_auth_default_to_the_same_user() {
     );
     assert_eq!(recorder.take()[0].1, UserCtx::admin());
 }
+
+#[tokio::test]
+async fn admin_endpoints_enforce_server_and_db_admin_roles() {
+    let (app, _rec) = app_recording(&config());
+    let non_admin = behind_embedder_auth(app.clone());
+
+    // Non-admin embedder user gets 401 on admin endpoints and cannot escalate
+    // privileges via `_security`.
+    let resp = put(
+        &non_admin,
+        "/db/_security",
+        json!({"admins": {"names": [], "roles": ["satellite"]}}),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "{:?}", resp.body);
+    assert_eq!(resp.json()["error"], "unauthorized");
+
+    let resp = send(
+        &non_admin,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/db/_compact")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "{:?}", resp.body);
+    assert_eq!(resp.json()["error"], "unauthorized");
+
+    let resp = post(&non_admin, "/db/_purge", json!({})).await;
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "{:?}", resp.body);
+    assert_eq!(resp.json()["error"], "unauthorized");
+
+    let resp = put(&non_admin, "/db", json!({})).await;
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "{:?}", resp.body);
+    assert_eq!(resp.json()["error"], "unauthorized");
+
+    let resp = delete(&non_admin, "/db").await;
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "{:?}", resp.body);
+    assert_eq!(resp.json()["error"], "unauthorized");
+
+    // Promote `satellite` to a database admin via server admin (admin party).
+    assert_eq!(
+        put(
+            &app,
+            "/db/_security",
+            json!({"admins": {"names": [], "roles": ["satellite"]}}),
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+
+    // DB admin succeeds on `PUT /db/_security` and `POST /db/_compact`,
+    // while still getting 401 on `DELETE /db` and `PUT /db`.
+    assert_eq!(
+        put(
+            &non_admin,
+            "/db/_security",
+            json!({"admins": {"names": [], "roles": ["satellite"]}}),
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let compact = send(
+        &non_admin,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/db/_compact")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(compact.status, StatusCode::ACCEPTED, "{:?}", compact.body);
+    let purged = post(&non_admin, "/db/_purge", json!({})).await;
+    assert_eq!(purged.status, StatusCode::CREATED, "{:?}", purged.body);
+
+    assert_eq!(
+        delete(&non_admin, "/db").await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        put(&non_admin, "/db", json!({})).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Server admin (`_admin` role) succeeds on `DELETE /db` and `PUT /db`.
+    let server_admin = app.clone().layer(axum::middleware::from_fn(
+        |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
+            req.extensions_mut().insert(UserCtx::admin());
+            next.run(req).await
+        },
+    ));
+    assert_eq!(delete(&server_admin, "/db").await.status, StatusCode::OK);
+    let recreated = send(
+        &server_admin,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/db")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        recreated.status,
+        StatusCode::CREATED,
+        "{:?}",
+        recreated.body
+    );
+}
+
+#[tokio::test]
+async fn revless_attachment_upload_preserves_forbidden_and_unauthorized() {
+    struct RejectById;
+
+    #[async_trait::async_trait]
+    impl Plugin for RejectById {
+        fn name(&self) -> &str {
+            "reject-by-id"
+        }
+
+        async fn validate_doc_update(
+            &self,
+            new_doc: &Document,
+            _old_doc: &OldDoc<'_>,
+            _ctx: &WriteContext<'_>,
+        ) -> rouchdb::Result<()> {
+            match new_doc.id.as_str() {
+                "forbid" => Err(RouchError::Forbidden("no attachments".into())),
+                "unauth" => Err(RouchError::Unauthorized),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    let db = Database::memory(DB).with_plugin(Arc::new(RejectById));
+    let app = behind_embedder_auth(app_with(Arc::new(db), &config()));
+
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/db/forbid/file.txt")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from("hi"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::FORBIDDEN, "{:?}", resp.body);
+    assert_eq!(
+        resp.json(),
+        json!({"error": "forbidden", "reason": "no attachments"})
+    );
+
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/db/unauth/file.txt")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from("hi"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "{:?}", resp.body);
+    assert_eq!(resp.json()["error"], "unauthorized");
+}

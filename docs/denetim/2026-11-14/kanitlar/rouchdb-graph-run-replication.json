@@ -1,0 +1,231 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Function:crates/rouchdb-replication/src/protocol.rs:run_replication",
+    "name": "run_replication",
+    "kind": "Function",
+    "filePath": "crates/rouchdb-replication/src/protocol.rs",
+    "startLine": 392,
+    "endLine": 638
+  },
+  "epistemic": "exact",
+  "incoming": {
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-replication/src/protocol.rs:replicate",
+        "name": "replicate",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-replication/src/protocol.rs:replicate_live",
+        "name": "replicate_live",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-replication/src/protocol.rs:replicate_with_events",
+        "name": "replicate_with_events",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      }
+    ]
+  },
+  "outgoing": {
+    "accesses": [
+      {
+        "uid": "Function:crates/rouchdb-core/src/adapter.rs:Adapter.bulk_docs#2",
+        "name": "bulk_docs",
+        "filePath": "crates/rouchdb-core/src/adapter.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/adapter.rs:Adapter.bulk_get#1",
+        "name": "bulk_get",
+        "filePath": "crates/rouchdb-core/src/adapter.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/adapter.rs:Adapter.changes#1",
+        "name": "changes",
+        "filePath": "crates/rouchdb-core/src/adapter.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/adapter.rs:Adapter.revs_diff#1",
+        "name": "revs_diff",
+        "filePath": "crates/rouchdb-core/src/adapter.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-replication/src/protocol.rs:ReplicationOptions.batch_size",
+        "name": "batch_size",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-replication/src/protocol.rs:ReplicationOptions.batch_size",
+        "name": "batch_size",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-replication/src/protocol.rs:ReplicationOptions.batch_size",
+        "name": "batch_size",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-replication/src/protocol.rs:ReplicationOptions.batch_size",
+        "name": "batch_size",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-replication/src/protocol.rs:ReplicationOptions.checkpoint",
+        "name": "checkpoint",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-replication/src/protocol.rs:ReplicationOptions.filter",
+        "name": "filter",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-replication/src/protocol.rs:ReplicationOptions.filter",
+        "name": "filter",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-replication/src/protocol.rs:Session.checkpointer",
+        "name": "checkpointer",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      }
+    ],
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-core/src/adapter.rs:Adapter.bulk_docs#2",
+        "name": "bulk_docs",
+        "filePath": "crates/rouchdb-core/src/adapter.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/adapter.rs:Adapter.bulk_get#1",
+        "name": "bulk_get",
+        "filePath": "crates/rouchdb-core/src/adapter.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/adapter.rs:Adapter.changes#1",
+        "name": "changes",
+        "filePath": "crates/rouchdb-core/src/adapter.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/adapter.rs:Adapter.revs_diff#1",
+        "name": "revs_diff",
+        "filePath": "crates/rouchdb-core/src/adapter.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/document.rs:BulkDocsOptions.replication#0",
+        "name": "replication",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-replication/src/protocol.rs:ReplicationOptions.default#0",
+        "name": "default",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-replication/src/protocol.rs:emit",
+        "name": "emit",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-replication/src/protocol.rs:is_denied",
+        "name": "is_denied",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-replication/src/protocol.rs:is_leaf",
+        "name": "is_leaf",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-replication/src/protocol.rs:selector_view",
+        "name": "selector_view",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-replication/src/protocol.rs:seq_after",
+        "name": "seq_after",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-replication/src/protocol.rs:tests.CouchLikeTarget.new#1",
+        "name": "new",
+        "filePath": "crates/rouchdb-replication/src/protocol.rs"
+      }
+    ]
+  },
+  "processes": [
+    {
+      "id": "proc_144_run",
+      "name": "Run → Bulk_docs",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_147_checkpoint_saved_aft",
+      "name": "Checkpoint_saved_after_already_synced_batches → Bulk_get",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_148_checkpoint_round_tri",
+      "name": "Checkpoint_round_trips_the_couchdb_local_rev → Changes",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_149_checkpoint_round_tri",
+      "name": "Checkpoint_round_trips_the_couchdb_local_rev → Revs_diff",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_209_checkpoint_saved_whe",
+      "name": "Checkpoint_saved_when_filter_matches_nothing → Bulk_get",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_210_checkpoint_saved_aft",
+      "name": "Checkpoint_saved_after_already_synced_batches → Changes",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_211_checkpoint_saved_aft",
+      "name": "Checkpoint_saved_after_already_synced_batches → Revs_diff",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_252_custom_filters_do_no",
+      "name": "Custom_filters_do_not_share_a_checkpoint → Bulk_get",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_253_checkpoint_saved_whe",
+      "name": "Checkpoint_saved_when_filter_matches_nothing → Changes",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_254_checkpoint_saved_whe",
+      "name": "Checkpoint_saved_when_filter_matches_nothing → Revs_diff",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_293_peers_with_the_same_",
+      "name": "Peers_with_the_same_id_replicate_without_checkpoints → Bulk_get",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_294_custom_filters_do_no",
+      "name": "Custom_filters_do_not_share_a_checkpoint → Changes",
+      "step_index": 3,
+      "step_count": 4
+    }
+  ]
+}

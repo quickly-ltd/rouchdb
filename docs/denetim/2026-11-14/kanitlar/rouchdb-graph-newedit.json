@@ -1,0 +1,222 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Function:crates/rouchdb-core/src/write.rs:plan_new_edit",
+    "name": "plan_new_edit",
+    "kind": "Function",
+    "filePath": "crates/rouchdb-core/src/write.rs",
+    "startLine": 122,
+    "endLine": 229
+  },
+  "epistemic": "exact",
+  "incoming": {
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:tests.can_update_and_delete_a_losing_leaf",
+        "name": "can_update_and_delete_a_losing_leaf",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:tests.new_document_rev_is_generation_one_hash_of_body",
+        "name": "new_document_rev_is_generation_one_hash_of_body",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:tests.non_leaf_or_unknown_parent_conflicts",
+        "name": "non_leaf_or_unknown_parent_conflicts",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:tests.retrying_an_update_with_the_old_rev_conflicts",
+        "name": "retrying_an_update_with_the_old_rev_conflicts",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:tests.rev_on_a_missing_document_is_rejected",
+        "name": "rev_on_a_missing_document_is_rejected",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:tests.revision_of_a_missing_document_conflicts",
+        "name": "revision_of_a_missing_document_conflicts",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:tests.revpos_is_the_generation_that_uploaded_the_data",
+        "name": "revpos_is_the_generation_that_uploaded_the_data",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:tests.stubs_are_matched_by_name",
+        "name": "stubs_are_matched_by_name",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:tests.tombstones_drop_attachments_and_explicit_sets_are_exact",
+        "name": "tombstones_drop_attachments_and_explicit_sets_are_exact",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:tests.unknown_stub_is_missing_stub",
+        "name": "unknown_stub_is_missing_stub",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      }
+    ]
+  },
+  "outgoing": {
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-core/src/document.rs:attachment_digest",
+        "name": "attachment_digest",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/document.rs:generate_rev_hash",
+        "name": "generate_rev_hash",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/merge.rs:is_deleted",
+        "name": "is_deleted",
+        "filePath": "crates/rouchdb-core/src/merge.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/merge.rs:merge_and_stem",
+        "name": "merge_and_stem",
+        "filePath": "crates/rouchdb-core/src/merge.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/rev_tree.rs:build_path_from_revs",
+        "name": "build_path_from_revs",
+        "filePath": "crates/rouchdb-core/src/rev_tree.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:conflict",
+        "name": "conflict",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:edit_parent",
+        "name": "edit_parent",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/write.rs:error_result",
+        "name": "error_result",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      },
+      {
+        "uid": "Struct:crates/rouchdb-core/src/rev_tree.rs:NodeOpts",
+        "name": "NodeOpts",
+        "filePath": "crates/rouchdb-core/src/rev_tree.rs"
+      },
+      {
+        "uid": "Struct:crates/rouchdb-core/src/write.rs:PlannedWrite",
+        "name": "PlannedWrite",
+        "filePath": "crates/rouchdb-core/src/write.rs"
+      }
+    ],
+    "accesses": [
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:Document.attachments",
+        "name": "attachments",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:Document.attachments",
+        "name": "attachments",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:Document.data",
+        "name": "data",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:Document.data",
+        "name": "data",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:Document.deleted",
+        "name": "deleted",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:Document.deleted",
+        "name": "deleted",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:Document.deleted",
+        "name": "deleted",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:Document.deleted",
+        "name": "deleted",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:Document.id",
+        "name": "id",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:Document.rev",
+        "name": "rev",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      }
+    ]
+  },
+  "processes": [
+    {
+      "id": "proc_116_stubs_are_matched_by",
+      "name": "Stubs_are_matched_by_name → Traverse_rev_tree",
+      "step_index": 3,
+      "step_count": 7
+    },
+    {
+      "id": "proc_117_stubs_are_matched_by",
+      "name": "Stubs_are_matched_by_name → LeafInfo",
+      "step_index": 3,
+      "step_count": 7
+    },
+    {
+      "id": "proc_130_stubs_are_matched_by",
+      "name": "Stubs_are_matched_by_name → Error_result",
+      "step_index": 3,
+      "step_count": 5
+    },
+    {
+      "id": "proc_146_stubs_are_matched_by",
+      "name": "Stubs_are_matched_by_name → Attachment_digest",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_24_revpos_is_the_genera",
+      "name": "Revpos_is_the_generation_that_uploaded_the_data → Error_result",
+      "step_index": 3,
+      "step_count": 5
+    },
+    {
+      "id": "proc_47_revpos_is_the_genera",
+      "name": "Revpos_is_the_generation_that_uploaded_the_data → Attachment_digest",
+      "step_index": 3,
+      "step_count": 4
+    },
+    {
+      "id": "proc_8_revpos_is_the_genera",
+      "name": "Revpos_is_the_generation_that_uploaded_the_data → Traverse_rev_tree",
+      "step_index": 3,
+      "step_count": 7
+    },
+    {
+      "id": "proc_9_revpos_is_the_genera",
+      "name": "Revpos_is_the_generation_that_uploaded_the_data → LeafInfo",
+      "step_index": 3,
+      "step_count": 7
+    }
+  ]
+}

@@ -1,0 +1,145 @@
+{
+  "tests": {
+    "exit_code": 0,
+    "log": "tests.log",
+    "passed": 1006,
+    "failed": 0,
+    "ignored": 130,
+    "filtered_out": 0
+  },
+  "couchdb": {
+    "exit_code": 0,
+    "log": "couchdb.log",
+    "passed": 130,
+    "failed": 0,
+    "ignored": 0,
+    "filtered_out": 986
+  },
+  "arbitrary-precision": {
+    "exit_code": 0,
+    "log": "arbitrary-precision.log",
+    "passed": 1006,
+    "failed": 0,
+    "ignored": 130,
+    "filtered_out": 0
+  },
+  "couchdb-numbers": {
+    "exit_code": 0,
+    "log": "couchdb-numbers.log",
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0,
+    "filtered_out": 2
+  },
+  "fmt": {
+    "exit_code": 0,
+    "log": "fmt.log"
+  },
+  "clippy": {
+    "exit_code": 0,
+    "log": "clippy.log"
+  },
+  "build": {
+    "exit_code": 0,
+    "log": "build.log"
+  },
+  "pouchdb": {
+    "exit_code": 0,
+    "log": "pouchdb-runner.log",
+    "scenarios": [
+      {
+        "file": "t1.json",
+        "test": "T1 — Tek yönlü push",
+        "status": "GEÇTİ",
+        "duration_ms": 275
+      },
+      {
+        "file": "t2.json",
+        "test": "T2 — Tek yönlü pull",
+        "status": "GEÇTİ",
+        "duration_ms": 345
+      },
+      {
+        "file": "t3.json",
+        "test": "T3 — Çift yönlü sync",
+        "status": "GEÇTİ",
+        "duration_ms": 44
+      },
+      {
+        "file": "t4.json",
+        "test": "T4 — CANLI sync",
+        "status": "GEÇTİ",
+        "duration_ms": 90144
+      },
+      {
+        "file": "t5.json",
+        "test": "T5 — Tombstone yayılımı",
+        "status": "GEÇTİ",
+        "duration_ms": 80
+      },
+      {
+        "file": "t6.json",
+        "test": "T6 — Conflict davranışı",
+        "status": "GEÇTİ",
+        "duration_ms": 51
+      },
+      {
+        "file": "t7.json",
+        "test": "T7 — Checkpoint ve artımlı devam",
+        "status": "GEÇTİ",
+        "duration_ms": 50
+      },
+      {
+        "file": "t8.json",
+        "test": "T8 — 10.000 doküman push",
+        "status": "GEÇTİ",
+        "duration_ms": 3275
+      },
+      {
+        "file": "t9.json",
+        "test": "T9 — Tombstone ölçekli tam pull",
+        "status": "GEÇTİ",
+        "duration_ms": 15228
+      }
+    ]
+  },
+  "environment": {
+    "platform": "macOS ARM64",
+    "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "commit": "d1259449bb1ad20d2df2626989b3a581b7e7893f",
+    "couchdb": "3.5.1 isolated Docker container",
+    "container_removed": true,
+    "production_source_modified": false
+  },
+  "reproduction": {
+    "library_default_exit_code": 0,
+    "library_arbitrary_precision_exit_code": 0,
+    "dependency_versions_match_root_lockfile": true,
+    "http_script_exit_code": 0,
+    "couchdb_reference_script_exit_code": 0,
+    "purpose": "Eksik/yanlış davranışı tekrar üretir; ürün doğruluğunun geçtiği anlamına gelmez."
+  },
+  "online_review": {
+    "upstream_source_manifest": "online-source-manifest.json",
+    "source_read_before_reference_experiments": true,
+    "couchdb_reference_exit_code": 0,
+    "pouchdb_reference_exit_code": 0,
+    "rouchdb_full_suites_rerun": false,
+    "active_behavior_errors": [
+      "F01",
+      "F02",
+      "F03",
+      "F04",
+      "F05",
+      "F06",
+      "F08"
+    ],
+    "hardening_recommendations": [
+      "F07"
+    ],
+    "api_compatibility_differences": [
+      "F09"
+    ],
+    "initial_F07_and_F09_error_rationales_withdrawn": true
+  }
+}

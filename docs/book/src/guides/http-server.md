@@ -11,13 +11,16 @@ cargo run --release --bin rouchdb-server -- mydatabase.redb --port 5984 --host 1
 
 ## Fauxton Setup
 
-To use the Fauxton Web UI:
+To use the Fauxton Web UI (assets are embedded into `rouchdb-server` at compile time via `rust_embed`):
 
 ```bash
 # Download Fauxton assets into static folder
 bash scripts/download-fauxton.sh
 
-# Open Fauxton dashboard
+# Rebuild the server so the downloaded Fauxton assets are embedded
+cargo build --release --bin rouchdb-server
+
+# Open Fauxton dashboard (once the rebuilt server is running)
 open http://127.0.0.1:5984/_utils/
 ```
 
@@ -64,7 +67,7 @@ const sync = PouchDB.sync(local, remote, {
 ## Live Feed Semantics
 
 - **`normal`**: Returns immediately with existing changes since `since`.
-- **`longpoll`**: Blocks until new changes occur or `timeout` (default 30,000ms) elapses. When a document is written, it returns the single batch immediately.
+- **`longpoll`**: Blocks until new changes occur or `timeout` (default 60,000ms) elapses. When a document is written, it returns the single batch immediately.
 - **`continuous`**: Keeps an open HTTP stream yielding line-delimited (`\n`) JSON change events as they happen, emitting `\n` keep-alive signals according to `heartbeat`.
 
 ## Embedded Replication Task Tracking

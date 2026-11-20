@@ -1,0 +1,1631 @@
+   Compiling rouchdb-replication v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-replication)
+   Compiling rouchdb-adapter-http v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-adapter-http)
+   Compiling rouchdb v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb)
+   Compiling rouchdb-server v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-server)
+   Compiling rouchdb-bench v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-bench)
+   Compiling rouchdb-cli v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.61s
+     Running unittests src/lib.rs (target/debug/deps/rouchdb-f270090e5a32d88a)
+
+running 34 tests
+test tests::database_destroy ... ok
+test tests::database_bulk_docs ... ok
+test tests::database_get_with_opts ... ok
+test tests::database_delegates_to_the_given_adapter ... ok
+test tests::database_find ... ok
+test tests::changes_with_selector_applies_limit_after_filtering ... ok
+test tests::database_info ... ok
+test tests::database_live_changes_basic ... ok
+test tests::database_live_changes_with_selector ... ok
+test tests::database_create_and_use_index ... ok
+test tests::database_post ... ok
+test tests::database_put_and_get ... ok
+test tests::database_remove ... ok
+test tests::database_remove_attachment ... ok
+test tests::database_replicate_with_events ... ok
+test tests::database_update ... ok
+test tests::database_replicate_to_with_opts ... ok
+test tests::database_sync ... ok
+test tests::indexed_find_sorts_on_nested_field ... ok
+test tests::indexed_find_reads_only_the_changes_since_the_index ... ok
+test tests::partition_all_docs_is_scoped_to_the_partition ... ok
+test tests::indexed_find_updates_index_incrementally ... ok
+test tests::plugin_adapter_delegates_every_non_write_method ... ok
+test tests::put_returns_error_when_plugin_drops_document ... ok
+test tests::plugin_adapter_reports_every_replicated_doc_to_after_write ... ok
+test tests::plugin_adapter_denies_rejected_replicated_docs_one_by_one ... ok
+test tests::single_doc_write_errors_keep_their_kind ... ok
+test tests::indexed_find_matches_full_scan ... ok
+test tests::replicate_to_with_events_does_not_stall_on_many_events ... ok
+test tests::descending_selector_changes_read_the_feed_whole ... ok
+test tests::concurrent_indexed_finds_see_all_writes ... ok
+test tests::selector_changes_read_the_feed_in_batches ... ok
+test tests::database_live_replication ... ok
+test tests::database_open_redb ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests/adapter_conformance.rs (target/debug/deps/adapter_conformance-b553219f68ae155a)
+
+running 134 tests
+test attachments::memory::update_keeps_attachments ... ok
+test attachments::memory::attachment_bytes_per_revision ... ok
+test attachments::memory::inline_attachment_through_bulk_docs ... ok
+test accepted_divergence::memory::accepted_divergence_all_docs_offset_is_the_skip ... ok
+test attachments::memory::bulk_get_carries_attachments ... ok
+test attachments::memory::conflict_branches_keep_own_attachment ... ok
+test attachments::memory::replication_carries_attachments ... ok
+test basics::memory::all_docs_ranges ... ok
+test basics::memory::changes_one_entry_per_doc ... ok
+test basics::memory::crud_roundtrip ... ok
+test attachments::redb::bulk_get_carries_attachments ... ok
+test accepted_divergence::redb::accepted_divergence_all_docs_offset_is_the_skip ... ok
+test attachments::redb::update_keeps_attachments ... ok
+test attachments::redb::inline_attachment_through_bulk_docs ... ok
+test batches::memory::mixed_batch_results ... ok
+test changes::memory::changes_options ... ok
+test attachments::redb::attachment_bytes_per_revision ... ok
+test basics::redb::all_docs_ranges ... ok
+test attachments::redb::conflict_branches_keep_own_attachment ... ok
+test compact::memory::compact_drops_old_revisions ... ok
+test conflicts::memory::recreate_after_delete ... ok
+test conflicts::memory::changes_deleted_follows_winner ... ok
+test conflicts::memory::remove_losing_leaf ... ok
+test conflicts::memory::update_losing_leaf ... ok
+test conflicts::memory::update_non_leaf_conflicts ... ok
+test basics::redb::changes_one_entry_per_doc ... ok
+test basics::redb::crud_roundtrip ... ok
+test batches::redb::mixed_batch_results ... ok
+test changes::redb::changes_options ... ok
+test conflicts_more::memory::compact_keeps_conflict_leaves ... ok
+test conflicts::redb::changes_deleted_follows_winner ... ok
+test conflicts_more::memory::live_leaf_beats_deeper_tombstone ... ok
+test conflicts_more::memory::recreate_revs_info_marks_tombstone_deleted ... ok
+test compact::redb::compact_drops_old_revisions ... ok
+test conflicts::redb::recreate_after_delete ... ok
+test f01::memory::long_history_survives_reopen ... ok
+test f01::memory::replicated_long_ancestry ... ok
+test conflicts::redb::update_losing_leaf ... ok
+test f01::memory::rev_limit_stems_long_histories ... ok
+test conflicts::redb::update_non_leaf_conflicts ... ok
+test conflicts::redb::remove_losing_leaf ... ok
+test f06::memory::attachment_only_edits_diverge ... ok
+test attachments::redb::replication_carries_attachments ... ok
+test conflicts_more::redb::compact_keeps_conflict_leaves ... ok
+test f22::memory::replicated_duplicate_is_noop ... ok
+test conflicts_more::redb::live_leaf_beats_deeper_tombstone ... ok
+test conflicts_more::redb::recreate_revs_info_marks_tombstone_deleted ... ok
+test f25::memory::security_roundtrip ... ok
+test f27::memory::explicit_attachment_set_is_exact ... ok
+test f27::memory::delete_drops_attachments ... ok
+test f01::redb::replicated_long_ancestry ... ok
+test f30::memory::all_docs_keys_order ... ok
+test f22::redb::replicated_duplicate_is_noop ... ok
+test f01::redb::rev_limit_stems_long_histories ... ok
+test f55::memory::design_doc_round_trip_is_lossless ... ok
+test f68::memory::info_counts_track_writes ... ok
+test f27::redb::delete_drops_attachments ... ok
+test f25::redb::security_roundtrip ... ok
+test f83_f86::memory::remove_missing_attachment ... ok
+test f27::redb::explicit_attachment_set_is_exact ... ok
+test f83_f86::memory::unknown_stub_rejected ... ok
+test facade::memory::post_uses_body_id ... ok
+test facade::memory::put_interprets_reserved_members ... ok
+test facade::memory::put_rejects_non_object ... ok
+test f30::redb::all_docs_keys_order ... ok
+test facade::memory::single_doc_failures_are_errors ... ok
+test f06::redb::attachment_only_edits_diverge ... ok
+test f55::redb::design_doc_round_trip_is_lossless ... ok
+test f83_f86::redb::remove_missing_attachment ... ok
+test get::memory::get_inline_attachments ... ok
+test f83_f86::redb::unknown_stub_rejected ... ok
+test get::memory::get_latest ... ok
+test get::memory::get_open_revs_rejected ... ok
+test get::memory::get_revs_and_revs_info ... ok
+test get::memory::get_unknown_rev_not_found ... ok
+test get::memory::revs_info_follows_branch ... ok
+test facade::redb::post_uses_body_id ... ok
+test f68::redb::info_counts_track_writes ... ok
+test facade::redb::put_interprets_reserved_members ... ok
+test facade::redb::put_rejects_non_object ... ok
+test get::redb::get_inline_attachments ... ok
+test get::redb::get_open_revs_rejected ... ok
+test facade::redb::single_doc_failures_are_errors ... ok
+test ids::memory::unicode_ids_roundtrip ... ok
+test get::redb::get_latest ... ok
+test lifecycle::memory::destroy_clears_everything ... ok
+test lifecycle::memory::local_docs_are_not_documents ... ok
+test purge::memory::purge_conflict_loser ... ok
+test purge::memory::purge_leaf_removes_doc ... ok
+test get::redb::get_revs_and_revs_info ... ok
+test get::redb::get_unknown_rev_not_found ... ok
+test revpos::memory::attachment_revpos_follows_couchdb ... ok
+test get::redb::revs_info_follows_branch ... ok
+test revs_diff::memory::revs_diff_reports_exact_missing ... ok
+test purge::redb::purge_conflict_loser ... ok
+test storage_fidelity::memory::changes_limit_zero_is_empty ... ok
+test storage_fidelity::memory::deep_documents_round_trip ... ok
+test storage_fidelity::memory::destroy_resets_the_database ... ok
+test storage_fidelity::memory::edits_of_missing_documents ... ok
+test storage_fidelity::memory::local_ids_are_local_documents ... ok
+test lifecycle::redb::destroy_clears_everything ... ok
+test storage_fidelity::memory::old_edit_of_deleted_document_conflicts ... ok
+test purge::redb::purge_leaf_removes_doc ... ok
+test storage_fidelity::memory::put_design_conflict_is_an_error ... ok
+test storage_fidelity::memory::revs_diff_matches_couchdb ... ok
+test storage_fidelity::memory::replicated_revisions_are_validated ... ok
+test storage_fidelity::memory::stemmed_revisions_are_unreadable ... ok
+test storage_fidelity::memory::stubs_match_by_name ... ok
+test storage_fidelity::memory::unusual_ids_survive_compact_and_purge ... ok
+test lifecycle::redb::local_docs_are_not_documents ... ok
+test storage_fidelity::memory::uppercase_revisions_are_normalized ... ok
+test revs_diff::redb::revs_diff_reports_exact_missing ... ok
+test ids::redb::unicode_ids_roundtrip ... ok
+test storage_fidelity::redb::changes_limit_zero_is_empty ... ok
+test storage_fidelity::redb::destroy_resets_the_database ... ok
+test storage_fidelity::redb::edits_of_missing_documents ... ok
+test storage_fidelity::redb::old_edit_of_deleted_document_conflicts ... ok
+test f01::redb::long_history_survives_reopen ... ok
+test storage_fidelity::redb::put_design_conflict_is_an_error ... ok
+test revpos::redb::attachment_revpos_follows_couchdb ... ok
+test storage_fidelity::redb::replicated_revisions_are_validated ... ok
+test writes::memory::attachment_edits_on_stale_rev_conflict ... ok
+test writes::memory::bulk_docs_generates_missing_ids ... ok
+test writes::memory::bulk_get_reports_each_item ... ok
+test storage_fidelity::redb::revs_diff_matches_couchdb ... ok
+test storage_fidelity::redb::deep_documents_round_trip ... ok
+test storage_fidelity::redb::local_ids_are_local_documents ... ok
+test storage_fidelity::redb::stubs_match_by_name ... ok
+test writes::redb::attachment_edits_on_stale_rev_conflict ... ok
+test storage_fidelity::redb::uppercase_revisions_are_normalized ... ok
+test writes::redb::bulk_docs_generates_missing_ids ... ok
+test storage_fidelity::redb::unusual_ids_survive_compact_and_purge ... ok
+test writes::redb::bulk_get_reports_each_item ... ok
+test storage_fidelity::redb::stemmed_revisions_are_unreadable ... ok
+
+test result: ok. 134 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.06s
+
+     Running tests/all_docs.rs (target/debug/deps/all_docs-d9e81945a2b560ce)
+
+running 8 tests
+test all_docs_conflicts_and_update_seq ... ignored, requires CouchDB
+test all_docs_descending ... ignored, requires CouchDB
+test all_docs_empty_database ... ignored, requires CouchDB
+test all_docs_include_docs ... ignored, requires CouchDB
+test all_docs_key_range ... ignored, requires CouchDB
+test all_docs_skip_and_limit ... ignored, requires CouchDB
+test keys_rows_match_couchdb ... ignored, requires CouchDB
+test offset_is_the_global_position_on_couchdb ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/attachments.rs (target/debug/deps/attachments-06db1888f6a77e41)
+
+running 3 tests
+test attachment_binary_data ... ignored, requires CouchDB
+test attachment_put_and_get_http ... ignored, requires CouchDB
+test digests_match_couchdb_for_bytes_stored_as_is ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/big_numbers.rs (target/debug/deps/big_numbers-a037631e9632784c)
+
+running 3 tests
+test big_integers_round_trip_through_couchdb ... ignored, requires CouchDB
+test numbers_survive_a_redb_reopen ... ok
+test numbers_round_trip_through_local_adapters ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/bug_hunting.rs (target/debug/deps/bug_hunting-5537cea2bbf385f3)
+
+running 12 tests
+test live_changes_picks_up_docs_added_after_start ... ok
+test operations_on_empty_db ... ok
+test create_conflict_via_bulk_docs ... ok
+test design_doc_full_roundtrip ... ok
+test purge_removes_a_leaf_and_ignores_inner_revisions ... ok
+test all_docs_paging_and_range_edge_cases ... ok
+test put_large_document ... ok
+test view_engine_multiple_emits_per_doc ... ok
+test find_sort_skip_limit_and_fields ... ok
+test special_characters_in_doc_id ... ok
+test view_descending_swaps_the_range_bounds ... ok
+test sync_is_idempotent ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.04s
+
+     Running tests/changes_feed.rs (target/debug/deps/changes_feed-891bb920dcb2e7c0)
+
+running 7 tests
+test changes_after_updates_and_deletes ... ignored, requires CouchDB
+test changes_include_docs ... ignored, requires CouchDB
+test changes_since_sequence ... ignored, requires CouchDB
+test changes_with_doc_ids_lists_only_those_docs ... ignored, requires CouchDB
+test changes_with_limit ... ignored, requires CouchDB
+test changes_with_selector_filter ... ignored, requires CouchDB
+test live_changes_picks_up_new_docs ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conflicts.rs (target/debug/deps/conflicts-7974996ebfe87274)
+
+running 5 tests
+test conflict_both_sides_modify_same_doc ... ignored, requires CouchDB
+test conflict_local_delete_remote_update ... ignored, requires CouchDB
+test conflict_remote_delete_local_update ... ignored, requires CouchDB
+test conflict_resolve_by_update ... ignored, requires CouchDB
+test conflict_three_way ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/couchdb_query_parity.rs (target/debug/deps/couchdb_query_parity-c08f692133d1a31d)
+
+running 4 tests
+test http_database_runs_mango_on_couchdb ... ignored, requires CouchDB
+test mango_selectors_match_couchdb ... ignored, requires CouchDB
+test views_match_couchdb ... ignored, requires CouchDB
+test mango_table_matches_couchdb_results_locally ... ok
+
+test result: ok. 1 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/couchdb_semantics.rs (target/debug/deps/couchdb_semantics-5784d651d773572b)
+
+running 14 tests
+test after_write_sees_docs_replicated_to_couchdb ... ignored, requires CouchDB
+test cookie_login_against_couchdb ... ignored, requires CouchDB
+test http_all_docs_reports_update_seq ... ignored, requires CouchDB
+test http_bulk_get_returns_attachment_bytes ... ignored, requires CouchDB
+test http_changes_report_conflicts ... ignored, requires CouchDB
+test http_creates_missing_database_on_first_use ... ignored, requires CouchDB
+test http_errors_keep_couchdb_meaning ... ignored, requires CouchDB
+test http_get_with_open_revs ... ignored, requires CouchDB
+test http_id_is_server_uuid_plus_db_name ... ignored, requires CouchDB
+test http_skip_setup_does_not_create_database ... ignored, requires CouchDB
+test pull_from_couchdb_brings_conflict_branches ... ignored, requires CouchDB
+test pull_from_couchdb_carries_attachment_bytes ... ignored, requires CouchDB
+test push_skips_docs_denied_by_validate_doc_update ... ignored, requires CouchDB
+test push_to_couchdb_carries_conflict_branches ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 14 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/couchdb_view_keys.rs (target/debug/deps/couchdb_view_keys-64a4b99a5cd776f8)
+
+running 1 test
+test view_keys_and_grouping_rules_match_couchdb ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/data_diversity.rs (target/debug/deps/data_diversity-77ea3d7e671ca880)
+
+running 11 tests
+test data_arrays_roundtrip ... ignored, requires CouchDB
+test data_empty_structures_roundtrip ... ignored, requires CouchDB
+test data_large_document ... ignored, requires CouchDB
+test data_mixed_type_array_roundtrip ... ignored, requires CouchDB
+test data_nested_objects_roundtrip ... ignored, requires CouchDB
+test data_null_and_bool_roundtrip ... ignored, requires CouchDB
+test data_numeric_types_roundtrip ... ignored, requires CouchDB
+test data_unicode_roundtrip ... ignored, requires CouchDB
+test special_id_replicate_roundtrip ... ignored, requires CouchDB
+test special_id_with_spaces ... ignored, requires CouchDB
+test special_id_with_unicode ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 11 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/database_ops.rs (target/debug/deps/database_ops-557885e5801b4769)
+
+running 4 tests
+test cross_adapter_fidelity_memory_couchdb_redb ... ignored, requires CouchDB
+test database_compact_http ... ignored, requires CouchDB
+test database_destroy_http ... ignored, requires CouchDB
+test database_info_http ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/edge_cases.rs (target/debug/deps/edge_cases-ed7dd85e98656899)
+
+running 22 tests
+test bulk_docs_with_duplicate_ids_in_same_batch ... ok
+test changes_since_future_sequence_returns_empty ... ok
+test close_then_operations_behave_gracefully ... ok
+test concurrent_updates_same_doc_produces_conflicts ... ok
+test emoji_in_field_names_and_values ... ok
+test field_names_with_dots_and_colons ... ok
+test concurrent_puts_to_different_docs ... ok
+test index_returns_correct_results_after_delete ... ok
+test live_changes_events_cancel_stops_stream ... ok
+test index_updates_on_field_value_change ... ok
+test partition_with_colon_in_name ... ok
+test partition_find_with_conflicting_id_selector ... ok
+test replication_filter_empty_doc_ids ... ok
+test unicode_field_names_in_find ... ok
+test replication_selector_filter_only_matching ... ok
+test put_design_update_drops_what_the_struct_removes ... ok
+test design_doc_update_requires_rev ... ok
+test changes_descending_returns_reverse_order ... ok
+test plugin_can_prevent_deletion ... ok
+test put_design_writes_the_struct_on_the_revision_it_names ... ok
+test very_long_document_id ... ok
+test remove_attachment_with_wrong_rev ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running tests/error_conditions.rs (target/debug/deps/error_conditions-e8ef9c9478a741c4)
+
+running 4 tests
+test error_get_deleted_doc ... ignored, requires CouchDB
+test error_table_couchdb ... ignored, requires CouchDB
+test error_validate_doc_update_rejections ... ignored, requires CouchDB
+test error_table_local ... ok
+
+test result: ok. 1 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/http_crud.rs (target/debug/deps/http_crud-377d7269a07baaa7)
+
+running 5 tests
+test http_all_docs ... ignored, requires CouchDB
+test http_changes_feed ... ignored, requires CouchDB
+test http_delete_document ... ignored, requires CouchDB
+test http_put_and_get ... ignored, requires CouchDB
+test http_update_document ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/live_sync_test.rs (target/debug/deps/live_sync_test-24ed9e3528547c47)
+
+running 1 test
+test test_live_sync_remote ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mango_queries.rs (target/debug/deps/mango_queries-71ae5542891e1bc3)
+
+running 13 tests
+test mango_empty_selector_matches_all ... ok
+test mango_equality_and_inequality ... ok
+test mango_array_operators ... ok
+test mango_create_index_and_query ... ok
+test mango_comparison_operators ... ok
+test mango_in_nin_exists ... ok
+test mango_index_with_sort_and_limit ... ok
+test mango_nested_field_query ... ok
+test mango_multi_field_index ... ok
+test mango_logical_operators ... ok
+test mango_sort_skip_limit_projection ... ok
+test mango_regex_and_type ... ok
+test indexed_find_matches_a_full_scan_after_every_write ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+     Running tests/map_reduce.rs (target/debug/deps/map_reduce-91c29cea6b98b4f6)
+
+running 18 tests
+test include_docs_follows_linked_revisions ... ok
+test key_is_both_bounds_and_start_or_end_key_replace_one ... ok
+test grouping_a_map_view_is_rejected ... ok
+test grouped_keys_keep_their_order_when_descending ... ok
+test keys_queries_report_the_offset_of_the_first_row ... ok
+test multi_key_reduce_without_grouping_is_rejected ... ok
+test inverted_key_ranges_are_rejected ... ok
+test keys_with_non_adjacent_duplicates_repeat_their_rows ... ok
+test group_level_truncates_array_keys_only ... ok
+test stats_rejects_mixed_and_ragged_values ... ok
+test stats_of_floats_and_of_arrays ... ok
+test sum_errors_are_the_reduced_value ... ok
+test view_reduce_sum_on_non_numeric_values ... ok
+test view_reduce_sum_and_count ... ok
+test view_reduce_with_zero_emitted_rows ... ok
+test view_basic_map ... ok
+test sum_pads_arrays_and_adds_numbers_to_the_first_element ... ok
+test view_key_range ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/parity_changes.rs (target/debug/deps/parity_changes-5a3d05a0301c7f32)
+
+running 11 tests
+test live_changes_filter_allows_all ... ok
+test live_changes_events_with_filter ... ok
+test live_changes_events_emits_change_events ... ok
+test changes_with_doc_ids_filter ... ok
+test changes_since_sequence ... ok
+test changes_shows_deleted_docs ... ok
+test live_changes_events_with_selector ... ok
+test changes_with_limit ... ok
+test live_changes_handle_cancel ... ok
+test live_changes_filter_rejects_all ... ok
+test live_changes_with_filter_closure ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/parity_core.rs (target/debug/deps/parity_core-dbcf80dc2abac804)
+
+running 16 tests
+test attachment_json_shapes_decode_like_couchdb ... ok
+test document_json_roundtrip_is_lossless ... ok
+test explain_with_fields_projection ... ok
+test explain_picks_the_index_on_the_selector_field ... ok
+test explain_without_index ... ok
+test get_with_specific_rev ... ok
+test all_docs_update_seq_is_the_database_sequence ... ok
+test all_docs_conflicts_lists_losing_revisions ... ok
+test bulk_docs_replication_mode_keeps_the_given_revision ... ok
+test close_redb_db_keeps_the_data_for_the_next_open ... ok
+test destroy_removes_docs_local_docs_and_indexes ... ok
+test changes_with_selector_returns_the_matching_changes ... ok
+test post_generates_uuid_v4_ids_as_32_hex_digits ... ok
+test removed_document_tombstone_has_no_body ... ok
+test security_document_roundtrip_and_overwrite ... ok
+test posted_documents_sync_under_their_ids ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+
+     Running tests/parity_http.rs (target/debug/deps/parity_http-8f87109cfd5a0fd5)
+
+running 9 tests
+test all_docs_conflicts_http ... ignored, requires CouchDB
+test design_doc_crud_on_http ... ignored, requires CouchDB
+test explain_on_http_with_index ... ignored, requires CouchDB
+test explain_on_http_without_index ... ignored, requires CouchDB
+test live_changes_events_http ... ignored, requires CouchDB
+test mango_find_with_index_http ... ignored, requires CouchDB
+test replication_no_checkpoint_http ... ignored, requires CouchDB
+test replication_since_override_http ... ignored, requires CouchDB
+test security_document_round_trips_on_http ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/parity_plugins.rs (target/debug/deps/parity_plugins-b035325a572917c3)
+
+running 5 tests
+test partition_isolation ... ok
+test partition_find ... ok
+test plugin_before_write_modifies_docs ... ok
+test plugin_validation_rejects_invalid_docs ... ok
+test plugin_after_write_sees_every_write_result ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests/parity_replication.rs (target/debug/deps/parity_replication-f0d61c59611c9fe4)
+
+running 4 tests
+test live_replication_picks_up_new_docs ... ok
+test replication_events_report_each_batch_then_complete ... ok
+test replication_with_since_override ... ok
+test replication_without_checkpoint ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/parity_views.rs (target/debug/deps/parity_views-5e028e2587f16f83)
+
+running 22 tests
+test delete_design_document ... ok
+test put_design_does_not_panic_when_a_plugin_drops_it ... ok
+test design_document_with_filters_and_validate ... ok
+test put_and_get_design_document ... ok
+test get_design_with_full_id ... ok
+test design_document_with_show_list_update ... ok
+test destroy_clears_mango_indexes ... ok
+test design_document_roundtrip_is_lossless ... ok
+test update_design_document ... ok
+test view_cleanup_keeps_indexes_and_documents ... ok
+test view_engine_query_uses_the_index ... ok
+test view_engine_drops_purged_docs ... ok
+test view_engine_query_honors_stale ... ok
+test view_engine_maps_only_the_changed_documents ... ok
+test view_engine_rebuilds_a_recreated_database_of_the_same_shape ... ok
+test view_engine_register_and_query ... ok
+test view_engine_remove_indexes_not_in ... ok
+test view_engine_reregistering_map_rebuilds_index ... ok
+test view_engine_unregistered_map_returns_error ... ok
+test view_query_with_single_key ... ok
+test view_engine_resets_after_database_recreated ... ok
+test view_engine_matches_a_rebuild_after_every_write ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests/partition.rs (target/debug/deps/partition-2ebd8cbcd90b1e46)
+
+running 8 tests
+test partition_get_and_put_prefix_the_id ... ok
+test partition_find_takes_any_selector_the_database_takes ... ok
+test partition_all_docs_edge_ids ... ok
+test partition_find_matches_the_prefix_literally ... ok
+test partition_all_docs_clamps_ranges_outside_the_partition ... ok
+test partition_with_empty_name_is_the_colon_prefix ... ok
+test partition_all_docs_by_key_stays_in_the_partition ... ok
+test partition_all_docs_equals_the_filtered_database_query ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
+
+     Running tests/plugin_contract.rs (target/debug/deps/plugin_contract-9f3b60327a392e05)
+
+running 10 tests
+test before_write_sees_attachment_edits_without_changing_them ... ok
+test before_write_rejection_leaves_a_batch_unwritten ... ok
+test before_write_runs_on_attachment_writes ... ok
+test after_write_runs_in_order_on_attachment_writes ... ok
+test on_destroy_error_stops_the_destruction ... ok
+test dropping_an_attachment_edit_rejects_it ... ok
+test on_destroy_runs_in_order_before_the_data_is_destroyed ... ok
+test before_write_runs_in_order_and_chains_changes ... ok
+test after_write_error_is_returned_but_the_write_is_kept ... ok
+test before_write_rejection_is_returned_and_nothing_is_written ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.66s
+
+     Running tests/plugins_replication.rs (target/debug/deps/plugins_replication-5ee06c1146e880fe)
+
+running 5 tests
+test attachment_writes_reach_after_write ... ok
+test dropping_a_replicated_doc_denies_it ... ok
+test replicated_docs_keep_the_source_body ... ok
+test replication_runs_the_target_plugins ... ok
+test push_and_live_replication_run_the_target_plugins ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/post_and_attachments.rs (target/debug/deps/post_and_attachments-4d94fd0da0e7ba3a)
+
+running 4 tests
+test bulk_docs_without_ids_over_http ... ignored, requires CouchDB
+test post_and_replicate_to_couchdb ... ignored, requires CouchDB
+test post_to_couchdb ... ignored, requires CouchDB
+test remove_attachment_from_couchdb ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/replication.rs (target/debug/deps/replication-6044cda5173d35f7)
+
+running 40 tests
+test already_synced_noop ... ignored, requires CouchDB
+test attachments_match_couchdb ... ignored, requires CouchDB
+test bad_credentials_surface_unauthorized ... ignored, requires CouchDB
+test batched_replication_to_couchdb ... ignored, requires CouchDB
+test bidirectional_sync_with_couchdb ... ignored, requires CouchDB
+test doc_deleted_before_the_first_push_arrives_as_a_tombstone ... ignored, requires CouchDB
+test incremental_pull_from_couchdb_resumes_from_the_checkpoint ... ignored, requires CouchDB
+test incremental_replication_to_couchdb ... ignored, requires CouchDB
+test live_pull_from_couchdb_delivers_later_writes ... ignored, requires CouchDB
+test live_replicate_picks_up_new_docs ... ignored, requires CouchDB
+test live_replicate_to_couchdb ... ignored, requires CouchDB
+test multiple_sync_rounds ... ignored, requires CouchDB
+test pull_carries_attachment_bytes_from_couchdb ... ignored, requires CouchDB
+test pull_with_doc_ids_from_couchdb_brings_only_those_docs ... ignored, requires CouchDB
+test push_carries_attachment_bytes_to_couchdb ... ignored, requires CouchDB
+test push_checkpoints_both_sides_with_last_seq_and_session ... ignored, requires CouchDB
+test redb_checkpoint_to_couchdb_survives_reopening ... ignored, requires CouchDB
+test replicate_couchdb_to_memory ... ignored, requires CouchDB
+test replicate_couchdb_to_redb ... ignored, requires CouchDB
+test replicate_delete_and_recreate ... ignored, requires CouchDB
+test replicate_deletes_to_couchdb ... ignored, requires CouchDB
+test replicate_empty_databases ... ignored, requires CouchDB
+test replicate_events_include_change_progress ... ignored, requires CouchDB
+test replicate_exact_batch_boundary ... ignored, requires CouchDB
+test replicate_filtered_doc_ids_to_couchdb ... ignored, requires CouchDB
+test replicate_filtered_selector_from_couchdb ... ignored, requires CouchDB
+test replicate_large_batch ... ignored, requires CouchDB
+test replicate_memory_to_couchdb ... ignored, requires CouchDB
+test replicate_multiple_updates_same_doc ... ignored, requires CouchDB
+test replicate_redb_to_couchdb ... ignored, requires CouchDB
+test replicate_remote_deletes_back_to_local ... ignored, requires CouchDB
+test replicate_remote_updates_back_to_local ... ignored, requires CouchDB
+test replicate_single_doc_batches ... ignored, requires CouchDB
+test replicate_to_couchdb_with_events ... ignored, requires CouchDB
+test replicate_updates_to_couchdb ... ignored, requires CouchDB
+test sync_interleaved_updates ... ignored, requires CouchDB
+test sync_many_docs_diverse_operations ... ignored, requires CouchDB
+test validator_unauthorized_is_denied_not_retried ... ignored, requires CouchDB
+test replicate_memory_to_redb ... ok
+test replicate_redb_bidirectional_memory ... ok
+
+test result: ok. 2 passed; 0 failed; 38 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/replication_identity.rs (target/debug/deps/replication_identity-bd1437f5c036b4f6)
+
+running 13 tests
+test live_replication_with_an_invalid_selector_ends_with_an_error ... ok
+test an_invalid_replication_selector_is_rejected_before_any_work ... ok
+test local_database_ids_differ_from_the_name_and_from_each_other ... ok
+test destroy_gives_a_local_database_a_new_identity ... ok
+test live_replication_after_the_reused_source_passes_the_old_cursor ... ok
+test live_replication_refills_a_destroyed_target_while_the_source_is_idle ... ok
+test live_replication_follows_a_destroyed_and_reused_source ... ok
+test redb_identity_is_bound_to_the_file_location ... ok
+test one_shot_replication_after_destroying_the_source_copies_the_new_documents ... ok
+test docids_selections_joined_by_nul_do_not_share_a_checkpoint ... ok
+test sync_between_same_named_databases_copies_both_ways ... ok
+test redb_identity_survives_reopen_and_the_checkpoint_is_resumed ... ok
+test sync_between_a_redb_file_and_its_copy_copies_both_ways ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.43s
+
+     Running tests/storage_fidelity_couchdb.rs (target/debug/deps/storage_fidelity_couchdb-67927ff1c5b007f5)
+
+running 8 tests
+test changes_limit_zero_over_http ... ignored, requires CouchDB
+test couchdb_design_documents_round_trip ... ignored, requires CouchDB
+test deep_couchdb_documents_are_readable_and_replicate ... ignored, requires CouchDB
+test destroy_and_reuse_while_other_clients_read ... ignored, requires CouchDB
+test local_documents_design_conflicts_and_destroy_over_http ... ignored, requires CouchDB
+test missing_documents_and_bad_revisions_over_http ... ignored, requires CouchDB
+test revs_diff_and_stubs_match_couchdb ... ignored, requires CouchDB
+test writes_over_http_apply_the_depth_limit ... ignored, requires CouchDB
+
+test result: ok. 0 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_adapter_http-72fb789e7b6b705e)
+
+running 37 tests
+test tests::all_docs_keys_response_decodes ... ok
+test auth::tests::logout_deletes_the_server_session ... ok
+test auth::tests::login_reads_couchdb_session_reply ... ok
+test auth::tests::sign_up_escapes_the_user_id ... ok
+test tests::all_docs_keys_keeps_error_and_deleted_rows ... ok
+test tests::bulk_docs_in_replication_mode_sends_new_edits_false ... ok
+test auth::tests::audit_regression_logout_reports_http_failures ... ok
+test tests::bulk_docs_leaves_missing_ids_to_the_server ... ok
+test tests::bulk_get_inline_attachments_parse ... ok
+test tests::all_docs_sends_only_the_requested_options ... ok
+test tests::bulk_docs_with_new_edits_reports_each_doc ... ok
+test tests::adapter_from_an_auth_client_sends_its_session_cookie ... ok
+test tests::bulk_get_asks_for_history_attachments_and_latest ... ok
+test tests::design_and_local_ids_keep_prefix_slash ... ok
+test tests::changes_asks_for_every_leaf_and_posts_doc_ids ... ok
+test tests::changes_conflicts_fetch_docs_but_do_not_return_them ... ok
+test tests::compact_posts_json_and_reports_errors ... ok
+test tests::database_created_concurrently_is_not_an_error ... ok
+test tests::destroy_deletes_the_database_and_reports_errors ... ok
+test tests::get_attachment_returns_the_raw_bytes ... ok
+test tests::existing_database_is_not_created_again ... ok
+test tests::get_sends_only_the_requested_options ... ok
+test tests::open_revs_reply_yields_the_winning_leaf ... ok
+test tests::login_with_bad_credentials_is_unauthorized ... ok
+test tests::bulk_docs_rejects_too_deep_documents_like_local_adapters ... ok
+test tests::plain_changes_is_a_get_with_only_since ... ok
+test tests::query_keys_are_json_and_url_encoded ... ok
+test tests::missing_database_is_created_on_first_use ... ok
+test tests::put_local_rejects_too_deep_documents ... ok
+test tests::id_is_server_uuid_plus_db_or_the_url_without_credentials ... ok
+test tests::put_local_sends_the_doc_and_reports_errors ... ok
+test tests::remove_local_deletes_the_current_rev ... ok
+test tests::security_document_round_trips_over_http ... ok
+test tests::http_errors_map_to_rouch_errors ... ok
+test tests::database_setup_retries_a_500_until_couchdb_answers ... ok
+test tests::stalled_server_times_out ... ok
+test tests::destroy_retries_a_500_until_couchdb_answers ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_adapter_memory-9156d37cefebd8b4)
+
+running 18 tests
+test tests::destroy_announces_a_reset ... ok
+test tests::changes_last_seq_advances_when_all_filtered ... ok
+test tests::changes_all_docs_style_nonempty_for_deleted ... ok
+test tests::all_docs_total_rows_is_full_count ... ok
+test tests::all_docs_with_include_docs ... ok
+test tests::attachment_store_is_garbage_collected ... ok
+test tests::attachment_roundtrip ... ok
+test tests::get_latest_stays_on_requested_branch ... ok
+test tests::destroy_clears_everything ... ok
+test tests::info_empty_db ... ok
+test tests::replicated_known_revision_is_a_noop ... ok
+test tests::recreate_deleted_doc_with_same_content ... ok
+test tests::replicated_stubs_need_stored_bytes ... ok
+test tests::revs_diff ... ok
+test tests::security_document_round_trip ... ok
+test tests::stemming_drops_stored_bodies ... ok
+test tests::subscribers_are_notified_after_each_committed_change ... ok
+test tests::default_rev_limit_is_1000 ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_adapter_redb-1347627dd710d2cc)
+
+running 55 tests
+test tests::bulk_get_basic ... ok
+test tests::all_docs_include_docs ... ok
+test tests::changes_include_docs_deleted ... ok
+test tests::all_docs_includes_conflicts ... ok
+test tests::bounded_queries_do_not_scan_everything ... ok
+test tests::attachment_metadata_survives_a_reopen ... ok
+test tests::flat_record_roundtrip_preserves_tree ... ok
+test tests::changes_include_docs ... ok
+test tests::all_docs_descending_with_range ... ok
+test tests::corrupt_record_is_an_error_not_a_missing_doc ... ok
+test tests::destroy_announces_a_reset ... ok
+test tests::info_empty ... ok
+test tests::destroy_clears_all ... ok
+test tests::get_with_conflicts ... ok
+test tests::record_with_bad_parent_index_is_an_error ... ok
+test tests::deep_bodies_decode ... ok
+test tests::local_docs ... ok
+test tests::legacy_attachment_keys_are_migrated ... ok
+test tests::put_with_rev_on_nonexistent ... ok
+test tests::nul_ids_have_disjoint_body_keys ... ok
+test tests::recreate_deleted_doc_with_same_content ... ok
+test tests::legacy_nested_records_still_load ... ok
+test tests::remove_local_nonexistent ... ok
+test tests::replicated_known_revision_is_a_noop ... ok
+test tests::newer_schema_is_refused ... ok
+test tests::replication_with_revisions_ancestry ... ok
+test tests::revs_diff_identifies_missing ... ok
+test tests::stale_bodies_of_stemmed_revisions ... ok
+test tests::stemming_drops_stored_bodies ... ok
+test tests::security_document_round_trip ... ok
+test tests::subscribers_are_notified_after_each_committed_change ... ok
+test tests::storage_work_runs_off_the_runtime_thread ... ok
+test upgrade::tests::case_duplicates_across_branches_are_joined ... ok
+test upgrade::tests::dry_run_changes_nothing ... ok
+test upgrade::tests::corrupt_record_names_the_document_and_changes_nothing ... ok
+test upgrade::tests::a_failed_directory_sync_is_a_warning ... ok
+test upgrade::tests::guard_type_name_never_changes ... ok
+test upgrade::tests::an_empty_local_id_is_refused ... ok
+test upgrade::tests::foreign_redb_files_are_refused ... ok
+test upgrade::tests::existing_backup_or_unwritable_destination_refuses_the_upgrade ... ok
+test upgrade::tests::dry_run_reports_what_the_upgrade_does ... ok
+test upgrade::tests::case_duplicates_are_merged_and_differing_bodies_reported ... ok
+test upgrade::tests::fresh_file_has_the_guard ... ok
+test upgrade::tests::legacy_file_is_refused_and_left_unchanged ... ok
+test upgrade::tests::local_docs_move_out_of_the_document_store ... ok
+test upgrade::tests::newer_legacy_schema_is_refused ... ok
+test upgrade::tests::local_id_collision_is_refused ... ok
+test upgrade::tests::unknown_future_guard_is_reported ... ok
+test upgrade::tests::upper_case_revisions_are_normalized ... ok
+test upgrade::tests::pre_release_files_are_relocated_with_their_security ... ok
+test upgrade::tests::pre_release_files_can_be_upgraded_without_a_backup ... ok
+test upgrade::tests::winner_changes_are_reported ... ok
+test upgrade::tests::the_advice_matches_the_backup ... ok
+test upgrade::tests::upgrade_with_backup ... ok
+test upgrade::tests::failures_leave_the_file_legacy_and_no_backup_behind ... ok
+
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.89s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_bench-21ed5e8896589bd9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_changes-e12a89188836d9a1)
+
+running 27 tests
+test tests::change_sender_subscribe ... ok
+test tests::fetch_errors_are_reported_and_retried ... ok
+test tests::cancelled_event_stream_completes_at_the_last_seq ... ok
+test tests::filtered_limited_stream_delivers_the_limit ... ok
+test tests::events_signal_paused_and_active ... ok
+test tests::complete_reports_scanned_last_seq ... ok
+test tests::free_functions_apply_the_selector ... ok
+test tests::limit_counts_post_filter_events ... ok
+test tests::live_changes_via_channel ... ok
+test tests::dropped_receiver_stops_polling ... ok
+test tests::heartbeat_shorter_than_poll_still_delivers_changes ... ok
+test tests::live_changes_pass_doc_ids_conflicts_and_style ... ok
+test tests::live_feed_wakes_on_adapter_notifications ... ok
+test tests::live_changes_survives_fetch_errors ... ok
+test tests::live_feed_polls_an_adapter_without_notifications ... ok
+test tests::one_shot_changes ... ok
+test tests::one_shot_changes_pass_doc_ids_conflicts_and_style ... ok
+test tests::one_shot_changes_since ... ok
+test tests::seq_after_orders_numeric_and_opaque_sequences ... ok
+test tests::one_shot_with_limit ... ok
+test tests::timeout_ends_an_idle_feed ... ok
+test tests::timeout_shorter_than_poll_keeps_late_changes ... ok
+test tests::cancel_interrupts_a_blocked_send ... ok
+test tests::queued_notifications_cost_one_fetch ... ok
+test tests::next_event_survives_being_dropped_mid_fetch ... ok
+test tests::live_feed_loses_no_change_under_concurrent_writes ... ok
+test tests::live_stream_initial_then_new ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/main.rs (target/debug/deps/rouchdb-771dc369d0a4831b)
+
+running 2 tests
+test tests::redact_credentials_masks_passwords_only ... ok
+test tests::percent_encode_userinfo_escapes_reserved_bytes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_tests.rs (target/debug/deps/cli_tests-35cb544b817f84c9)
+
+running 70 tests
+test all_docs_descending ... ok
+test all_docs_limit_and_skip ... ok
+test changes_returns_all ... ok
+test all_docs_include_docs ... ok
+test all_docs_lists_all ... ok
+test all_docs_key_range ... ok
+test changes_descending_lists_newest_first ... ok
+test changes_include_docs_adds_bodies ... ok
+test dump_empty_database ... ok
+test compact_returns_ok ... ok
+test delete_with_wrong_rev_fails ... ok
+test changes_with_limit ... ok
+test changes_with_since ... ok
+test delete_removes_document ... ok
+test dump_exports_all ... ok
+test dump_includes_attachments_inline ... ok
+test find_invalid_selector_fails ... ok
+test dump_warns_about_conflicting_revisions ... ok
+test deep_documents_up_to_the_limit_are_accepted ... ok
+test find_with_fields ... ok
+test find_with_selector ... ok
+test get_existing_document ... ok
+test dump_to_closed_pipe_exits_cleanly ... ok
+test dump_then_import_round_trip_preserves_data_and_attachments ... ok
+test get_conflicts_lists_losing_leaves_only_with_flag ... ok
+test find_sort_skip_and_limit_return_exact_ordered_ids ... ok
+test get_nonexistent_document_fails ... ok
+test get_with_pretty_flag ... ok
+test get_with_specific_rev ... ok
+test import_invalid_file_fails ... ok
+test dump_then_import_round_trip_keeps_every_doc_design_doc_and_unicode_id ... ok
+test import_rejects_attachment_stubs_without_data ... ok
+test import_reports_docs_without_id ... ok
+test import_reports_conflicts_per_id ... ok
+test import_writes_documents ... ok
+test import_recreates_deleted_document ... ok
+test info_empty_database ... ok
+test import_many_docs_across_batches ... ok
+test info_db_name_defaults_to_file_stem_and_can_be_overridden ... ok
+test info_shows_doc_count ... ok
+test post_generates_id ... ok
+test put_creates_document ... ok
+test put_force_creates_missing_document ... ok
+test put_existing_without_rev_is_a_conflict ... ok
+test put_force_upserts_existing_document ... ok
+test read_commands_on_missing_file_fail_without_creating_it ... ok
+test put_invalid_json_fails ... ok
+test put_updates_document_with_rev ... ok
+test replicate_errors_in_output_do_not_print_url_password ... ok
+test replicate_env_credentials_apply_to_url_source ... ok
+test replicate_from_couchdb_with_env_credentials ... ignored, requires CouchDB
+test replicate_from_missing_redb_source_fails_without_creating_it ... ok
+test put_after_delete_recreates_document ... ok
+test replicate_rejected_by_couchdb_validator_exits_non_zero ... ignored, requires CouchDB
+test output_write_errors_other_than_broken_pipe_fail ... ok
+test replicate_to_couchdb ... ignored, requires CouchDB
+test put_with_stale_rev_is_a_conflict ... ok
+test replicate_to_couchdb_with_env_credentials ... ignored, requires CouchDB
+test replicate_error_does_not_print_url_password ... ok
+test replicate_ignores_empty_env_user ... ok
+test replicate_from_couchdb_copies_every_leaf_with_its_history ... ok
+test replicate_checkpoint_follows_the_files_not_their_names ... ok
+test replicate_url_credentials_take_precedence_over_env ... ok
+test usage_errors_exit_2_with_empty_stdout ... ok
+test replicate_uses_credentials_from_env ... ok
+test replicate_with_rejected_docs_exits_non_zero ... ok
+test write_commands_create_missing_file ... ok
+test replicate_to_couchdb_sends_revision_history_and_resumes_from_checkpoint ... ok
+test replicate_selector_copies_only_matching_docs ... ok
+test replicate_redb_to_redb_copies_docs_revisions_and_conflicts ... ok
+
+test result: ok. 66 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 5.16s
+
+     Running tests/migrate.rs (target/debug/deps/migrate-8c53d35f66d545d3)
+
+running 2 tests
+test migrate_refuses_an_existing_backup_and_supports_no_backup ... ok
+test legacy_file_is_refused_with_a_hint_then_migrated ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_compat_tests-f484b7227ccb15ba)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/redb_0_4_to_0_5.rs (target/debug/deps/redb_0_4_to_0_5-f8f7b2443c872cc2)
+
+running 4 tests
+test a_file_created_by_0_5_is_refused_by_0_4 ... ok
+test case_duplicates_and_winner_changes_written_by_0_4 ... ok
+test open_with_upgrades_and_locks_0_4_out ... ok
+test a_0_4_file_is_refused_then_upgraded_with_a_backup ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.15s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_core-4a685e8b97e053cd)
+
+running 134 tests
+test collation::tests::bool_ordering ... ok
+test adapter::tests::default_adapter_has_no_change_notifications ... ok
+test collation::tests::array_ordering ... ok
+test collation::tests::integer_float_comparison_is_exact ... ok
+test collation::tests::large_integer_precision ... ok
+test collation::tests::negative_zero_equals_zero ... ok
+test collation::tests::null_equality ... ok
+test collation::tests::number_ordering ... ok
+test collation::tests::accepted_divergence_objects_collate_in_sorted_key_order ... ok
+test collation::tests::string_ordering ... ok
+test collation::tests::object_ordering ... ok
+test collation::tests::strings_compare_by_utf16_code_units ... ok
+test collation::tests::type_ordering ... ok
+test collation::tests::indexable_string_preserves_order ... ok
+test collation::tests::indexable_string_negative_numbers ... ok
+test collation::tests::indexable_string_format ... ok
+test document::tests::all_docs_rows_match_couchdb_json ... ok
+test adapter::tests::default_put_security_is_not_a_silent_success ... ok
+test document::tests::bulk_docs_options_defaults ... ok
+test document::tests::document_from_json_minimal ... ok
+test document::tests::document_from_json_not_object ... ok
+test document::tests::accepted_divergence_rev_hash_ignores_key_order ... ok
+test document::tests::document_from_json_roundtrip ... ok
+test document::tests::document_from_json_with_deleted_and_attachments ... ok
+test document::tests::from_json_attachment_stub_without_data ... ok
+test document::tests::attachment_revpos_and_encoding_round_trip ... ok
+test document::tests::from_json_attachment_defaults_content_type ... ok
+test document::tests::from_json_couchdb_inline_attachment_without_length ... ok
+test document::tests::from_json_minimal_inline_attachment ... ok
+test document::tests::from_json_rejects_invalid_attachments ... ok
+test document::tests::from_json_rejects_wrongly_typed_special_fields ... ok
+test document::tests::invalid_revision ... ok
+test document::tests::option_defaults_match_new ... ok
+test document::tests::prepare_for_write_interprets_special_members ... ok
+test document::tests::prepare_for_write_keeps_explicit_fields ... ok
+test document::tests::prepare_for_write_rejects_non_object_body ... ok
+test document::tests::prepare_for_write_rejects_unknown_special_member ... ok
+test document::tests::prepare_for_write_validates_reserved_ids ... ok
+test document::tests::rev_hash_depends_on_deleted_and_parent ... ok
+test document::tests::rev_hash_depends_on_attachments ... ok
+test document::tests::revision_display_and_parse ... ok
+test document::tests::revision_ordering ... ok
+test document::tests::revision_ids_are_normalized_like_couchdb ... ok
+test document::tests::rev_hash_golden_values ... ok
+test document::tests::revision_rejects_empty_hash ... ok
+test document::tests::seq_display ... ok
+test document::tests::seq_from_u64 ... ok
+test document::tests::seq_str_as_num ... ok
+test document::tests::seq_to_query_string ... ok
+test document::tests::to_json_deleted_document ... ok
+test document::tests::stub_without_digest_is_a_stub ... ok
+test document::tests::to_json_non_object_data ... ok
+test document::tests::to_json_inline_attachment_is_base64 ... ok
+test document::tests::to_json_with_attachments ... ok
+test error::tests::upgrade_required_names_the_ways_to_upgrade_with_a_quoted_path ... ok
+test json::tests::depths ... ok
+test json::tests::serde_json_depth_limit_is_detected ... ok
+test merge::tests::collect_conflicts_deleted_leaves_excluded ... ok
+test merge::tests::conflicts_on_branches ... ok
+test merge::tests::is_deleted_empty_tree ... ok
+test merge::tests::is_deleted_true_when_winner_deleted ... ok
+test merge::tests::is_deleted_false_for_normal ... ok
+test json::tests::documents_are_checked_against_the_limit ... ok
+test merge::tests::latest_leaf_stays_on_requested_branch ... ok
+test merge::tests::latest_leaf_walks_linear_chain_to_tip ... ok
+test merge::tests::merge_and_stem_reports_stemmed_revisions ... ok
+test merge::tests::merge_creates_conflict_branch ... ok
+test merge::tests::merge_disjoint_creates_new_root ... ok
+test merge::tests::merge_bridging_two_roots_joins_them ... ok
+test merge::tests::merge_duplicate_is_internal_node ... ok
+test merge::tests::merge_exact_root_match_no_children ... ok
+test merge::tests::merge_existing_rev_promotes_missing_status ... ok
+test merge::tests::merge_extends_linear_chain ... ok
+test merge::tests::merge_into_all_overlapping_roots ... ok
+test merge::tests::merge_into_empty_tree_is_new_leaf ... ok
+test merge::tests::merge_is_idempotent_and_order_independent ... ok
+test merge::tests::merge_keeps_older_incoming_ancestors ... ok
+test json::tests::decodes_up_to_the_limit ... ok
+test merge::tests::merge_keeps_conflict_children_sorted_by_hash ... ok
+test merge::tests::merge_same_branch_extends_deeper ... ok
+test merge::tests::merge_tree_applies_rev_limit ... ok
+test merge::tests::no_conflicts_on_linear ... ok
+test merge::tests::remove_leaves_drops_unshared_ancestors ... ok
+test json::tests::input_holds_documents_up_to_the_limit ... ok
+test merge::tests::remove_leaves_drops_whole_root ... ok
+test merge::tests::remove_leaves_keeps_shared_ancestors_and_ignores_internal_nodes ... ok
+test merge::tests::revs_diff_one_matches_couchdb ... ok
+test merge::tests::stem_prunes_deep_branch_above_cut_line ... ok
+test merge::tests::stem_limits_every_path_when_branches_share_a_cut_ancestor ... ok
+test merge::tests::roots_are_sorted_by_position_then_hash ... ok
+test merge::tests::stem_prunes_old_revisions ... ok
+test merge::tests::stem_short_tree_unchanged ... ok
+test merge::tests::stem_splits_at_branch_point ... ok
+test merge::tests::winning_rev_all_deleted_picks_highest_generation ... ok
+test merge::tests::winning_rev_conflict_picks_higher_hash ... ok
+test merge::tests::winning_rev_empty_tree ... ok
+test merge::tests::winning_rev_conflict_prefers_longer ... ok
+test merge::tests::winning_rev_live_beats_deleted_of_higher_generation ... ok
+test merge::tests::winning_rev_non_deleted_beats_deleted ... ok
+test merge::tests::winning_rev_simple ... ok
+test rev_tree::tests::build_path_from_revs_works ... ok
+test rev_tree::tests::collect_leaves_simple_chain ... ok
+test rev_tree::tests::collect_leaves_with_conflict ... ok
+test rev_tree::tests::find_rev_ancestry_linear_chain ... ok
+test rev_tree::tests::path_from_revisions_validates_history ... ok
+test rev_tree::tests::rev_exists_finds_nodes ... ok
+test rev_tree::tests::revs_info_lists_only_the_requested_branch ... ok
+test rev_tree::tests::root_to_leaf_paths ... ok
+test write::tests::new_document_rev_is_generation_one_hash_of_body ... ok
+test write::tests::local_documents_follow_couchdb ... ok
+test write::tests::can_update_and_delete_a_losing_leaf ... ok
+test write::tests::recreate_after_delete_extends_tombstone ... ok
+test write::tests::deletion_and_empty_edit_get_distinct_revs ... ok
+test write::tests::attachment_only_edits_get_distinct_revs ... ok
+test write::tests::non_leaf_or_unknown_parent_conflicts ... ok
+test write::tests::replicated_attachments_keep_revpos_and_encoding ... ok
+test write::tests::replicated_deletion_of_winner_reports_live_doc ... ok
+test write::tests::replicated_existing_rev_is_noop ... ok
+test write::tests::replicated_invalid_revisions_rejected ... ok
+test write::tests::replicated_revisions_are_normalized ... ok
+test write::tests::replicated_revisions_are_type_checked ... ok
+test write::tests::revision_of_a_missing_document_conflicts ... ok
+test write::tests::retrying_an_update_with_the_old_rev_conflicts ... ok
+test write::tests::rev_on_a_missing_document_is_rejected ... ok
+test write::tests::revpos_is_the_generation_that_uploaded_the_data ... ok
+test write::tests::tombstones_drop_attachments_and_explicit_sets_are_exact ... ok
+test write::tests::stubs_are_matched_by_name ... ok
+test write::tests::unknown_stub_is_missing_stub ... ok
+test write::tests::writes_report_stemmed_revisions ... ok
+test write::tests::writes_apply_the_rev_limit ... ok
+test collation::tests::indexable_string_matches_collate ... ok
+test document::tests::prepare_for_write_normalizes_and_limits_depth ... ok
+test write::tests::replicated_documents_are_depth_checked ... ok
+test collation::tests::properties::collate_is_a_total_order_matched_by_the_encoding ... ok
+
+test result: ok. 134 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/rev_tree_properties.rs (target/debug/deps/rev_tree_properties-8db79645c8d8b974)
+
+running 9 tests
+test revision_display_parse_round_trip ... ok
+test document_json_round_trip ... ok
+test merge_is_idempotent ... ok
+test merge_with_limit_is_merge_then_stem ... ok
+test remove_leaves_semantics ... ok
+test merge_is_order_independent ... ok
+test stem_invariants ... ok
+test winner_matches_brute_force ... ok
+test rev_hash_is_injective ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.06s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_query-cc8411ad3f256088)
+
+running 69 tests
+test mango::tests::and_operator ... ok
+test mango::tests::all_operator ... ok
+test mango::tests::combined_operators_on_field ... ok
+test mango::tests::accepted_divergence_object_key_order_is_not_significant ... ok
+test mango::tests::all_uses_exact_membership ... ok
+test mango::tests::combinators_inside_field_and_elem_match ... ok
+test mango::tests::array_index_and_escaped_dot_paths ... ok
+test mango::tests::elem_match ... ok
+test mango::tests::elem_match_subdocument_array ... ok
+test mango::tests::elem_match_operator_on_scalar_array ... ok
+test mango::tests::eq_explicit ... ok
+test mango::tests::empty_combinators_are_true_but_a_bare_one_finds_nothing ... ok
+test mango::tests::empty_sort_field_is_an_error_not_a_panic ... ok
+test mango::tests::eq_implicit ... ok
+test mango::tests::error_reasons_are_couchdb_texts ... ok
+test mango::tests::exists ... ok
+test mango::tests::apply_changes_drops_deleted_and_design_documents ... ok
+test mango::tests::find_skips_design_documents ... ok
+test mango::tests::empty_object_below_the_root_is_an_equality_test ... ok
+test mango::tests::gt_gte_lt_lte ... ok
+test mango::tests::in_and_nin_compare_array_elements ... ok
+test mango::tests::in_nin ... ok
+test mango::tests::key_map_match_tests_object_keys ... ok
+test mango::tests::index_candidates_are_narrowed_by_the_first_field ... ok
+test mango::tests::invalid_selectors_are_rejected ... ok
+test mango::tests::missing_field_eq_fails ... ok
+test mango::tests::missing_field_ne_does_not_match ... ok
+test mango::tests::mod_does_not_panic_on_overflow_and_rejects_zero_divisor ... ok
+test mango::tests::mod_operator ... ok
+test mango::tests::multiple_field_conditions ... ok
+test mango::tests::ne ... ok
+test mango::tests::nested_field_access ... ok
+test mango::tests::missing_field_does_not_match_negations ... ok
+test mango::tests::nested_subdocument_selector_matches ... ok
+test mango::tests::nor_operator ... ok
+test mango::tests::not_needs_an_object_argument ... ok
+test mango::tests::not_operator ... ok
+test mango::tests::not_with_several_operators_negates_the_conjunction ... ok
+test mango::tests::or_operator ... ok
+test mango::tests::project_fields ... ok
+test mango::tests::projection_supports_nested_paths_without_forcing_id ... ok
+test mango::tests::size_operator ... ok
+test mango::tests::regex_match ... ok
+test mango::tests::sort_ties_follow_the_input_order_reversed_when_descending ... ok
+test mango::tests::sorted_find_skips_documents_without_the_sort_fields ... ok
+test mango::tests::type_check ... ok
+test mango::tests::regex_supports_lookaround_and_backreferences_like_pcre ... ok
+test mapreduce::tests::custom_reduce_receives_key_and_id_pairs ... ok
+test mapreduce::tests::default_view_options_are_couchdb_defaults ... ok
+test mapreduce::tests::builtin_sum_and_stats_follow_couchdb ... ok
+test mapreduce::tests::default_view_options_reduce_and_include_the_end_key ... ok
+test mapreduce::tests::descending_and_limit ... ok
+test mapreduce::tests::design_docs_are_not_mapped ... ok
+test mapreduce::tests::include_docs_follows_linked_ids ... ok
+test mapreduce::tests::include_docs_fills_row_docs ... ok
+test mapreduce::tests::include_docs_is_invalid_for_reduce ... ok
+test mapreduce::tests::keys_queries_keep_key_order_and_duplicates ... ok
+test mapreduce::tests::map_emits_all ... ok
+test mapreduce::tests::map_with_key_filter ... ok
+test mapreduce::tests::new_options_reduce_by_default ... ok
+test mapreduce::tests::query_view_reduces_a_single_key_without_grouping ... ok
+test mapreduce::tests::reduce_group ... ok
+test mapreduce::tests::reduce_count ... ok
+test mapreduce::tests::reduce_group_level_zero_is_global ... ok
+test mapreduce::tests::reduce_grouped_honors_skip_and_limit ... ok
+test mapreduce::tests::reduce_keys_need_exact_grouping_like_couchdb ... ok
+test mapreduce::tests::reduce_sum ... ok
+test mapreduce::tests::start_end_key_range ... ok
+test mapreduce::tests::total_rows_and_offset_describe_the_whole_view ... ok
+
+test result: ok. 69 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_replication-ff2b4b753aabb5f0)
+
+running 67 tests
+test checkpoint::tests::compare_different_session_with_history ... ok
+test checkpoint::tests::compare_no_common_session ... ok
+test checkpoint::tests::compare_same_session ... ok
+test checkpoint::tests::compare_same_session_takes_the_smaller_seq_on_either_side ... ok
+test checkpoint::tests::compare_uses_the_newest_common_session_and_its_smaller_seq ... ok
+test checkpoint::tests::history_is_capped ... ok
+test checkpoint::tests::only_permission_errors_mark_a_source_read_only ... ok
+test checkpoint::tests::history_keeps_earlier_sessions_newest_first ... ok
+test checkpoint::tests::pick_common_handles_opaque_seqs ... ok
+test checkpoint::tests::pick_common_takes_the_smaller_numeric_seq_in_either_order ... ok
+test checkpoint::tests::pick_common_takes_the_smaller_opaque_seq_in_either_order ... ok
+test checkpoint::tests::replication_id_deterministic ... ok
+test protocol::tests::a_short_batch_ends_the_pass_without_another_changes_request ... ok
+test protocol::tests::audit_regression_cancel_interrupts_pending_adapter_call ... ok
+test protocol::tests::bulk_get_not_found_for_a_conflicting_leaf_fails_the_batch ... ok
+test protocol::tests::bulk_get_not_found_for_a_live_leaf_fails_the_batch ... ok
+test protocol::tests::bulk_get_errors_fail_the_batch ... ok
+test protocol::tests::cancel_ends_live_replication_with_one_complete ... ok
+test protocol::tests::bulk_get_not_found_for_superseded_rev_is_skipped ... ok
+test protocol::tests::checkpoint_read_errors_are_surfaced ... ok
+test protocol::tests::checkpoint_round_trips_the_couchdb_local_rev ... ok
+test protocol::tests::checkpoint_saved_after_already_synced_batches ... ok
+test protocol::tests::checkpoint_saved_when_filter_matches_nothing ... ok
+test protocol::tests::checkpoint_write_conflict_is_retried_once ... ok
+test protocol::tests::checkpoint_write_errors_are_reported ... ok
+test protocol::tests::docids_fingerprint_is_unambiguous_and_order_free ... ok
+test protocol::tests::denied_doc_does_not_stall_replication ... ok
+test protocol::tests::custom_filters_do_not_share_a_checkpoint ... ok
+test protocol::tests::docs_written_counts_couchdb_style_empty_replies ... ok
+test protocol::tests::docs_written_excludes_docs_couchdb_rejected_in_a_batch ... ok
+test protocol::tests::custom_filter_keeps_scanning_past_a_fully_rejected_batch ... ok
+test protocol::tests::audit_regression_cancel_closes_full_event_queue ... ok
+test protocol::tests::dropping_the_handle_ends_live_replication ... ok
+test protocol::tests::failed_probe_of_a_replaced_source_rescans_from_the_start ... ok
+test protocol::tests::live_replication_honors_since ... ok
+test protocol::tests::live_replication_reports_write_failures ... ok
+test protocol::tests::live_replication_without_checkpoints_does_not_rescan ... ok
+test protocol::tests::live_replication_pauses_only_when_caught_up ... ok
+test protocol::tests::peers_with_the_same_id_replicate_without_checkpoints ... ok
+test protocol::tests::push_then_pull_converges_on_conflicts ... ok
+test protocol::tests::read_only_source_still_checkpoints ... ok
+test protocol::tests::replicate_already_synced ... ok
+test protocol::tests::live_replication_checks_the_id_of_a_target_without_notices ... ok
+test protocol::tests::replicate_empty_databases ... ok
+test protocol::tests::replicate_carries_attachments ... ok
+test protocol::tests::replicate_filtered_by_custom_closure ... ok
+test protocol::tests::replicate_filtered_by_doc_ids ... ok
+test protocol::tests::replicate_batched ... ok
+test protocol::tests::replicate_no_filter_unchanged ... ok
+test protocol::tests::replicate_filtered_by_selector ... ok
+test protocol::tests::replicate_filtered_incremental ... ok
+test protocol::tests::replicate_propagates_conflict_branches ... ok
+test protocol::tests::replicate_filtered_with_deletes ... ok
+test protocol::tests::replicate_incremental ... ok
+test protocol::tests::replicate_source_to_target ... ok
+test protocol::tests::live_replication_started_offline_checkpoints_under_the_real_id ... ok
+test protocol::tests::replicate_with_deletes ... ok
+test protocol::tests::replicate_selector_sees_reserved_fields ... ok
+test protocol::tests::live_retry_backs_off_exponentially_by_default ... ok
+test protocol::tests::selector_on_deleted_replicates_only_tombstones ... ok
+test protocol::tests::same_named_peers_get_distinct_replication_ids ... ok
+test protocol::tests::seq_after_orders_numeric_and_opaque_sequences ... ok
+test protocol::tests::source_checkpoint_write_errors_are_reported ... ok
+test protocol::tests::transient_write_error_stops_without_advancing ... ok
+test protocol::tests::unauthorized_write_is_denied_like_forbidden ... ok
+test protocol::tests::transport_error_mid_run_resumes_from_the_last_checkpointed_batch ... ok
+test protocol::tests::live_replication_wakes_on_source_notifications ... ok
+
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/checkpoints.rs (target/debug/deps/checkpoints-8532b2bafff6aef3)
+
+running 6 tests
+test checkpoint_false_stores_no_checkpoint_on_either_side ... ok
+test same_session_rollback_resumes_from_the_smaller_seq ... ok
+test replaced_source_with_the_same_name_is_rescanned ... ok
+test checkpoint_is_written_to_both_sides_with_the_final_seq ... ok
+test rolled_back_target_resumes_from_the_common_session ... ok
+test filtered_run_does_not_make_an_unfiltered_one_skip_docs ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_server-16dbaab071c248d2)
+
+running 14 tests
+test auth::tests::constant_time_eq_compares_contents_and_lengths ... ok
+test host::tests::loopback_detection ... ok
+test host::tests::allowed_hosts_extend_the_list ... ok
+test host::tests::allowed_host_values_are_validated ... ok
+test host::tests::non_loopback_binds_check_only_with_allowed_hosts ... ok
+test extract::tests::json_content_types ... ok
+test auth::tests::session_cookie_is_secure_only_behind_a_trusted_https_proxy ... ok
+test host::tests::loopback_binds_accept_only_loopback_names_and_the_bind_address ... ok
+test tasks::tests::sync_status_summary_maps_push_pull_and_worst_state ... ok
+test tasks::tests::audit_regression_summary_isolates_remote_connections ... ok
+test tasks::tests::sync_status_summary_offline_when_no_tasks ... ok
+test routes::tests::write_result_maps_failures_to_couchdb_errors ... ok
+test tasks::tests::sync_status_summary_surfaces_last_error ... ok
+test tasks::tests::tracks_live_replication_progress_and_cleans_up_on_cancel ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src/main.rs (target/debug/deps/rouchdb_server-80cf77898ce66ea6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/active_tasks.rs (target/debug/deps/active_tasks-bc8f5967e6514a65)
+
+running 3 tests
+test router_with_tasks_keeps_upstream_authentication ... ok
+test registry_counts_batches_and_live_passes_without_double_counting ... ok
+test progress_reports_rejected_writes_without_claiming_success ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/all_docs.rs (target/debug/deps/all_docs-e1b7be65320d8e9d)
+
+running 9 tests
+test keys_rows_match_couchdb ... ok
+test design_doc_range_lists_design_docs ... ok
+test key_is_json_decoded ... ok
+test invalid_json_key_is_a_bad_request ... ok
+test keys_query_parameter ... ok
+test keys_in_post_body ... ok
+test non_string_keys_sort_before_every_doc_id ... ok
+test start_and_end_keys_are_json_decoded ... ok
+test http_adapter_all_docs_against_server ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests/attachments.rs (target/debug/deps/attachments-9ac9398b5f9dd7e7)
+
+running 4 tests
+test put_attachment_without_rev_creates_the_document ... ok
+test get_attachment_honors_rev ... ok
+test attachment_names_may_contain_slashes ... ok
+test attachment_revision_from_if_match ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/auth_fidelity.rs (target/debug/deps/auth_fidelity-ab051d3f43da5817)
+
+running 8 tests
+test anonymous_requests_get_couchdb_reasons ... ok
+test anonymous_wrong_methods_on_the_root_are_405 ... ok
+test wrong_basic_credentials_are_rejected_on_every_route ... ok
+test session_cookie_expires_like_couchdb_and_is_refreshed ... ok
+test logging_in_keeps_other_live_sessions ... ok
+test the_first_session_cookie_is_the_session ... ok
+test malformed_session_cookies_are_400 ... ok
+test session_timeout_is_configurable ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/auth_matrix.rs (target/debug/deps/auth_matrix-bce533da668adb9e)
+
+running 4 tests
+test public_endpoints_are_reachable_without_credentials ... ok
+test wrong_logins_are_rejected_without_a_session ... ok
+test session_cookie_is_found_among_other_cookies ... ok
+test every_route_rejects_missing_or_wrong_credentials_without_side_effects ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/basics.rs (target/debug/deps/basics-3b2165cd19ffeeaa)
+
+running 6 tests
+test javascript_views_are_reported_as_unsupported ... ok
+test bulk_docs_both_modes ... ok
+test security_document_round_trip ... ok
+test document_crud ... ok
+test server_level_endpoints ... ok
+test database_endpoints ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/changes.rs (target/debug/deps/changes-2af781678a0bd154)
+
+running 12 tests
+test design_and_selector_filters ... ok
+test doc_ids_filter_in_get ... ok
+test eventsource_feed ... ok
+test longpoll_returns_at_once_when_changes_exist ... ok
+test continuous_stops_at_limit ... ok
+test post_accepts_a_numeric_since ... ok
+test unsupported_filters_are_rejected_instead_of_ignored ... ok
+test continuous_sends_heartbeats ... ok
+test longpoll_waits_for_the_next_change ... ok
+test longpoll_times_out_with_no_results ... ok
+test longpoll_sees_writes_made_outside_the_server ... ok
+test continuous_streams_one_change_per_line ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s
+
+     Running tests/couchdb_fidelity.rs (target/debug/deps/couchdb_fidelity-ec4261a54ddce77b)
+
+running 16 tests
+test conflict_and_uuid_formats ... ok
+test bulk_docs_without_new_edits_reports_only_errors ... ok
+test bulk_docs_rejects_invalid_documents_as_a_whole ... ok
+test content_type_and_method_errors ... ok
+test attachment_get_sends_digest_etag_and_accept_ranges ... ok
+test couchdb_differential ... ignored, requires CouchDB
+test all_docs_query_parse_errors ... ok
+test attachment_put_on_missing_doc_creates_the_first_revision ... ok
+test document_read_options_are_honored ... ok
+test changes_report_pending_and_omit_deleted_false ... ok
+test illegal_document_ids_use_illegal_docid ... ok
+test invalid_revisions_are_bad_requests ... ok
+test writes_on_missing_documents_answer_like_couchdb ... ok
+test missing_and_deleted_documents_have_couchdb_reasons ... ok
+test write_responses_carry_location_and_etag ... ok
+test find_errors_have_couchdb_names ... ok
+
+test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/db_lifecycle.rs (target/debug/deps/db_lifecycle-dec1eaef2b717cf3)
+
+running 3 tests
+test deleted_database_is_gone_until_recreated ... ok
+test audit_regression_recreation_waits_until_destroy_finishes ... ok
+test deleted_database_ends_waiting_changes_feeds ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/deep_json.rs (target/debug/deps/deep_json-5e381272c07b19c5)
+
+running 2 tests
+test deeper_documents_get_the_write_error ... ok
+test documents_up_to_the_limit_are_accepted_on_every_route ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/deep_json_binary.rs (target/debug/deps/deep_json_binary-77b3b6f139a11c06)
+
+running 2 tests
+test starts_with_an_index_on_deep_values ... ok
+test documents_and_selectors_up_to_the_limit_are_served ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s
+
+     Running tests/documents.rs (target/debug/deps/documents-141ba18ef0f405c9)
+
+running 8 tests
+test get_sends_etag_and_honors_if_none_match ... ok
+test delete_without_any_revision_is_a_conflict ... ok
+test big_numbers_are_served_as_stored ... ok
+test if_match_must_agree_with_other_revisions ... ok
+test query_and_body_revs_must_agree ... ok
+test if_match_supplies_the_revision ... ok
+test design_docs_use_the_same_revision_rules ... ok
+test design_docs_round_trip_every_member ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/errors.rs (target/debug/deps/errors-4466f89ed8905c74)
+
+running 6 tests
+test put_doc_rejects_invalid_bodies_with_json_errors ... ok
+test body_limit_is_configurable_and_reported_as_json ... ok
+test put_doc_accepts_any_content_type ... ok
+test extractor_rejections_are_json ... ok
+test unsupported_method_is_json_405 ... ok
+test default_body_limit_fits_large_attachments_and_batches ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running tests/pouchdb_setup.rs (target/debug/deps/pouchdb_setup-98a16527c70d15dd)
+
+running 1 test
+test trailing_slash_database_url_keeps_the_same_lifecycle ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/query.rs (target/debug/deps/query-c9f8de3e57fb0c69)
+
+running 10 tests
+test bulk_delete_removes_index_design_docs ... ok
+test find_without_matches_returns_nil_bookmark ... ok
+test create_index_writes_a_query_design_doc ... ok
+test find_rejects_invalid_bookmarks ... ok
+test find_bookmark_combines_with_skip ... ok
+test find_defaults_to_25_results ... ok
+test delete_index_requires_matching_ddoc_and_type ... ok
+test unnamed_index_gets_a_design_doc ... ok
+test find_bookmark_pages_through_all_results ... ok
+test indexes_survive_a_restart ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/replication.rs (target/debug/deps/replication-9e485a8b927f869d)
+
+running 13 tests
+test open_revs_all_includes_deleted_leaf ... ok
+test bulk_get_validates_its_body ... ok
+test purge_removes_revisions ... ok
+test bulk_get_returns_requested_revisions ... ok
+test open_revs_returns_an_array_of_leaves ... ok
+test local_documents_crud ... ok
+test revs_diff_reports_missing_revisions ... ok
+test replication_through_the_server_keeps_full_revision_state ... ok
+test replicate_memory_to_server ... ok
+test replicate_server_to_memory ... ok
+test replicate_memory_to_redb_backed_server ... ok
+test server_uuid_is_the_identity_of_the_served_file ... ok
+test replication_between_same_named_servers_resumes_from_checkpoints ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+
+     Running tests/security.rs (target/debug/deps/security-1d0eefa428e99b76)
+
+running 24 tests
+test admin_credentials_parsing ... ok
+test cors_origin_validation ... ok
+test cors_wildcard_never_allows_credentials ... ok
+test cors_preflight_lists_methods_and_mirrors_requested_headers ... ok
+test cors_actual_responses_expose_etag_and_vary_on_origin ... ok
+test cors_is_disabled_by_default ... ok
+test cors_allows_only_configured_origins ... ok
+test auth_is_off_by_default_for_local_dev ... ok
+test configured_idle_timeout_applies_on_the_paused_clock ... ok
+test allowed_hosts_extend_the_loopback_names ... ok
+test non_loopback_address_without_admin_is_refused ... ok
+test loopback_server_answers_loopback_names_and_requests_without_host ... ok
+test session_cookie_is_secure_only_behind_a_trusted_https_proxy ... ok
+test session_cookie_login_and_logout ... ok
+test session_activity_resets_the_idle_timer ... ok
+test loopback_server_rejects_unknown_host_names_before_anything_else ... ok
+test session_login_accepts_forms_and_rejects_other_content_types ... ok
+test start_server_refuses_before_binding ... ok
+test session_expires_after_the_idle_timeout ... ok
+test responses_forbid_content_sniffing ... ok
+test session_survives_just_under_the_idle_timeout ... ok
+test non_loopback_server_checks_host_only_with_allowed_hosts ... ok
+test host_check_applies_to_requests_over_tcp ... ok
+test http_adapter_authenticates_with_url_credentials ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/startup.rs (target/debug/deps/startup-d651ab2e7f1c09c1)
+
+running 4 tests
+test defaults_check_loopback_names_and_ignore_the_proxy_header ... ok
+test security_options_reach_the_running_server ... ok
+test non_loopback_address_without_admin_is_refused_before_opening_the_database ... ok
+test admin_or_opt_in_passes_the_startup_check ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_views-393dc0a60253ad39)
+
+running 9 tests
+test tests::design_document_name_strips_the_prefix ... ok
+test design_doc::tests::invalid_design_documents_are_rejected ... ok
+test design_doc::tests::lib_is_never_a_view ... ok
+test design_doc::tests::construction_and_empty_members ... ok
+test design_doc::tests::a_view_of_views_wins_over_an_other_view_of_the_same_name ... ok
+test design_doc::tests::members_land_in_their_typed_fields ... ok
+test tests::design_document_roundtrip ... ok
+test design_doc::tests::couchdb_design_documents_round_trip_exactly ... ok
+test tests::view_engine_with_rust_map ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rouchdb
+
+running 7 tests
+test crates/rouchdb/src/lib.rs - Database::open_with (line 425) - compile ... ok
+test crates/rouchdb/src/lib.rs - (line 10) - compile ... ok
+test crates/rouchdb/src/../../../README.md - ReadmeDoctests (line 97) ... ok
+test crates/rouchdb/src/../../../README.md - ReadmeDoctests (line 139) ... ok
+test crates/rouchdb/src/../../../README.md - ReadmeDoctests (line 117) ... ok
+test crates/rouchdb/src/../../../README.md - ReadmeDoctests (line 158) ... ok
+test crates/rouchdb/src/../../../README.md - ReadmeDoctests (line 44) ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+all doctests ran in 1.73s; merged doctests compilation took 1.28s
+   Doc-tests rouchdb_adapter_http
+
+running 1 test
+test crates/rouchdb-adapter-http/src/lib.rs - HttpAdapterOptions (line 193) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+all doctests ran in 0.90s; merged doctests compilation took 0.50s
+   Doc-tests rouchdb_adapter_memory
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rouchdb_adapter_redb
+
+running 1 test
+test crates/rouchdb-adapter-redb/src/lib.rs - RedbAdapter::open_with (line 444) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.82s; merged doctests compilation took 0.50s
+   Doc-tests rouchdb_bench
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rouchdb_changes
+
+running 1 test
+test crates/rouchdb-changes/src/lib.rs - ChangesStreamOptions (line 121) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.66s; merged doctests compilation took 0.38s
+   Doc-tests rouchdb_compat_tests
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rouchdb_core
+
+running 5 tests
+test crates/rouchdb-core/src/document.rs - document::GetOptions (line 582) ... ok
+test crates/rouchdb-core/src/document.rs - document::DocResult (line 646) ... ok
+test crates/rouchdb-core/src/document.rs - document::AllDocsOptions (line 739) ... ok
+test crates/rouchdb-core/src/document.rs - document::Document (line 201) ... ok
+test crates/rouchdb-core/src/document.rs - document::ChangesOptions (line 987) ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+all doctests ran in 0.95s; merged doctests compilation took 0.63s
+   Doc-tests rouchdb_query
+
+running 3 tests
+test crates/rouchdb-query/src/mapreduce.rs - mapreduce::ViewQueryOptions (line 67) ... ok
+test crates/rouchdb-query/src/mango.rs - mango::IndexDefinition (line 33) ... ok
+test crates/rouchdb-query/src/mango.rs - mango::FindOptions (line 342) ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+all doctests ran in 1.78s; merged doctests compilation took 1.37s
+   Doc-tests rouchdb_replication
+
+running 1 test
+test crates/rouchdb-replication/src/protocol.rs - protocol::ReplicationOptions (line 55) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+all doctests ran in 2.44s; merged doctests compilation took 1.24s
+   Doc-tests rouchdb_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rouchdb_views
+
+running 1 test
+test crates/rouchdb-views/src/design_doc.rs - design_doc::DesignDocument (line 34) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+all doctests ran in 0.83s; merged doctests compilation took 0.52s

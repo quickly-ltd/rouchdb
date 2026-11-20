@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Response};
 
 use super::json_required;
 use crate::error::AppError;
+use crate::extract::Writer;
 use crate::state::AppState;
 
 /// POST /{db}/_compact — compact the database.
@@ -13,6 +14,7 @@ use crate::state::AppState;
 /// body), otherwise it is a 415.
 pub async fn compact(
     State(state): State<AppState>,
+    writer: Writer,
     Path(db): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
@@ -20,6 +22,7 @@ pub async fn compact(
     if let Some(rejection) = json_required(&headers) {
         return Ok(rejection);
     }
+    writer.require_db_admin().await?;
 
     state.db.compact().await?;
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"ok": true}))).into_response())

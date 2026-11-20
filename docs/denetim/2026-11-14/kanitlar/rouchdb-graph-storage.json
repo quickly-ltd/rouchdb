@@ -1,0 +1,200 @@
+{
+  "processes": [
+    {
+      "id": "proc_10_builtin_sum_and_stat",
+      "summary": "Builtin_sum_and_stats_follow_couchdb → Inner",
+      "priority": 0.088,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 7
+    },
+    {
+      "id": "proc_111_total_rows_and_offse",
+      "summary": "Total_rows_and_offset_describe_the_whole_view → New",
+      "priority": 0.088,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 8
+    },
+    {
+      "id": "proc_112_total_rows_and_offse",
+      "summary": "Total_rows_and_offset_describe_the_whole_view → Invalid",
+      "priority": 0.088,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 8
+    },
+    {
+      "id": "proc_113_total_rows_and_offse",
+      "summary": "Total_rows_and_offset_describe_the_whole_view → AttachmentMeta",
+      "priority": 0.088,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 8
+    }
+  ],
+  "process_symbols": [
+    {
+      "id": "Function:crates/rouchdb-adapter-memory/src/lib.rs:process_doc_new_edits",
+      "name": "process_doc_new_edits",
+      "filePath": "crates/rouchdb-adapter-memory/src/lib.rs",
+      "startLine": 964,
+      "endLine": 1005,
+      "module": "Cluster_8",
+      "process_id": "proc_10_builtin_sum_and_stat",
+      "step_index": 4
+    }
+  ],
+  "definitions": [
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/lib.rs:RedbAdapter.open_with#3",
+      "name": "open_with",
+      "filePath": "crates/rouchdb-adapter-redb/src/lib.rs",
+      "startLine": 464,
+      "endLine": 477,
+      "module": "Cluster_30"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/lib.rs:write_replicated",
+      "name": "write_replicated",
+      "filePath": "crates/rouchdb-adapter-redb/src/lib.rs",
+      "startLine": 1880,
+      "endLine": 1921,
+      "module": "Cluster_23"
+    },
+    {
+      "id": "File:crates/rouchdb-adapter-redb/src/lib.rs",
+      "name": "lib.rs",
+      "filePath": "crates/rouchdb-adapter-redb/src/lib.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb-core/src/write.rs:tests.replicated_existing_rev_is_noop",
+      "name": "replicated_existing_rev_is_noop",
+      "filePath": "crates/rouchdb-core/src/write.rs",
+      "startLine": 927,
+      "endLine": 941,
+      "module": "Cluster_69"
+    },
+    {
+      "id": "Function:crates/rouchdb-core/src/write.rs:tests.replicated_invalid_revisions_rejected",
+      "name": "replicated_invalid_revisions_rejected",
+      "filePath": "crates/rouchdb-core/src/write.rs",
+      "startLine": 944,
+      "endLine": 971,
+      "module": "Cluster_69"
+    },
+    {
+      "id": "Function:crates/rouchdb-core/src/write.rs:tests.writes_report_stemmed_revisions",
+      "name": "writes_report_stemmed_revisions",
+      "filePath": "crates/rouchdb-core/src/write.rs",
+      "startLine": 1018,
+      "endLine": 1046,
+      "module": "Cluster_69"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/upgrade.rs:UpgradeReport.write_notes#1",
+      "name": "write_notes",
+      "filePath": "crates/rouchdb-adapter-redb/src/upgrade.rs",
+      "startLine": 449,
+      "endLine": 526,
+      "module": "Cluster_35"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/upgrade.rs:run_upgrade",
+      "name": "run_upgrade",
+      "filePath": "crates/rouchdb-adapter-redb/src/upgrade.rs",
+      "startLine": 783,
+      "endLine": 858,
+      "module": "Cluster_37"
+    },
+    {
+      "id": "File:crates/rouchdb-adapter-redb/src/upgrade.rs",
+      "name": "upgrade.rs",
+      "filePath": "crates/rouchdb-adapter-redb/src/upgrade.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-memory/src/lib.rs:process_doc_replication",
+      "name": "process_doc_replication",
+      "filePath": "crates/rouchdb-adapter-memory/src/lib.rs",
+      "startLine": 1011,
+      "endLine": 1045,
+      "module": "Cluster_8"
+    },
+    {
+      "id": "File:crates/rouchdb-adapter-memory/src/lib.rs",
+      "name": "lib.rs",
+      "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+    },
+    {
+      "id": "Impl:crates/rouchdb/src/lib.rs:Database",
+      "name": "Database",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "startLine": 397,
+      "endLine": 1262
+    },
+    {
+      "id": "Function:crates/rouchdb/src/lib.rs:Database.open_with#3",
+      "name": "open_with",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "startLine": 445,
+      "endLine": 453,
+      "module": "Tests"
+    },
+    {
+      "id": "File:crates/rouchdb/src/lib.rs",
+      "name": "lib.rs",
+      "filePath": "crates/rouchdb/src/lib.rs"
+    },
+    {
+      "id": "Property:crates/rouchdb-core/src/document.rs:BulkDocsOptions.new_edits",
+      "name": "new_edits",
+      "filePath": "crates/rouchdb-core/src/document.rs",
+      "startLine": 710,
+      "endLine": 710
+    },
+    {
+      "id": "Impl:crates/rouchdb-core/src/document.rs:BulkDocsOptions",
+      "name": "BulkDocsOptions",
+      "filePath": "crates/rouchdb-core/src/document.rs",
+      "startLine": 713,
+      "endLine": 723
+    },
+    {
+      "id": "Function:crates/rouchdb-core/src/document.rs:BulkDocsOptions.replication#0",
+      "name": "replication",
+      "filePath": "crates/rouchdb-core/src/document.rs",
+      "startLine": 720,
+      "endLine": 722,
+      "module": "Cluster_67"
+    },
+    {
+      "id": "Impl:crates/rouchdb/tests/adapter_conformance.rs:Fx",
+      "name": "Fx",
+      "filePath": "crates/rouchdb/tests/adapter_conformance.rs",
+      "startLine": 26,
+      "endLine": 61
+    },
+    {
+      "id": "Function:crates/rouchdb/tests/adapter_conformance.rs:write_replicated",
+      "name": "write_replicated",
+      "filePath": "crates/rouchdb/tests/adapter_conformance.rs",
+      "startLine": 105,
+      "endLine": 111,
+      "module": "Tests"
+    },
+    {
+      "id": "File:crates/rouchdb/tests/adapter_conformance.rs",
+      "name": "adapter_conformance.rs",
+      "filePath": "crates/rouchdb/tests/adapter_conformance.rs"
+    }
+  ],
+  "timing": {
+    "vector": 4.9,
+    "bm25": 210.8,
+    "merge": 0.1,
+    "symbol_lookup": 48.2,
+    "ranking": 0.1,
+    "formatting": 0.1,
+    "wall": 259.5
+  }
+}

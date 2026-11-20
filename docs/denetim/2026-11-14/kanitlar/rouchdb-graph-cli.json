@@ -1,0 +1,200 @@
+{
+  "processes": [
+    {
+      "id": "proc_142_failures_leave_the_f",
+      "summary": "Failures_leave_the_file_legacy_and_no_backup_behind → As_bytes",
+      "priority": 0.113,
+      "symbol_count": 2,
+      "process_type": "cross_community",
+      "step_count": 4
+    },
+    {
+      "id": "proc_160_failures_leave_the_f",
+      "summary": "Failures_leave_the_file_legacy_and_no_backup_behind → New",
+      "priority": 0.113,
+      "symbol_count": 2,
+      "process_type": "intra_community",
+      "step_count": 3
+    },
+    {
+      "id": "proc_38_a_failed_directory_s",
+      "summary": "A_failed_directory_sync_is_a_warning → As_bytes",
+      "priority": 0.101,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 4
+    }
+  ],
+  "process_symbols": [
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/upgrade.rs:tests.snapshot",
+      "name": "snapshot",
+      "filePath": "crates/rouchdb-adapter-redb/src/upgrade.rs",
+      "startLine": 1854,
+      "endLine": 1873,
+      "module": "Cluster_29",
+      "process_id": "proc_142_failures_leave_the_f",
+      "step_index": 2
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/upgrade.rs:tests.failures_leave_the_file_legacy_and_no_backup_behind",
+      "name": "failures_leave_the_file_legacy_and_no_backup_behind",
+      "filePath": "crates/rouchdb-adapter-redb/src/upgrade.rs",
+      "startLine": 2224,
+      "endLine": 2266,
+      "module": "Cluster_29",
+      "process_id": "proc_142_failures_leave_the_f",
+      "step_index": 1
+    }
+  ],
+  "definitions": [
+    {
+      "id": "Function:crates/rouchdb-cli/tests/cli_tests.rs:dump_then_import_round_trip_preserves_data_and_attachments",
+      "name": "dump_then_import_round_trip_preserves_data_and_attachments",
+      "filePath": "crates/rouchdb-cli/tests/cli_tests.rs",
+      "startLine": 2154,
+      "endLine": 2206,
+      "module": "Tests"
+    },
+    {
+      "id": "Function:crates/rouchdb-cli/tests/cli_tests.rs:dump_then_import_round_trip_keeps_every_doc_design_doc_and_unicode_id",
+      "name": "dump_then_import_round_trip_keeps_every_doc_design_doc_and_unicode_id",
+      "filePath": "crates/rouchdb-cli/tests/cli_tests.rs",
+      "startLine": 2227,
+      "endLine": 2310,
+      "module": "Tests"
+    },
+    {
+      "id": "File:crates/rouchdb-cli/tests/cli_tests.rs",
+      "name": "cli_tests.rs",
+      "filePath": "crates/rouchdb-cli/tests/cli_tests.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb-cli/tests/migrate.rs:legacy_file_is_refused_with_a_hint_then_migrated",
+      "name": "legacy_file_is_refused_with_a_hint_then_migrated",
+      "filePath": "crates/rouchdb-cli/tests/migrate.rs",
+      "startLine": 49,
+      "endLine": 112,
+      "module": "Tests"
+    },
+    {
+      "id": "Function:crates/rouchdb-cli/tests/migrate.rs:migrate_refuses_an_existing_backup_and_supports_no_backup",
+      "name": "migrate_refuses_an_existing_backup_and_supports_no_backup",
+      "filePath": "crates/rouchdb-cli/tests/migrate.rs",
+      "startLine": 115,
+      "endLine": 150,
+      "module": "Tests"
+    },
+    {
+      "id": "File:crates/rouchdb-cli/tests/migrate.rs",
+      "name": "migrate.rs",
+      "filePath": "crates/rouchdb-cli/tests/migrate.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb-cli/src/main.rs:main",
+      "name": "main",
+      "filePath": "crates/rouchdb-cli/src/main.rs",
+      "startLine": 548,
+      "endLine": 569,
+      "module": "Tests"
+    },
+    {
+      "id": "File:crates/rouchdb-cli/src/main.rs",
+      "name": "main.rs",
+      "filePath": "crates/rouchdb-cli/src/main.rs"
+    },
+    {
+      "id": "Impl:crates/rouchdb-adapter-redb/src/lib.rs:RedbAdapter",
+      "name": "RedbAdapter",
+      "filePath": "crates/rouchdb-adapter-redb/src/lib.rs",
+      "startLine": 417,
+      "endLine": 590
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/lib.rs:RedbAdapter.open#2",
+      "name": "open",
+      "filePath": "crates/rouchdb-adapter-redb/src/lib.rs",
+      "startLine": 437,
+      "endLine": 439,
+      "module": "Cluster_30"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/lib.rs:RedbAdapter.upgrade#2",
+      "name": "upgrade",
+      "filePath": "crates/rouchdb-adapter-redb/src/lib.rs",
+      "startLine": 530,
+      "endLine": 532,
+      "module": "Cluster_30"
+    },
+    {
+      "id": "Function:crates/rouchdb-server/src/main.rs:main",
+      "name": "main",
+      "filePath": "crates/rouchdb-server/src/main.rs",
+      "startLine": 151,
+      "endLine": 171,
+      "module": "Tests"
+    },
+    {
+      "id": "Function:crates/rouchdb-server/src/main.rs:run",
+      "name": "run",
+      "filePath": "crates/rouchdb-server/src/main.rs",
+      "startLine": 173,
+      "endLine": 224,
+      "module": "Tests"
+    },
+    {
+      "id": "File:crates/rouchdb-server/src/main.rs",
+      "name": "main.rs",
+      "filePath": "crates/rouchdb-server/src/main.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb-core/src/error.rs:upgrade_required_message",
+      "name": "upgrade_required_message",
+      "filePath": "crates/rouchdb-core/src/error.rs",
+      "startLine": 60,
+      "endLine": 71
+    },
+    {
+      "id": "Function:crates/rouchdb-core/src/error.rs:tests.upgrade_required_names_the_ways_to_upgrade_with_a_quoted_path",
+      "name": "upgrade_required_names_the_ways_to_upgrade_with_a_quoted_path",
+      "filePath": "crates/rouchdb-core/src/error.rs",
+      "startLine": 91,
+      "endLine": 107
+    },
+    {
+      "id": "File:crates/rouchdb-core/src/error.rs",
+      "name": "error.rs",
+      "filePath": "crates/rouchdb-core/src/error.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/upgrade.rs:tests.legacy_file_is_refused_and_left_unchanged",
+      "name": "legacy_file_is_refused_and_left_unchanged",
+      "filePath": "crates/rouchdb-adapter-redb/src/upgrade.rs",
+      "startLine": 2079,
+      "endLine": 2105,
+      "module": "Cluster_29"
+    },
+    {
+      "id": "File:crates/rouchdb-cli/README.md",
+      "name": "README.md",
+      "filePath": "crates/rouchdb-cli/README.md"
+    },
+    {
+      "id": "Function:crates/rouchdb-core/src/merge.rs:tests.merge_bridging_two_roots_joins_them",
+      "name": "merge_bridging_two_roots_joins_them",
+      "filePath": "crates/rouchdb-core/src/merge.rs",
+      "startLine": 965,
+      "endLine": 988,
+      "module": "Cluster_87"
+    }
+  ],
+  "timing": {
+    "vector": 7.4,
+    "bm25": 322.9,
+    "merge": 0.1,
+    "symbol_lookup": 17,
+    "ranking": 0.1,
+    "formatting": 0.1,
+    "wall": 340.8
+  }
+}

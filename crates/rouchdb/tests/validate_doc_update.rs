@@ -610,3 +610,230 @@ async fn replicated_writes_keep_the_source_body_on_every_path() {
     db.put("e", json!({})).await.unwrap();
     assert_eq!(db.get("e").await.unwrap().data["stamped"], true);
 }
+
+#[tokio::test]
+async fn replicated_uppercase_hex_revs_still_validate_and_reject() {
+    for kind in KINDS {
+        let (db, rec, _dir) = open(kind, "upper_rev");
+
+        // Replicated write with uppercase 32-hex `_rev` and `_revisions.ids`.
+        let upper_rev = Document {
+            id: "u1".into(),
+            rev: Some(Revision::new(1, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into())),
+            deleted: false,
+            data: json!({
+                "_revisions": {
+                    "start": 1,
+                    "ids": ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
+                },
+                "reject": "uppercase denied",
+            }),
+            attachments: Default::default(),
+        };
+        let results = db
+            .bulk_docs(vec![upper_rev], BulkDocsOptions::replication())
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "{kind:?}: {results:?}");
+        assert!(!results[0].ok, "{kind:?}: {results:?}");
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some("forbidden"),
+            "{kind:?}: {results:?}"
+        );
+        assert_eq!(
+            results[0].reason.as_deref(),
+            Some("uppercase denied"),
+            "{kind:?}: {results:?}"
+        );
+        assert!(
+            matches!(db.get("u1").await, Err(RouchError::NotFound(_))),
+            "{kind:?}: forbidden doc must not be stored"
+        );
+        let seen = rec.take();
+        assert_eq!(seen.len(), 1, "{kind:?}: {seen:?}");
+        assert_eq!(seen[0].id, "u1", "{kind:?}");
+
+        // Fallback branch without `_revisions`, using uppercase `Document.rev`.
+        let upper_fallback = Document {
+            id: "u2".into(),
+            rev: Some(Revision::new(1, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".into())),
+            deleted: false,
+            data: json!({"reject": "uppercase fallback"}),
+            attachments: Default::default(),
+        };
+        let results = db
+            .bulk_docs(vec![upper_fallback], BulkDocsOptions::replication())
+            .await
+            .unwrap();
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some("forbidden"),
+            "{kind:?}: {results:?}"
+        );
+        assert!(matches!(db.get("u2").await, Err(RouchError::NotFound(_))));
+        assert_eq!(rec.take().len(), 1, "{kind:?}");
+
+        // Existing lowercase ancestor is still resolved as `old_doc` when the
+        // replicated update sends uppercase 32-hex ids in `_revisions`.
+        let base = Document::from_json(json!({
+            "_id": "u3",
+            "_rev": "1-cccccccccccccccccccccccccccccccc",
+            "_revisions": {"start": 1, "ids": ["cccccccccccccccccccccccccccccccc"]},
+            "v": 1,
+        }))
+        .unwrap();
+        db.bulk_docs(vec![base], BulkDocsOptions::replication())
+            .await
+            .unwrap();
+        rec.take();
+
+        let child = Document {
+            id: "u3".into(),
+            rev: Some(Revision::new(2, "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD".into())),
+            deleted: false,
+            data: json!({
+                "_revisions": {
+                    "start": 2,
+                    "ids": [
+                        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+                        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+                    ]
+                },
+                "reject": "no child",
+            }),
+            attachments: Default::default(),
+        };
+        let results = db
+            .bulk_docs(vec![child], BulkDocsOptions::replication())
+            .await
+            .unwrap();
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some("forbidden"),
+            "{kind:?}: {results:?}"
+        );
+        let seen = rec.take();
+        assert_eq!(seen.len(), 1, "{kind:?}: {seen:?}");
+        assert_eq!(
+            seen[0].old,
+            Some((
+                "1-cccccccccccccccccccccccccccccccc".into(),
+                false,
+                json!({"v": 1})
+            )),
+            "{kind:?}: uppercase ancestor must match stored lowercase rev"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bulk_docs_new_edits_with_rev_and_deleted_in_data_validates_with_old_doc() {
+    for kind in KINDS {
+        let (db, rec, _dir) = open(kind, "data_rev");
+        let rev1 = db.put("doc1", json!({"v": 1})).await.unwrap().rev.unwrap();
+        rec.take();
+
+        // Forbidden update carrying `_rev` inside `doc.data`.
+        let results = db
+            .bulk_docs(
+                vec![Document::new(
+                    "doc1",
+                    json!({"_rev": rev1, "v": 2, "reject": "forbidden update"}),
+                )],
+                BulkDocsOptions::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "{kind:?}: {results:?}");
+        assert!(!results[0].ok, "{kind:?}: {results:?}");
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some("forbidden"),
+            "{kind:?}: {results:?}"
+        );
+        assert_eq!(
+            results[0].reason.as_deref(),
+            Some("forbidden update"),
+            "{kind:?}: {results:?}"
+        );
+        let seen = rec.take();
+        assert_eq!(seen.len(), 1, "{kind:?}: {seen:?}");
+        assert_eq!(
+            seen[0].old,
+            Some((rev1.clone(), false, json!({"v": 1}))),
+            "{kind:?}: old_doc must be passed when _rev is in data"
+        );
+        assert_eq!(db.get("doc1").await.unwrap().data["v"], 1, "{kind:?}");
+
+        // Forbidden deletion carrying `_rev` and `_deleted` inside `doc.data`.
+        let results = db
+            .bulk_docs(
+                vec![Document::new(
+                    "doc1",
+                    json!({"_rev": rev1, "_deleted": true, "reject": "no delete"}),
+                )],
+                BulkDocsOptions::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some("forbidden"),
+            "{kind:?}: {results:?}"
+        );
+        let seen = rec.take();
+        assert_eq!(seen.len(), 1, "{kind:?}: {seen:?}");
+        assert!(seen[0].deleted, "{kind:?}: _deleted must be lifted");
+        assert_eq!(
+            seen[0].old,
+            Some((rev1, false, json!({"v": 1}))),
+            "{kind:?}: old_doc must be passed for _deleted in data"
+        );
+        assert_eq!(db.get("doc1").await.unwrap().data["v"], 1, "{kind:?}");
+    }
+}
+
+#[tokio::test]
+async fn bulk_docs_with_plugin_reports_per_doc_bad_request_for_invalid_doc() {
+    for kind in KINDS {
+        let (db, rec, _dir) = open(kind, "bad_in_batch");
+        let results = db
+            .bulk_docs(
+                vec![
+                    Document::new("ok1", json!({"v": 1})),
+                    Document::new("bad", json!({"_unknown": 1})),
+                    Document::new("ok2", json!({"v": 2})),
+                ],
+                BulkDocsOptions::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 3, "{kind:?}: {results:?}");
+        assert!(results[0].ok, "{kind:?}: {results:?}");
+        assert_eq!(results[0].id, "ok1", "{kind:?}");
+        assert!(!results[1].ok, "{kind:?}: {results:?}");
+        assert_eq!(results[1].id, "bad", "{kind:?}");
+        assert_eq!(
+            results[1].error.as_deref(),
+            Some("bad_request"),
+            "{kind:?}: {results:?}"
+        );
+        assert_eq!(
+            results[1].reason.as_deref(),
+            Some("Bad special document member: _unknown"),
+            "{kind:?}: bare reason without 'bad request: ' prefix"
+        );
+        assert!(results[2].ok, "{kind:?}: {results:?}");
+        assert_eq!(results[2].id, "ok2", "{kind:?}");
+
+        assert_eq!(db.get("ok1").await.unwrap().data["v"], 1, "{kind:?}");
+        assert_eq!(db.get("ok2").await.unwrap().data["v"], 2, "{kind:?}");
+        assert!(
+            matches!(db.get("bad").await, Err(RouchError::NotFound(_))),
+            "{kind:?}"
+        );
+        let seen_ids: Vec<String> = rec.take().into_iter().map(|s| s.id).collect();
+        assert_eq!(seen_ids, vec!["ok1", "ok2"], "{kind:?}");
+    }
+}

@@ -595,3 +595,91 @@ async fn database_recreated_shorter_during_the_request_is_read_anew() {
     assert_eq!(ids(&expected), ["intruder"]);
     assert_eq!(answer, expected);
 }
+
+#[tokio::test]
+async fn array_field_in_and_empty_object_match_full_scan() {
+    async fn setup(fields: &[&str]) -> Router {
+        let db = Arc::new(Database::memory(DB));
+        db.put("a", json!({"tags": ["rust", "db"], "meta": {}}))
+            .await
+            .unwrap();
+        db.put("b", json!({"tags": ["go"], "meta": {"x": 1}}))
+            .await
+            .unwrap();
+        db.put("c", json!({"tags": "rust", "meta": "plain"}))
+            .await
+            .unwrap();
+        let mut cfg = config();
+        cfg.selector_index_fields = fields.iter().map(|f| f.to_string()).collect();
+        app_with(db, &cfg)
+    }
+
+    let plain = setup(&[]).await;
+    let projected = setup(&["tags", "meta"]).await;
+
+    for selector in [
+        json!({"tags": {"$in": ["rust", "zig"]}}),
+        json!({"tags": {"$in": ["go"]}}),
+        json!({"tags": {"$in": ["python"]}}),
+        json!({"meta": {}}),
+    ] {
+        let body = json!({"selector": selector});
+        let expected = post(&plain, "/db/_changes?filter=_selector", body.clone())
+            .await
+            .json();
+        let actual = post(&projected, "/db/_changes?filter=_selector", body)
+            .await
+            .json();
+        assert_eq!(actual, expected, "{selector}");
+    }
+}
+
+#[tokio::test]
+async fn empty_or_and_nested_empty_or_match_full_scan() {
+    let (_db0, plain) = mixed(VARIANTS[0]).await;
+    let (_db1, projected) = mixed(VARIANTS[1]).await;
+
+    for selector in [
+        json!({"$or": []}),
+        json!({"$and": [{"kind": "events"}, {"$or": []}]}),
+        json!({"$and": [{"kind": "products"}, {"$or": []}]}),
+    ] {
+        let body = json!({"selector": selector});
+        let expected = post(&plain, "/db/_changes?filter=_selector", body.clone())
+            .await
+            .json();
+        let actual = post(&projected, "/db/_changes?filter=_selector", body)
+            .await
+            .json();
+        assert_eq!(actual, expected, "{selector}");
+    }
+}
+
+#[tokio::test]
+async fn purged_docs_are_removed_from_selector_index_and_match_full_scan() {
+    let (db, projected) = mixed(VARIANTS[1]).await;
+    let plain = app_with(db.clone(), &config());
+
+    // Warm the projection before purging.
+    let before = post(&projected, "/db/_changes?filter=_selector", products())
+        .await
+        .json();
+    assert_eq!(ids(&before), ["product-1", "product-2"]);
+
+    // Purge both a middle doc and the last doc directly via Database::purge.
+    let r1 = db.get("product-1").await.unwrap().rev.unwrap().to_string();
+    let r2 = db.get("product-2").await.unwrap().rev.unwrap().to_string();
+    db.purge("product-1", vec![r1]).await.unwrap();
+    db.purge("product-2", vec![r2]).await.unwrap();
+
+    // Add a new product after the purge.
+    db.put("product-3", json!({"kind": "products", "name": "Juice"}))
+        .await
+        .unwrap();
+
+    let uri = "/db/_changes?filter=_selector&include_docs=true";
+    let expected = post(&plain, uri, products()).await.json();
+    let actual = post(&projected, uri, products()).await.json();
+    assert_eq!(ids(&expected), ["product-3"]);
+    assert_eq!(actual, expected);
+}

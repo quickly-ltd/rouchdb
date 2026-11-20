@@ -1,0 +1,1 @@
+{"test":"T2 — Tek yönlü pull","status":"GEÇTİ","duration_ms":345,"seed_ok":1000,"local_count":1000,"replication":{"ok":true,"start_time":"2026-11-14T07:10:58.076Z","docs_read":1000,"docs_written":1000,"doc_write_failures":0,"errors":[],"last_seq":1000,"status":"complete","end_time":"2026-11-14T07:10:58.266Z"}}

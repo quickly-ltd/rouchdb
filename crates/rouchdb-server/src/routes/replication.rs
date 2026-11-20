@@ -9,7 +9,7 @@ use rouchdb::BulkGetItem;
 use rouchdb_core::error::RouchError;
 
 use crate::error::AppError;
-use crate::extract::JsonBody;
+use crate::extract::{JsonBody, Writer};
 use crate::state::AppState;
 
 fn bad_request(reason: &str) -> AppError {
@@ -144,13 +144,26 @@ pub async fn bulk_get(
 /// POST /{db}/_purge — permanently remove document revisions.
 pub async fn purge(
     State(state): State<AppState>,
+    writer: Writer,
     Path(db): Path<String>,
     JsonBody(body): JsonBody<serde_json::Value>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     state.check_db(&db)?;
+    writer.require_db_admin().await?;
     let req = parse_rev_map(body)?;
     let ids: Vec<String> = req.keys().cloned().collect();
     let mut response = state.db.adapter().purge(req).await?;
+    if let Some(index) = &state.selector_index {
+        let purged_ids: Vec<&str> = response
+            .purged
+            .iter()
+            .filter(|(_, revs)| !revs.is_empty())
+            .map(|(id, _)| id.as_str())
+            .collect();
+        if !purged_ids.is_empty() {
+            index.remove_docs(purged_ids);
+        }
+    }
     // CouchDB lists every requested id, with an empty list when nothing
     // was purged for it.
     for id in ids {

@@ -1,0 +1,539 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s
+     Running unittests src/lib.rs (target/debug/deps/rouchdb-f270090e5a32d88a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+     Running tests/adapter_conformance.rs (target/debug/deps/adapter_conformance-b553219f68ae155a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.00s
+
+     Running tests/all_docs.rs (target/debug/deps/all_docs-d9e81945a2b560ce)
+
+running 8 tests
+test all_docs_empty_database ... ok
+test all_docs_include_docs ... ok
+test all_docs_descending ... ok
+test all_docs_skip_and_limit ... ok
+test all_docs_key_range ... ok
+test offset_is_the_global_position_on_couchdb ... ok
+test all_docs_conflicts_and_update_seq ... ok
+test keys_rows_match_couchdb ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests/attachments.rs (target/debug/deps/attachments-06db1888f6a77e41)
+
+running 3 tests
+test attachment_put_and_get_http ... ok
+test attachment_binary_data ... ok
+test digests_match_couchdb_for_bytes_stored_as_is ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/big_numbers.rs (target/debug/deps/big_numbers-a037631e9632784c)
+
+running 1 test
+test big_integers_round_trip_through_couchdb ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.22s
+
+     Running tests/bug_hunting.rs (target/debug/deps/bug_hunting-5537cea2bbf385f3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/changes_feed.rs (target/debug/deps/changes_feed-891bb920dcb2e7c0)
+
+running 7 tests
+test changes_include_docs ... ok
+test changes_with_doc_ids_lists_only_those_docs ... ok
+test changes_since_sequence ... ok
+test changes_with_selector_filter ... ok
+test changes_after_updates_and_deletes ... ok
+test changes_with_limit ... ok
+test live_changes_picks_up_new_docs ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+     Running tests/conflicts.rs (target/debug/deps/conflicts-7974996ebfe87274)
+
+running 5 tests
+test conflict_both_sides_modify_same_doc ... ok
+test conflict_local_delete_remote_update ... ok
+test conflict_remote_delete_local_update ... ok
+test conflict_resolve_by_update ... ok
+test conflict_three_way ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+     Running tests/couchdb_query_parity.rs (target/debug/deps/couchdb_query_parity-c08f692133d1a31d)
+
+running 3 tests
+test http_database_runs_mango_on_couchdb ... ok
+test views_match_couchdb ... ok
+test mango_selectors_match_couchdb ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 2.81s
+
+     Running tests/couchdb_semantics.rs (target/debug/deps/couchdb_semantics-5784d651d773572b)
+
+running 14 tests
+test http_all_docs_reports_update_seq ... ok
+test http_get_with_open_revs ... ok
+test http_bulk_get_returns_attachment_bytes ... ok
+test cookie_login_against_couchdb ... ok
+test http_changes_report_conflicts ... ok
+test http_errors_keep_couchdb_meaning ... ok
+test http_skip_setup_does_not_create_database ... ok
+test after_write_sees_docs_replicated_to_couchdb ... ok
+test http_creates_missing_database_on_first_use ... ok
+test http_id_is_server_uuid_plus_db_name ... ok
+test pull_from_couchdb_carries_attachment_bytes ... ok
+test push_to_couchdb_carries_conflict_branches ... ok
+test pull_from_couchdb_brings_conflict_branches ... ok
+test push_skips_docs_denied_by_validate_doc_update ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+
+     Running tests/couchdb_view_keys.rs (target/debug/deps/couchdb_view_keys-64a4b99a5cd776f8)
+
+running 1 test
+test view_keys_and_grouping_rules_match_couchdb ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/data_diversity.rs (target/debug/deps/data_diversity-77ea3d7e671ca880)
+
+running 11 tests
+test data_mixed_type_array_roundtrip ... ok
+test data_null_and_bool_roundtrip ... ok
+test data_nested_objects_roundtrip ... ok
+test data_arrays_roundtrip ... ok
+test data_numeric_types_roundtrip ... ok
+test data_empty_structures_roundtrip ... ok
+test data_large_document ... ok
+test data_unicode_roundtrip ... ok
+test special_id_with_spaces ... ok
+test special_id_with_unicode ... ok
+test special_id_replicate_roundtrip ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.43s
+
+     Running tests/database_ops.rs (target/debug/deps/database_ops-557885e5801b4769)
+
+running 4 tests
+test database_compact_http ... ok
+test database_info_http ... ok
+test database_destroy_http ... ok
+test cross_adapter_fidelity_memory_couchdb_redb ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+     Running tests/edge_cases.rs (target/debug/deps/edge_cases-ed7dd85e98656899)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.00s
+
+     Running tests/error_conditions.rs (target/debug/deps/error_conditions-e8ef9c9478a741c4)
+
+running 3 tests
+test error_get_deleted_doc ... ok
+test error_validate_doc_update_rejections ... ok
+test error_table_couchdb ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.51s
+
+     Running tests/http_crud.rs (target/debug/deps/http_crud-377d7269a07baaa7)
+
+running 5 tests
+test http_put_and_get ... ok
+test http_changes_feed ... ok
+test http_delete_document ... ok
+test http_update_document ... ok
+test http_all_docs ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running tests/live_sync_test.rs (target/debug/deps/live_sync_test-24ed9e3528547c47)
+
+running 1 test
+test test_live_sync_remote ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.04s
+
+     Running tests/mango_queries.rs (target/debug/deps/mango_queries-71ae5542891e1bc3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/map_reduce.rs (target/debug/deps/map_reduce-91c29cea6b98b4f6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+     Running tests/parity_changes.rs (target/debug/deps/parity_changes-5a3d05a0301c7f32)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/parity_core.rs (target/debug/deps/parity_core-dbcf80dc2abac804)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+     Running tests/parity_http.rs (target/debug/deps/parity_http-8f87109cfd5a0fd5)
+
+running 9 tests
+test live_changes_events_http ... ok
+test explain_on_http_without_index ... ok
+test explain_on_http_with_index ... ok
+test all_docs_conflicts_http ... ok
+test replication_no_checkpoint_http ... ok
+test design_doc_crud_on_http ... ok
+test mango_find_with_index_http ... ok
+test security_document_round_trips_on_http ... ok
+test replication_since_override_http ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+     Running tests/parity_plugins.rs (target/debug/deps/parity_plugins-b035325a572917c3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/parity_replication.rs (target/debug/deps/parity_replication-f0d61c59611c9fe4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/parity_views.rs (target/debug/deps/parity_views-5e028e2587f16f83)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.00s
+
+     Running tests/partition.rs (target/debug/deps/partition-2ebd8cbcd90b1e46)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/plugin_contract.rs (target/debug/deps/plugin_contract-9f3b60327a392e05)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/plugins_replication.rs (target/debug/deps/plugins_replication-5ee06c1146e880fe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/post_and_attachments.rs (target/debug/deps/post_and_attachments-4d94fd0da0e7ba3a)
+
+running 4 tests
+test bulk_docs_without_ids_over_http ... ok
+test post_to_couchdb ... ok
+test remove_attachment_from_couchdb ... ok
+test post_and_replicate_to_couchdb ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests/replication.rs (target/debug/deps/replication-6044cda5173d35f7)
+
+running 38 tests
+test bad_credentials_surface_unauthorized ... ok
+test already_synced_noop ... ok
+test doc_deleted_before_the_first_push_arrives_as_a_tombstone ... ok
+test bidirectional_sync_with_couchdb ... ok
+test incremental_replication_to_couchdb ... ok
+test live_replicate_picks_up_new_docs ... ok
+test incremental_pull_from_couchdb_resumes_from_the_checkpoint ... ok
+test attachments_match_couchdb ... ok
+test live_replicate_to_couchdb ... ok
+test live_pull_from_couchdb_delivers_later_writes ... ok
+test pull_carries_attachment_bytes_from_couchdb ... ok
+test batched_replication_to_couchdb ... ok
+test pull_with_doc_ids_from_couchdb_brings_only_those_docs ... ok
+test push_carries_attachment_bytes_to_couchdb ... ok
+test replicate_couchdb_to_memory ... ok
+test push_checkpoints_both_sides_with_last_seq_and_session ... ok
+test multiple_sync_rounds ... ok
+test replicate_empty_databases ... ok
+test replicate_deletes_to_couchdb ... ok
+test replicate_delete_and_recreate ... ok
+test replicate_couchdb_to_redb ... ok
+test replicate_events_include_change_progress ... ok
+test replicate_exact_batch_boundary ... ok
+test replicate_filtered_selector_from_couchdb ... ok
+test replicate_filtered_doc_ids_to_couchdb ... ok
+test redb_checkpoint_to_couchdb_survives_reopening ... ok
+test replicate_multiple_updates_same_doc ... ok
+test replicate_memory_to_couchdb ... ok
+test replicate_large_batch ... ok
+test replicate_remote_deletes_back_to_local ... ok
+test replicate_redb_to_couchdb ... ok
+test replicate_remote_updates_back_to_local ... ok
+test replicate_to_couchdb_with_events ... ok
+test replicate_updates_to_couchdb ... ok
+test replicate_single_doc_batches ... ok
+test validator_unauthorized_is_denied_not_retried ... ok
+test sync_many_docs_diverse_operations ... ok
+test sync_interleaved_updates ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 2.92s
+
+     Running tests/replication_identity.rs (target/debug/deps/replication_identity-bd1437f5c036b4f6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/storage_fidelity_couchdb.rs (target/debug/deps/storage_fidelity_couchdb-67927ff1c5b007f5)
+
+running 8 tests
+test changes_limit_zero_over_http ... ok
+test writes_over_http_apply_the_depth_limit ... ok
+test missing_documents_and_bad_revisions_over_http ... ok
+test revs_diff_and_stubs_match_couchdb ... ok
+test local_documents_design_conflicts_and_destroy_over_http ... ok
+test couchdb_design_documents_round_trip ... ok
+test deep_couchdb_documents_are_readable_and_replicate ... ok
+test destroy_and_reuse_while_other_clients_read ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.75s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_adapter_http-72fb789e7b6b705e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_adapter_memory-9156d37cefebd8b4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_adapter_redb-1347627dd710d2cc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_bench-21ed5e8896589bd9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_changes-e12a89188836d9a1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/rouchdb-771dc369d0a4831b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/cli_tests.rs (target/debug/deps/cli_tests-35cb544b817f84c9)
+
+running 4 tests
+test replicate_to_couchdb ... ok
+test replicate_rejected_by_couchdb_validator_exits_non_zero ... ok
+test replicate_to_couchdb_with_env_credentials ... ok
+test replicate_from_couchdb_with_env_credentials ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 66 filtered out; finished in 2.63s
+
+     Running tests/migrate.rs (target/debug/deps/migrate-8c53d35f66d545d3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_compat_tests-f484b7227ccb15ba)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/redb_0_4_to_0_5.rs (target/debug/deps/redb_0_4_to_0_5-f8f7b2443c872cc2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_core-4a685e8b97e053cd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.00s
+
+     Running tests/rev_tree_properties.rs (target/debug/deps/rev_tree_properties-8db79645c8d8b974)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_query-cc8411ad3f256088)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_replication-ff2b4b753aabb5f0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 67 filtered out; finished in 0.00s
+
+     Running tests/checkpoints.rs (target/debug/deps/checkpoints-8532b2bafff6aef3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_server-16dbaab071c248d2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/rouchdb_server-80cf77898ce66ea6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/active_tasks.rs (target/debug/deps/active_tasks-bc8f5967e6514a65)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/all_docs.rs (target/debug/deps/all_docs-e1b7be65320d8e9d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/attachments.rs (target/debug/deps/attachments-9ac9398b5f9dd7e7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/auth_fidelity.rs (target/debug/deps/auth_fidelity-ab051d3f43da5817)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/auth_matrix.rs (target/debug/deps/auth_matrix-bce533da668adb9e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/basics.rs (target/debug/deps/basics-3b2165cd19ffeeaa)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/changes.rs (target/debug/deps/changes-2af781678a0bd154)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/couchdb_fidelity.rs (target/debug/deps/couchdb_fidelity-ec4261a54ddce77b)
+
+running 1 test
+test couchdb_differential ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 1.58s
+
+     Running tests/db_lifecycle.rs (target/debug/deps/db_lifecycle-dec1eaef2b717cf3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/deep_json.rs (target/debug/deps/deep_json-5e381272c07b19c5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/deep_json_binary.rs (target/debug/deps/deep_json_binary-77b3b6f139a11c06)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/documents.rs (target/debug/deps/documents-141ba18ef0f405c9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/errors.rs (target/debug/deps/errors-4466f89ed8905c74)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/pouchdb_setup.rs (target/debug/deps/pouchdb_setup-98a16527c70d15dd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/query.rs (target/debug/deps/query-c9f8de3e57fb0c69)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/replication.rs (target/debug/deps/replication-9e485a8b927f869d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/security.rs (target/debug/deps/security-1d0eefa428e99b76)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests/startup.rs (target/debug/deps/startup-d651ab2e7f1c09c1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rouchdb_views-393dc0a60253ad39)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+

@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use rouchdb::SecurityDocument;
 
 use crate::error::AppError;
-use crate::extract::JsonBody;
+use crate::extract::{JsonBody, Writer};
 use crate::state::AppState;
 use rouchdb_core::error::RouchError;
 
@@ -22,10 +22,12 @@ pub async fn get_security(
 /// PUT /{db}/_security — update database security document.
 pub async fn put_security(
     State(state): State<AppState>,
+    writer: Writer,
     Path(db): Path<String>,
     JsonBody(raw): JsonBody<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     state.check_db(&db)?;
+    writer.require_db_admin().await?;
 
     // Parse here (instead of via the extractor) so a malformed body yields the
     // standard CouchDB error JSON rather than axum's default rejection. Unknown

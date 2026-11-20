@@ -1,0 +1,180 @@
+{
+  "processes": [
+    {
+      "id": "proc_131_checkpoint_round_tri",
+      "summary": "Checkpoint_round_trips_the_couchdb_local_rev → Session",
+      "priority": 0.016,
+      "symbol_count": 1,
+      "process_type": "intra_community",
+      "step_count": 5
+    },
+    {
+      "id": "proc_198_checkpoint_saved_aft",
+      "summary": "Checkpoint_saved_after_already_synced_batches → Session",
+      "priority": 0.016,
+      "symbol_count": 1,
+      "process_type": "intra_community",
+      "step_count": 5
+    },
+    {
+      "id": "proc_242_checkpoint_saved_whe",
+      "summary": "Checkpoint_saved_when_filter_matches_nothing → Session",
+      "priority": 0.016,
+      "symbol_count": 1,
+      "process_type": "intra_community",
+      "step_count": 5
+    }
+  ],
+  "process_symbols": [
+    {
+      "id": "Struct:crates/rouchdb-replication/src/protocol.rs:Session",
+      "name": "Session",
+      "filePath": "crates/rouchdb-replication/src/protocol.rs",
+      "startLine": 328,
+      "endLine": 336,
+      "process_id": "proc_131_checkpoint_round_tri",
+      "step_index": 5
+    }
+  ],
+  "definitions": [
+    {
+      "name": "doc",
+      "type": "File",
+      "filePath": "crates/rouchdb/tests/parity_core.rs"
+    },
+    {
+      "id": "File:crates/rouchdb/tests/plugins_replication.rs",
+      "name": "find",
+      "filePath": "crates/rouchdb/tests/bug_hunting.rs",
+      "startLine": 313,
+      "endLine": 318
+    },
+    {
+      "id": "Struct:crates/rouchdb-cli/tests/cli_tests.rs:FakeConfig",
+      "name": "FakeConfig",
+      "filePath": "crates/rouchdb-cli/tests/cli_tests.rs",
+      "startLine": 176,
+      "endLine": 182
+    },
+    {
+      "id": "File:crates/rouchdb-cli/tests/cli_tests.rs",
+      "name": "cli_tests.rs",
+      "filePath": "crates/rouchdb-cli/tests/cli_tests.rs"
+    },
+    {
+      "id": "Struct:crates/rouchdb-replication/src/checkpoint.rs:Checkpointer",
+      "name": "Checkpointer",
+      "filePath": "crates/rouchdb-replication/src/checkpoint.rs",
+      "startLine": 33,
+      "endLine": 39
+    },
+    {
+      "id": "Impl:crates/rouchdb-replication/src/checkpoint.rs:Checkpointer",
+      "name": "Checkpointer",
+      "filePath": "crates/rouchdb-replication/src/checkpoint.rs",
+      "startLine": 46,
+      "endLine": 207
+    },
+    {
+      "id": "File:crates/rouchdb-adapter-redb/src/lib.rs",
+      "name": "lib.rs",
+      "filePath": "crates/rouchdb-adapter-redb/src/lib.rs"
+    },
+    {
+      "id": "Struct:crates/rouchdb/src/lib.rs:PluginAdapter",
+      "name": "PluginAdapter",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "startLine": 118,
+      "endLine": 121
+    },
+    {
+      "id": "Struct:crates/rouchdb-core/src/adapter.rs:ChangeNotice",
+      "name": "ChangeNotice",
+      "filePath": "crates/rouchdb-core/src/adapter.rs",
+      "startLine": 17,
+      "endLine": 28
+    },
+    {
+      "id": "Property:crates/rouchdb-core/src/adapter.rs:ChangeNotice.seq",
+      "name": "seq",
+      "filePath": "crates/rouchdb-core/src/adapter.rs",
+      "startLine": 19,
+      "endLine": 19
+    },
+    {
+      "id": "Property:crates/rouchdb-core/src/adapter.rs:ChangeNotice.doc_id",
+      "name": "doc_id",
+      "filePath": "crates/rouchdb-core/src/adapter.rs",
+      "startLine": 21,
+      "endLine": 21
+    },
+    {
+      "id": "File:crates/rouchdb-server/tests/replication.rs",
+      "name": "replication.rs",
+      "filePath": "crates/rouchdb-server/tests/replication.rs"
+    },
+    {
+      "id": "Property:crates/rouchdb-adapter-http/src/lib.rs:CouchDbBulkGetRequest.docs",
+      "name": "docs",
+      "filePath": "crates/rouchdb-adapter-http/src/lib.rs",
+      "startLine": 92,
+      "endLine": 92
+    },
+    {
+      "id": "Property:crates/rouchdb-adapter-memory/src/lib.rs:Inner.docs",
+      "name": "docs",
+      "filePath": "crates/rouchdb-adapter-memory/src/lib.rs",
+      "startLine": 51,
+      "endLine": 51
+    },
+    {
+      "id": "File:crates/rouchdb-replication/tests/checkpoints.rs",
+      "name": "checkpoints.rs",
+      "filePath": "crates/rouchdb-replication/tests/checkpoints.rs"
+    },
+    {
+      "id": "Enum:crates/rouchdb/tests/adapter_conformance.rs:Kind",
+      "name": "Kind",
+      "filePath": "crates/rouchdb/tests/adapter_conformance.rs",
+      "startLine": 14,
+      "endLine": 17
+    },
+    {
+      "id": "Struct:crates/rouchdb/tests/adapter_conformance.rs:Fx",
+      "name": "Fx",
+      "filePath": "crates/rouchdb/tests/adapter_conformance.rs",
+      "startLine": 20,
+      "endLine": 24
+    },
+    {
+      "id": "Property:crates/rouchdb/tests/adapter_conformance.rs:Fx.kind",
+      "name": "kind",
+      "filePath": "crates/rouchdb/tests/adapter_conformance.rs",
+      "startLine": 21,
+      "endLine": 21
+    },
+    {
+      "id": "Property:crates/rouchdb-cli/src/main.rs:Commands.doc_id",
+      "name": "doc_id",
+      "filePath": "crates/rouchdb-cli/src/main.rs",
+      "startLine": 40,
+      "endLine": 40
+    },
+    {
+      "id": "Property:crates/rouchdb-cli/src/main.rs:Commands.include_docs",
+      "name": "include_docs",
+      "filePath": "crates/rouchdb-cli/src/main.rs",
+      "startLine": 58,
+      "endLine": 58
+    }
+  ],
+  "timing": {
+    "vector": 6.8,
+    "bm25": 392,
+    "merge": 0.2,
+    "symbol_lookup": 26.3,
+    "ranking": 0,
+    "formatting": 0.1,
+    "wall": 418.8
+  }
+}

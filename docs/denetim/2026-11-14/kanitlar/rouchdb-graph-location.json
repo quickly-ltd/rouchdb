@@ -1,0 +1,46 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Function:crates/rouchdb-server/src/routes/mod.rs:location",
+    "name": "location",
+    "kind": "Function",
+    "filePath": "crates/rouchdb-server/src/routes/mod.rs",
+    "startLine": 63,
+    "endLine": 87
+  },
+  "epistemic": "exact",
+  "incoming": {
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-server/src/routes/mod.rs:set_location",
+        "name": "set_location",
+        "filePath": "crates/rouchdb-server/src/routes/mod.rs"
+      }
+    ]
+  },
+  "outgoing": {
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-core/src/document.rs:Revision.from_str#1",
+        "name": "from_str",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-server/src/routes/mod.rs:location.header_str@67:4",
+        "name": "header_str",
+        "filePath": "crates/rouchdb-server/src/routes/mod.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-server/src/routes/mod.rs:location.header_str@67:4",
+        "name": "header_str",
+        "filePath": "crates/rouchdb-server/src/routes/mod.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-server/src/routes/mod.rs:location.header_str@67:4",
+        "name": "header_str",
+        "filePath": "crates/rouchdb-server/src/routes/mod.rs"
+      }
+    ]
+  },
+  "processes": []
+}

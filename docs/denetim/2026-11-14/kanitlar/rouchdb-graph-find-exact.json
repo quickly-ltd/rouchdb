@@ -1,0 +1,293 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Function:crates/rouchdb/src/lib.rs:Database.find#1",
+    "name": "find",
+    "kind": "Function",
+    "filePath": "crates/rouchdb/src/lib.rs",
+    "startLine": 824,
+    "endLine": 857
+  },
+  "epistemic": "lower-bound",
+  "boundaries": [
+    "25 call sites invoking `find` were dropped at index time because the receiver's type could not be established (e.g. an unresolved constructor, factory or chained expression). Those callers are absent from this result — actual impact may be higher."
+  ],
+  "causes": {
+    "scopeExtractionFiles": 0,
+    "receiverTyping": 25,
+    "dispatchBoundary": 0,
+    "externalBoundary": 0,
+    "undecidedSatisfaction": 0,
+    "callableValueReferences": 0
+  },
+  "incoming": {
+    "accesses": [
+      {
+        "uid": "Function:crates/rouchdb-cli/src/main.rs:run",
+        "name": "run",
+        "filePath": "crates/rouchdb-cli/src/main.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:indexed_find_updates_index_incrementally.find@2332:8",
+        "name": "find",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:tests.database_create_and_use_index",
+        "name": "database_create_and_use_index",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:tests.database_find",
+        "name": "database_find",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:tests.indexed_find_matches_full_scan",
+        "name": "indexed_find_matches_full_scan",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:tests.indexed_find_sorts_on_nested_field",
+        "name": "indexed_find_sorts_on_nested_field",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/couchdb_query_parity.rs:http_database_runs_mango_on_couchdb",
+        "name": "http_database_runs_mango_on_couchdb",
+        "filePath": "crates/rouchdb/tests/couchdb_query_parity.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/couchdb_query_parity.rs:http_database_runs_mango_on_couchdb",
+        "name": "http_database_runs_mango_on_couchdb",
+        "filePath": "crates/rouchdb/tests/couchdb_query_parity.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/couchdb_query_parity.rs:http_database_runs_mango_on_couchdb",
+        "name": "http_database_runs_mango_on_couchdb",
+        "filePath": "crates/rouchdb/tests/couchdb_query_parity.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/couchdb_query_parity.rs:http_database_runs_mango_on_couchdb",
+        "name": "http_database_runs_mango_on_couchdb",
+        "filePath": "crates/rouchdb/tests/couchdb_query_parity.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/couchdb_query_parity.rs:local_find",
+        "name": "local_find",
+        "filePath": "crates/rouchdb/tests/couchdb_query_parity.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/edge_cases.rs:index_returns_correct_results_after_delete.adults@255:4",
+        "name": "adults",
+        "filePath": "crates/rouchdb/tests/edge_cases.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/edge_cases.rs:index_updates_on_field_value_change.with_status@296:4",
+        "name": "with_status",
+        "filePath": "crates/rouchdb/tests/edge_cases.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/edge_cases.rs:unicode_field_names_in_find",
+        "name": "unicode_field_names_in_find",
+        "filePath": "crates/rouchdb/tests/edge_cases.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/error_conditions.rs:error_table",
+        "name": "error_table",
+        "filePath": "crates/rouchdb/tests/error_conditions.rs"
+      }
+    ],
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-cli/src/main.rs:run",
+        "name": "run",
+        "filePath": "crates/rouchdb-cli/src/main.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:Database.find#1",
+        "name": "find",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:indexed_find_updates_index_incrementally.find@2332:8",
+        "name": "find",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:tests.database_create_and_use_index",
+        "name": "database_create_and_use_index",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:tests.database_find",
+        "name": "database_find",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:tests.indexed_find_matches_full_scan",
+        "name": "indexed_find_matches_full_scan",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:tests.indexed_find_sorts_on_nested_field",
+        "name": "indexed_find_sorts_on_nested_field",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/couchdb_query_parity.rs:http_database_runs_mango_on_couchdb",
+        "name": "http_database_runs_mango_on_couchdb",
+        "filePath": "crates/rouchdb/tests/couchdb_query_parity.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/couchdb_query_parity.rs:http_database_runs_mango_on_couchdb",
+        "name": "http_database_runs_mango_on_couchdb",
+        "filePath": "crates/rouchdb/tests/couchdb_query_parity.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/couchdb_query_parity.rs:http_database_runs_mango_on_couchdb",
+        "name": "http_database_runs_mango_on_couchdb",
+        "filePath": "crates/rouchdb/tests/couchdb_query_parity.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/couchdb_query_parity.rs:http_database_runs_mango_on_couchdb",
+        "name": "http_database_runs_mango_on_couchdb",
+        "filePath": "crates/rouchdb/tests/couchdb_query_parity.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/couchdb_query_parity.rs:local_find",
+        "name": "local_find",
+        "filePath": "crates/rouchdb/tests/couchdb_query_parity.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/edge_cases.rs:index_returns_correct_results_after_delete.adults@255:4",
+        "name": "adults",
+        "filePath": "crates/rouchdb/tests/edge_cases.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/edge_cases.rs:index_updates_on_field_value_change.with_status@296:4",
+        "name": "with_status",
+        "filePath": "crates/rouchdb/tests/edge_cases.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/tests/edge_cases.rs:unicode_field_names_in_find",
+        "name": "unicode_field_names_in_find",
+        "filePath": "crates/rouchdb/tests/edge_cases.rs"
+      }
+    ]
+  },
+  "outgoing": {
+    "accesses": [
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:Database.adapter#0",
+        "name": "adapter",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:Database.adapter#0",
+        "name": "adapter",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:Database.index_candidates#2",
+        "name": "index_candidates",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-query/src/mango.rs:FindOptions.selector",
+        "name": "selector",
+        "filePath": "crates/rouchdb-query/src/mango.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-query/src/mango.rs:FindOptions.selector",
+        "name": "selector",
+        "filePath": "crates/rouchdb-query/src/mango.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-query/src/mango.rs:FindOptions.selector",
+        "name": "selector",
+        "filePath": "crates/rouchdb-query/src/mango.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-query/src/mango.rs:FindOptions.sort",
+        "name": "sort",
+        "filePath": "crates/rouchdb-query/src/mango.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb/src/lib.rs:Database.indexes",
+        "name": "indexes",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb/src/lib.rs:Database.remote",
+        "name": "remote",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      }
+    ],
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:Database.find#1",
+        "name": "find",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:Database.index_candidates#2",
+        "name": "index_candidates",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:remote_find",
+        "name": "remote_find",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:tests.SpyAdapter.new#0",
+        "name": "new",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:usable_index",
+        "name": "usable_index",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      }
+    ]
+  },
+  "processes": [
+    {
+      "id": "proc_133_run",
+      "name": "Run → Remote_error",
+      "step_index": 2,
+      "step_count": 4
+    },
+    {
+      "id": "proc_134_run",
+      "name": "Run → Remote_request",
+      "step_index": 2,
+      "step_count": 4
+    },
+    {
+      "id": "proc_243_run",
+      "name": "Run → New",
+      "step_index": 2,
+      "step_count": 4
+    },
+    {
+      "id": "proc_41_run",
+      "name": "Run → Remote_query_body",
+      "step_index": 2,
+      "step_count": 4
+    },
+    {
+      "id": "proc_71_run",
+      "name": "Run → Index_candidates",
+      "step_index": 2,
+      "step_count": 3
+    },
+    {
+      "id": "proc_72_run",
+      "name": "Run → Usable_index",
+      "step_index": 2,
+      "step_count": 3
+    }
+  ]
+}

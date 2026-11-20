@@ -1,0 +1,3 @@
+{"case":"shared_handle_reset","full_scan":[{"_id":"new","_rev":"1-16acaca98c86f5e92ac4f94328d15aa1","x":1}],"indexed":[]}
+{"case":"zero_batch","docs_read":0,"docs_written":0,"last_seq":0,"ok":true,"source_count":1,"target_count":0}
+{"case":"empty_index","result":"Ok(CreateIndexResponse { result: \"created\", name: \"empty\" })"}
