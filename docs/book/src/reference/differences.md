@@ -75,6 +75,23 @@ mode on with its own `arbitrary-precision` feature. See
 [Installation](../getting-started/installation.md#exact-numbers); pinned by
 `big_numbers.rs`.
 
+## Counter limits
+
+CouchDB's revision generations, `_local` revision counters and `_find`
+`skip` are Erlang integers, without an upper limit: an edit of
+`18446744073709551615-…` becomes `18446744073709551616-…`. RouchDB stores
+them as `u64`. A write whose new revision generation (or `_local` counter)
+would pass `u64::MAX` is refused with `400 bad_request` and changes
+nothing; such a revision only exists if it was replicated or written with
+`new_edits: false`, and an edit of generation `u64::MAX - 1` still works. A
+`_find` whose bookmark offset plus `skip` passes `u64::MAX` is a `400`, and a
+`skip` or `limit` above `u64::MAX` is rejected as an invalid query (CouchDB
+accepts them). Bookmarks are opaque: RouchDB's are not CouchDB's.
+
+Pinned by `accepted_divergence_generation_stops_at_u64_max` (rouchdb-core
+write) and the `accepted_divergence_*_stops_at_u64_max*` tests of
+rouchdb-server (`arithmetic_bounds.rs`).
+
 ## Attachment storage
 
 CouchDB gzip-compresses attachments of compressible types (`text/*`, JSON,

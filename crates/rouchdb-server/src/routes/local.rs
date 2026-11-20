@@ -76,7 +76,15 @@ pub async fn put_local(
         Some(rev) => parse_local_rev(&rev)?,
         None => 0,
     };
-    let rev = format!("0-{}", current + 1);
+    // CouchDB has no limit; ours is a u64, so the counter after u64::MAX is
+    // refused instead of overflowing.
+    let next = current.checked_add(1).ok_or_else(|| {
+        AppError(RouchError::BadRequest(format!(
+            "Local revision cannot be incremented past 0-{}",
+            u64::MAX
+        )))
+    })?;
+    let rev = format!("0-{next}");
 
     obj.remove("_id");
     obj.insert("_rev".into(), rev.clone().into());

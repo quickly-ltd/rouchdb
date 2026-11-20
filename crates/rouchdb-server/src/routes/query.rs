@@ -71,7 +71,17 @@ pub async fn find(
 
     // A bookmark resumes after the results already returned; `skip` applies
     // on top of it, as in CouchDB.
-    let skip = offset.unwrap_or(0) + opts.skip.unwrap_or(0);
+    // Offsets are u64: a sum past u64::MAX is refused, not wrapped.
+    let overflow = || {
+        AppError(RouchError::BadRequest(format!(
+            "bookmark offset plus skip exceeds {}",
+            u64::MAX
+        )))
+    };
+    let skip = offset
+        .unwrap_or(0)
+        .checked_add(opts.skip.unwrap_or(0))
+        .ok_or_else(overflow)?;
     opts.skip = Some(skip);
     opts.limit = Some(opts.limit.unwrap_or(DEFAULT_FIND_LIMIT));
 
@@ -79,7 +89,8 @@ pub async fn find(
     let bookmark = if response.docs.is_empty() && offset.is_none() {
         "nil".to_string()
     } else {
-        encode_bookmark(skip + response.docs.len() as u64)
+        let returned = u64::try_from(response.docs.len()).map_err(|_| overflow())?;
+        encode_bookmark(skip.checked_add(returned).ok_or_else(overflow)?)
     };
     Ok(Json(serde_json::json!({
         "docs": response.docs,
