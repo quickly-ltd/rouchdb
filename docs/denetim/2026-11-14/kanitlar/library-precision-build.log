@@ -1,0 +1,13 @@
+   Compiling rouchdb-core v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-core)
+   Compiling reqwest v0.12.28
+   Compiling rouchdb-query v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-query)
+   Compiling rouchdb-adapter-redb v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-adapter-redb)
+   Compiling rouchdb-adapter-memory v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-adapter-memory)
+   Compiling rouchdb-adapter-http v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-adapter-http)
+   Compiling rouchdb-views v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-views)
+   Compiling rouchdb-replication v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-replication)
+   Compiling rouchdb-changes v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb-changes)
+   Compiling rouchdb v0.5.1 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/crates/rouchdb)
+   Compiling rouchdb-source-audit-probes v0.0.0 (/Users/guvensoft/Desktop/Quickly_Work/Modern Ecosystem/rouchdb/docs/denetim/2026-11-14/kanitlar/library-probes)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.32s
+     Running `target/debug/rouchdb-source-audit-probes`

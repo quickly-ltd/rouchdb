@@ -1,0 +1,33 @@
+{
+  "target": {
+    "id": "Function:crates/rouchdb-core/src/collation.rs:compare_numbers",
+    "name": "compare_numbers",
+    "type": "Function",
+    "filePath": "crates/rouchdb-core/src/collation.rs"
+  },
+  "direction": "upstream",
+  "impactedCount": 1,
+  "risk": "LOW",
+  "riskSharedAxes": "LOW",
+  "riskScale": {
+    "comparableAcrossKinds": true,
+    "unusedAxes": []
+  },
+  "epistemic": "exact",
+  "summary": {
+    "direct": 1,
+    "processes_affected": 0,
+    "modules_affected": 1
+  },
+  "byDepthCounts": {
+    "1": 1
+  },
+  "affected_processes": [],
+  "affected_modules": [
+    {
+      "name": "Cluster_66",
+      "hits": 1,
+      "impact": "direct"
+    }
+  ]
+}

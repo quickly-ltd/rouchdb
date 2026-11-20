@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
 use rouchdb::{Database, matches_selector};
-use rouchdb_core::document::{ChangeEvent, ChangesOptions};
+use rouchdb_core::document::{ChangeEvent, ChangesOptions, Seq};
 use rouchdb_core::error::Result;
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
@@ -45,6 +45,8 @@ pub struct IndexedChange {
 struct Inner {
     /// Identity of the database the entries belong to.
     db_id: Option<String>,
+    /// Purge state when the index was last built or refreshed.
+    purge_seq: Option<Seq>,
     /// Whether a refresh of this database completed at least once.
     built: bool,
     upto: u64,
@@ -103,9 +105,12 @@ impl SelectorIndex {
     /// was reset during the refresh.
     pub async fn refresh(&self, db: &Database) -> Result<Option<String>> {
         let db_id = db.adapter().id().await?;
+        let purge_seq = db.adapter().info().await?.purge_seq;
         let built = {
             let inner = self.read();
-            inner.built && inner.db_id.as_deref() == Some(db_id.as_str())
+            inner.built
+                && inner.db_id.as_deref() == Some(db_id.as_str())
+                && inner.purge_seq.as_ref() == Some(&purge_seq)
         };
         let _refreshing = if built {
             self.refresh.lock().await
@@ -117,9 +122,12 @@ impl SelectorIndex {
         };
         let mut upto = {
             let mut inner = self.write();
-            if inner.db_id.as_deref() != Some(db_id.as_str()) {
+            if inner.db_id.as_deref() != Some(db_id.as_str())
+                || inner.purge_seq.as_ref() != Some(&purge_seq)
+            {
                 *inner = Inner {
                     db_id: Some(db_id.clone()),
+                    purge_seq: Some(purge_seq.clone()),
                     ..Default::default()
                 };
             }
@@ -139,8 +147,11 @@ impl SelectorIndex {
             let entries: Vec<(u64, IndexedChange)> =
                 page.results.into_iter().map(|e| self.project(e)).collect();
             let mut inner = self.write();
-            // Reset (or destroyed and reused) while the page was read.
-            if inner.db_id.as_deref() != Some(db_id.as_str()) || inner.upto != upto {
+            // Reset (or destroyed and reused, or purged) while the page was read.
+            if inner.db_id.as_deref() != Some(db_id.as_str())
+                || inner.purge_seq.as_ref() != Some(&purge_seq)
+                || inner.upto != upto
+            {
                 return Ok(None);
             }
             for (seq, change) in entries {
@@ -186,6 +197,34 @@ impl SelectorIndex {
         )
     }
 
+    /// Removes documents from the projection (e.g. right after `_purge`).
+    pub fn remove_docs<I, S>(&self, ids: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut inner = self.write();
+        for id in ids {
+            if let Some(old) = inner.seq_of.remove(id.as_ref()) {
+                inner.by_seq.remove(&old);
+            }
+        }
+    }
+
+    /// Evicts a single stale entry if it is still indexed at `seq` for `db_id`.
+    pub(crate) fn evict(&self, db_id: &str, seq: u64, id: &str) {
+        let mut inner = self.write();
+        if inner.db_id.as_deref() != Some(db_id) {
+            return;
+        }
+        if inner.by_seq.get(&seq).is_some_and(|c| c.id == id) {
+            inner.by_seq.remove(&seq);
+            if inner.seq_of.get(id) == Some(&seq) {
+                inner.seq_of.remove(id);
+            }
+        }
+    }
+
     /// Forgets every indexed change (e.g. right after the database was
     /// destroyed; a changed identity is also detected on the next refresh).
     /// A refresh running meanwhile discards what it read.
@@ -214,6 +253,7 @@ impl SelectorIndex {
                     _ => Tri::Unknown,
                 },
                 "$or" => match condition {
+                    Value::Array(items) if items.is_empty() => Tri::True,
                     Value::Array(items) => items
                         .iter()
                         .fold(Tri::False, |acc, item| or(acc, self.eval(change, item))),
@@ -285,6 +325,9 @@ fn quick_match(value: Option<&Value>, condition: &Value) -> Option<bool> {
         }
         _ => return None,
     };
+    if ops.is_empty() {
+        return None;
+    }
     let mut result = true;
     for (op, operand) in ops {
         let answer = match (op.as_str(), operand) {
@@ -292,9 +335,13 @@ fn quick_match(value: Option<&Value>, condition: &Value) -> Option<bool> {
             ("$eq", Value::String(expected)) => {
                 matches!(value, Some(Value::String(v)) if v == expected)
             }
-            ("$in", Value::Array(options)) if options.iter().all(Value::is_string) => {
-                matches!(value, Some(v @ Value::String(_)) if options.contains(v))
-            }
+            ("$in", Value::Array(options)) if options.iter().all(Value::is_string) => match value {
+                Some(v @ Value::String(_)) => options.contains(v),
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .any(|item| item.is_string() && options.contains(item)),
+                _ => false,
+            },
             ("$gt" | "$gte" | "$lt" | "$lte", Value::String(bound)) => {
                 let Some(Value::String(v)) = value else {
                     return None;
@@ -443,5 +490,71 @@ mod tests {
         assert!(found.is_empty());
         assert!(index.refresh(&db).await.unwrap().is_some());
         assert_eq!(index.candidates(0, &json!({"name": "x"})).1.len(), 1);
+    }
+
+    #[test]
+    fn quick_match_handles_array_in_and_empty_object_and_empty_or() {
+        let index = SelectorIndex::new(["tags", "kind"]);
+        let eval = |c: &IndexedChange, s: &Value| index.eval(c, s);
+
+        let tagged = change("doc:1", json!({"tags": ["rust", "db"], "kind": "events"}));
+        assert_eq!(
+            eval(&tagged, &json!({"tags": {"$in": ["rust", "go"]}})),
+            Tri::True
+        );
+        assert_eq!(
+            eval(&tagged, &json!({"tags": {"$in": ["go", "zig"]}})),
+            Tri::False
+        );
+
+        // Empty object below top level means equality with `{}` (not always true).
+        assert_eq!(eval(&tagged, &json!({"kind": {}})), Tri::False);
+        let empty_obj = change("doc:2", json!({"kind": {}}));
+        assert_eq!(eval(&empty_obj, &json!({"kind": {}})), Tri::True);
+
+        // Empty `$or: []` is always true (matching CouchDB/Mango).
+        assert_eq!(eval(&tagged, &json!({"$or": []})), Tri::True);
+        assert_eq!(
+            eval(&tagged, &json!({"$and": [{"kind": "events"}, {"$or": []}]})),
+            Tri::True
+        );
+        assert_eq!(
+            eval(
+                &tagged,
+                &json!({"$and": [{"kind": "products"}, {"$or": []}]})
+            ),
+            Tri::False
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_removes_ghost_entries_on_refresh_and_remove_docs() {
+        let db = Database::memory("db");
+        let r1 = db
+            .put("p1", json!({"kind": "products"}))
+            .await
+            .unwrap()
+            .rev
+            .unwrap();
+        db.put("p2", json!({"kind": "products"})).await.unwrap();
+        let index = SelectorIndex::new(["kind"]);
+        assert!(index.refresh(&db).await.unwrap().is_some());
+        assert_eq!(index.candidates(0, &json!({"kind": "products"})).1.len(), 2);
+
+        // Direct Database::purge updates purge_seq; refresh must rebuild without ghosts.
+        db.purge("p1", vec![r1]).await.unwrap();
+        assert!(index.refresh(&db).await.unwrap().is_some());
+        let (_, found) = index.candidates(0, &json!({"kind": "products"}));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].1.id, "p2");
+
+        // remove_docs immediately drops entries before the next refresh.
+        index.remove_docs(["p2"]);
+        assert!(
+            index
+                .candidates(0, &json!({"kind": "products"}))
+                .1
+                .is_empty()
+        );
     }
 }

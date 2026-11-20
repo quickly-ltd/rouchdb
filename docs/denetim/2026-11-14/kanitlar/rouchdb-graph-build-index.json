@@ -1,0 +1,93 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Function:crates/rouchdb-query/src/mango.rs:build_index",
+    "name": "build_index",
+    "kind": "Function",
+    "filePath": "crates/rouchdb-query/src/mango.rs",
+    "startLine": 307,
+    "endLine": 333
+  },
+  "epistemic": "exact",
+  "incoming": {
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-query/src/mango.rs:tests.apply_changes_drops_deleted_and_design_documents",
+        "name": "apply_changes_drops_deleted_and_design_documents",
+        "filePath": "crates/rouchdb-query/src/mango.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-query/src/mango.rs:tests.index_candidates_are_narrowed_by_the_first_field",
+        "name": "index_candidates_are_narrowed_by_the_first_field",
+        "filePath": "crates/rouchdb-query/src/mango.rs"
+      }
+    ]
+  },
+  "outgoing": {
+    "accesses": [
+      {
+        "uid": "Function:crates/rouchdb-core/src/adapter.rs:Adapter.all_docs#1",
+        "name": "all_docs",
+        "filePath": "crates/rouchdb-core/src/adapter.rs"
+      }
+    ],
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-core/src/adapter.rs:Adapter.all_docs#1",
+        "name": "all_docs",
+        "filePath": "crates/rouchdb-core/src/adapter.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-query/src/mango.rs:CreateIndexResponse.new#2",
+        "name": "new",
+        "filePath": "crates/rouchdb-query/src/mango.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-query/src/mango.rs:index_key",
+        "name": "index_key",
+        "filePath": "crates/rouchdb-query/src/mango.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-query/src/mango.rs:is_design_doc",
+        "name": "is_design_doc",
+        "filePath": "crates/rouchdb-query/src/mango.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-query/src/mango.rs:sort_entries",
+        "name": "sort_entries",
+        "filePath": "crates/rouchdb-query/src/mango.rs"
+      },
+      {
+        "uid": "Struct:crates/rouchdb-query/src/mango.rs:BuiltIndex",
+        "name": "BuiltIndex",
+        "filePath": "crates/rouchdb-query/src/mango.rs"
+      }
+    ]
+  },
+  "processes": [
+    {
+      "id": "proc_114_apply_changes_drops_",
+      "name": "Apply_changes_drops_deleted_and_design_documents → Resolve",
+      "step_index": 2,
+      "step_count": 6
+    },
+    {
+      "id": "proc_132_apply_changes_drops_",
+      "name": "Apply_changes_drops_deleted_and_design_documents → Is_design_doc",
+      "step_index": 2,
+      "step_count": 3
+    },
+    {
+      "id": "proc_224_apply_changes_drops_",
+      "name": "Apply_changes_drops_deleted_and_design_documents → New",
+      "step_index": 2,
+      "step_count": 6
+    },
+    {
+      "id": "proc_79_apply_changes_drops_",
+      "name": "Apply_changes_drops_deleted_and_design_documents → All_docs",
+      "step_index": 2,
+      "step_count": 3
+    }
+  ]
+}

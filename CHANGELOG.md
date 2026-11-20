@@ -23,9 +23,15 @@ This project follows [Semantic Versioning](https://semver.org/). Since we are pr
 - Cancel live replication while adapter I/O or event delivery is pending; a full event queue no longer prevents the worker from stopping. Terminal completion on cancellation is best-effort when the queue is full.
 - Report unsuccessful HTTP session logout responses instead of returning success.
 - Restrict `sync_status_summary(remote_label)` to the requested connection so other replications cannot change its status or error.
+- **`validate_doc_update` rev normalization and `bulk_docs` data-rev handling:** accept uppercase hex in revision strings during `validate_doc_update` and normalize embedded `_rev` fields in `bulk_docs` payloads consistently.
+- **Enforce `UserCtx` admin checks on administrative endpoints (rouchdb-server):** require database/server admin privileges for `_security`, `_purge`, `_compact`, `PUT /{db}`, and `DELETE /{db}`.
+- **Map rev-less attachment authorization errors to `403`/`401` (rouchdb-server):** attachment writes without an explicit `rev` now preserve `Forbidden`/`Unauthorized` status codes instead of misreporting them.
+- **Fix `SelectorIndex` edge cases (rouchdb-server):** evaluate `$in` correctly against array-valued fields, handle empty `$or` arrays without false positives, and refresh the selector index after `_purge`.
+- **Reset `pending_changes` after local database `destroy()` (rouchdb-server):** `ActiveTasks::sync_status_with_pending` now records the source adapter's `id()` on `CaughtUp` and leaves `pending_changes` as `None` when the local database has been destroyed/recreated until a new push catches up.
 
 ### Added
 
+- **`rouchdb-cli` is published on crates.io**: `cargo install rouchdb-cli` installs the `rouchdb` command-line tool (including `rouchdb migrate`) without cloning the repository. It has its own crate README and follows the workspace version. `rouchdb-server`, `rouchdb-bench` and `rouchdb-compat-tests` stay unpublished.
 - **Write validation context:** `Plugin::validate_doc_update(new_doc, old_doc, ctx)` is CouchDB's `validate_doc_update(newDoc, oldDoc, userCtx)`. It runs for each document on every write path (local API, attachments, replication into the database, and every `rouchdb-server` route that writes), and a `Forbidden` / `Unauthorized` / `BadRequest` rejects that document only, reported with the plugin's reason. `ctx.user_ctx` is the writer's `UserCtx` (`name`, `roles`): a `Database` writes as `UserCtx::admin()` unless created with `Database::as_user(ctx)`, replication writes with its target handle's context, and `rouchdb-server` sets it per request from authentication (or keeps one an outer layer of the embedder put in the request extensions). `old_doc` is the replaced revision as CouchDB's `prep_and_validate_update` determines it; `ctx.security()` / `ctx.db_name()` give `secObj` and `userCtx.db`. As in CouchDB, `_local/` documents, conflicting edits and already stored replicated revisions are not validated, and `_design/` documents need a database admin (`unauthorized` otherwise). Failed rows of a `new_edits: false` `_bulk_docs` name their `rev`. Rejections come back in request order (also `conflict`, if a plugin returns it); `after_write` sees the written documents only; `before_write` changes apply to edits only, so a replicated revision keeps the source's body through `bulk_docs(.., replication())` too.
 - **Live replication waits on a longpoll feed:** a source that cannot announce its changes (a remote CouchDB) is no longer polled every `poll_interval` while idle. The new `Adapter::wait_for_changes(since, timeout)` (default `ChangeWait::Unsupported`) is `_changes?feed=longpoll` on the HTTP adapter (at most 25 s, and half its read timeout), and live replication waits on it between passes, still no more often than `poll_interval`. A live replication reports `CaughtUp`/`Paused` as soon as a pass catches up, whatever the source.
 - **`_changes?filter=_selector` (rouchdb-server):** the selector may also be given in a GET as a JSON-encoded `selector` query parameter (the POST body wins). The opt-in `ServerConfig::selector_index_fields` / `--selector-index-field` keeps an in-memory projection of those top-level fields for the changes feed, so a selector feed skips changes that cannot match without reading their bodies; results are unchanged.
@@ -39,14 +45,6 @@ This project follows [Semantic Versioning](https://semver.org/). Since we are pr
   - Implemented `longpoll` and `continuous` live changes feeds in `/{db}/_changes` with keep-alive heartbeats.
   - Surfaced `_conflicts` in `GET /{db}/{docid}` and `GET /{db}/_all_docs` when `?conflicts=true`.
   - Added JSON string unquoting for `startkey`, `endkey`, and `key` in `_all_docs`.
-
----
-
-## [Unreleased]
-
-### Added
-
-- **`rouchdb-cli` is published on crates.io**: `cargo install rouchdb-cli` installs the `rouchdb` command-line tool (including `rouchdb migrate`) without cloning the repository. It has its own crate README and follows the workspace version. `rouchdb-server`, `rouchdb-bench` and `rouchdb-compat-tests` stay unpublished.
 
 ## [0.5.1] - 2026-09-30
 

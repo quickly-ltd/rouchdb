@@ -1,0 +1,229 @@
+{
+  "processes": [
+    {
+      "id": "proc_107_get_session",
+      "summary": "Get_session → Session_response",
+      "priority": 0.124,
+      "symbol_count": 2,
+      "process_type": "intra_community",
+      "step_count": 3
+    },
+    {
+      "id": "proc_174_post_session",
+      "summary": "Post_session → Session_response",
+      "priority": 0.108,
+      "symbol_count": 1,
+      "process_type": "intra_community",
+      "step_count": 3
+    },
+    {
+      "id": "proc_52_require_auth",
+      "summary": "Require_auth → With_timeout",
+      "priority": 0.105,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 4
+    },
+    {
+      "id": "proc_175_start_server",
+      "summary": "Start_server → New",
+      "priority": 0.082,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 8
+    }
+  ],
+  "process_symbols": [
+    {
+      "id": "Function:crates/rouchdb-server/src/routes/session.rs:get_session",
+      "name": "get_session",
+      "filePath": "crates/rouchdb-server/src/routes/session.rs",
+      "startLine": 18,
+      "endLine": 46,
+      "module": "Routes",
+      "process_id": "proc_107_get_session",
+      "step_index": 1
+    },
+    {
+      "id": "Function:crates/rouchdb-server/src/routes/session.rs:session_response",
+      "name": "session_response",
+      "filePath": "crates/rouchdb-server/src/routes/session.rs",
+      "startLine": 135,
+      "endLine": 147,
+      "module": "Routes",
+      "process_id": "proc_107_get_session",
+      "step_index": 3
+    },
+    {
+      "id": "Function:crates/rouchdb-server/src/auth.rs:require_auth",
+      "name": "require_auth",
+      "filePath": "crates/rouchdb-server/src/auth.rs",
+      "startLine": 290,
+      "endLine": 332,
+      "module": "Cluster_122",
+      "process_id": "proc_52_require_auth",
+      "step_index": 1
+    },
+    {
+      "id": "Function:crates/rouchdb-server/src/lib.rs:start_server",
+      "name": "start_server",
+      "filePath": "crates/rouchdb-server/src/lib.rs",
+      "startLine": 249,
+      "endLine": 299,
+      "module": "Tests",
+      "process_id": "proc_175_start_server",
+      "step_index": 1
+    }
+  ],
+  "definitions": [
+    {
+      "id": "Impl:crates/rouchdb-server/src/auth.rs:Auth",
+      "name": "Auth",
+      "filePath": "crates/rouchdb-server/src/auth.rs",
+      "startLine": 77,
+      "endLine": 188
+    },
+    {
+      "id": "Function:crates/rouchdb-server/src/auth.rs:tests.session_cookie_is_secure_only_behind_a_trusted_https_proxy",
+      "name": "session_cookie_is_secure_only_behind_a_trusted_https_proxy",
+      "filePath": "crates/rouchdb-server/src/auth.rs",
+      "startLine": 378,
+      "endLine": 404,
+      "module": "Cluster_123"
+    },
+    {
+      "id": "Function:crates/rouchdb-server/src/routes/session.rs:delete_session",
+      "name": "delete_session",
+      "filePath": "crates/rouchdb-server/src/routes/session.rs",
+      "startLine": 112,
+      "endLine": 123
+    },
+    {
+      "id": "Function:crates/rouchdb-server/src/lib.rs:build_router_with_tasks",
+      "name": "build_router_with_tasks",
+      "filePath": "crates/rouchdb-server/src/lib.rs",
+      "startLine": 199,
+      "endLine": 243,
+      "module": "Routes"
+    },
+    {
+      "id": "File:crates/rouchdb-server/src/lib.rs",
+      "name": "lib.rs",
+      "filePath": "crates/rouchdb-server/src/lib.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb-server/tests/security.rs:session_info",
+      "name": "session_info",
+      "filePath": "crates/rouchdb-server/tests/security.rs",
+      "startLine": 291,
+      "endLine": 297
+    },
+    {
+      "id": "Function:crates/rouchdb-server/tests/security.rs:session_cookie_is_secure_only_behind_a_trusted_https_proxy",
+      "name": "session_cookie_is_secure_only_behind_a_trusted_https_proxy",
+      "filePath": "crates/rouchdb-server/tests/security.rs",
+      "startLine": 847,
+      "endLine": 893,
+      "module": "Tests"
+    },
+    {
+      "id": "File:crates/rouchdb-server/tests/security.rs",
+      "name": "security.rs",
+      "filePath": "crates/rouchdb-server/tests/security.rs"
+    },
+    {
+      "id": "Struct:crates/rouchdb-adapter-http/src/auth.rs:AuthClient",
+      "name": "AuthClient",
+      "filePath": "crates/rouchdb-adapter-http/src/auth.rs",
+      "startLine": 49,
+      "endLine": 52
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-http/src/auth.rs:tests.logout_deletes_the_server_session",
+      "name": "logout_deletes_the_server_session",
+      "filePath": "crates/rouchdb-adapter-http/src/auth.rs",
+      "startLine": 181,
+      "endLine": 189,
+      "module": "Cluster_2"
+    },
+    {
+      "id": "File:crates/rouchdb-adapter-http/src/auth.rs",
+      "name": "auth.rs",
+      "filePath": "crates/rouchdb-adapter-http/src/auth.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-http/src/lib.rs:HttpAdapter.with_auth_client#2",
+      "name": "with_auth_client",
+      "filePath": "crates/rouchdb-adapter-http/src/lib.rs",
+      "startLine": 288,
+      "endLine": 290,
+      "module": "Cluster_0"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-http/src/lib.rs:tests.adapter_from_an_auth_client_sends_its_session_cookie",
+      "name": "adapter_from_an_auth_client_sends_its_session_cookie",
+      "filePath": "crates/rouchdb-adapter-http/src/lib.rs",
+      "startLine": 2233,
+      "endLine": 2257,
+      "module": "Cluster_0"
+    },
+    {
+      "id": "File:crates/rouchdb-adapter-http/src/lib.rs",
+      "name": "lib.rs",
+      "filePath": "crates/rouchdb-adapter-http/src/lib.rs"
+    },
+    {
+      "id": "Property:crates/rouchdb-server/tests/auth_matrix.rs:Snapshot.security",
+      "name": "security",
+      "filePath": "crates/rouchdb-server/tests/auth_matrix.rs",
+      "startLine": 204,
+      "endLine": 204
+    },
+    {
+      "id": "Function:crates/rouchdb-server/tests/auth_matrix.rs:session_cookie_is_found_among_other_cookies",
+      "name": "session_cookie_is_found_among_other_cookies",
+      "filePath": "crates/rouchdb-server/tests/auth_matrix.rs",
+      "startLine": 622,
+      "endLine": 669,
+      "module": "Tests"
+    },
+    {
+      "id": "File:crates/rouchdb-server/tests/auth_matrix.rs",
+      "name": "auth_matrix.rs",
+      "filePath": "crates/rouchdb-server/tests/auth_matrix.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb/src/lib.rs:Database.http_with_auth#2",
+      "name": "http_with_auth",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "startLine": 466,
+      "endLine": 468,
+      "module": "Tests"
+    },
+    {
+      "id": "Function:crates/rouchdb/src/lib.rs:Database.get_security#0",
+      "name": "get_security",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "startLine": 1254,
+      "endLine": 1256,
+      "module": "Tests"
+    },
+    {
+      "id": "Function:crates/rouchdb/src/lib.rs:SpyAdapter.get_security#0",
+      "name": "get_security",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "startLine": 2758,
+      "endLine": 2761,
+      "module": "Cluster_15"
+    }
+  ],
+  "timing": {
+    "vector": 7.7,
+    "bm25": 399.1,
+    "merge": 0.1,
+    "symbol_lookup": 27.3,
+    "ranking": 0.3,
+    "formatting": 0.1,
+    "wall": 427.4
+  }
+}

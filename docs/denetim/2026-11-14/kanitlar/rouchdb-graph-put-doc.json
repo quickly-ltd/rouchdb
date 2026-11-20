@@ -1,0 +1,46 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Function:crates/rouchdb-server/src/routes/document.rs:put_doc",
+    "name": "put_doc",
+    "kind": "Function",
+    "filePath": "crates/rouchdb-server/src/routes/document.rs",
+    "startLine": 225,
+    "endLine": 301
+  },
+  "epistemic": "exact",
+  "incoming": {},
+  "outgoing": {
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-server/src/routes/document.rs:resolve_rev",
+        "name": "resolve_rev",
+        "filePath": "crates/rouchdb-server/src/routes/document.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-server/src/routes/mod.rs:json_object_body",
+        "name": "json_object_body",
+        "filePath": "crates/rouchdb-server/src/routes/mod.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-server/src/routes/mod.rs:set_location",
+        "name": "set_location",
+        "filePath": "crates/rouchdb-server/src/routes/mod.rs"
+      }
+    ]
+  },
+  "processes": [
+    {
+      "id": "proc_104_put_doc",
+      "name": "Put_doc → Etag_value",
+      "step_index": 1,
+      "step_count": 3
+    },
+    {
+      "id": "proc_173_put_doc",
+      "name": "Put_doc → Decode",
+      "step_index": 1,
+      "step_count": 3
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+[
+  {
+    "case": "server_version",
+    "status": 200,
+    "body": {
+      "couchdb": "Welcome",
+      "version": "3.5.1",
+      "git_sha": "44f6a43d8",
+      "uuid": "a071eff966811a5e85fcfb52c7493885",
+      "features": [
+        "access-ready",
+        "partitioned",
+        "pluggable-storage-engines",
+        "reshard",
+        "scheduler"
+      ],
+      "vendor": {
+        "name": "The Apache Software Foundation"
+      }
+    }
+  },
+  {
+    "case": "tombstone_stored_body",
+    "status": 200,
+    "body": {
+      "_id": "tomb",
+      "_rev": "2-e20be22457b95dc5b833f8c0c13273c5",
+      "kind": "order",
+      "tenant": "A",
+      "deleted_at": "2026-11-14",
+      "_deleted": true
+    }
+  },
+  {
+    "case": "empty_page",
+    "status": 200,
+    "body": {
+      "docs": [],
+      "bookmark": "nil",
+      "warning": "No matching index found, create an index to optimize query time."
+    }
+  },
+  {
+    "case": "reuse_empty_bookmark",
+    "status": 400,
+    "body": {
+      "error": "invalid_bookmark",
+      "reason": "Invalid bookmark value: \"nil\""
+    }
+  },
+  {
+    "case": "big_integer_eq",
+    "status": 200,
+    "body": {
+      "docs": [
+        {
+          "_id": "one",
+          "_rev": "1-3804c83588d8d4c2589cba202e20a3fa",
+          "n": 18446744073709551616
+        }
+      ],
+      "bookmark": "g1AAAAA2eJzLYWBgYMpgSmHgKy5JLCrJTq2MT8lPzkzJBYoz5-elgqQ4YFIwwSwAkFEPPw",
+      "warning": "No matching index found, create an index to optimize query time."
+    }
+  }
+]

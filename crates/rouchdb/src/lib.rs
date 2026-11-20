@@ -927,7 +927,19 @@ impl Database {
         let ctx = WriteContext::new(self.adapter.as_ref(), self.user_ctx.clone(), opts.new_edits);
         let mut slots = Vec::with_capacity(docs.len());
         let mut accepted = Vec::with_capacity(docs.len());
-        for doc in docs {
+        for mut doc in docs {
+            if let Err(e) = doc.prepare_for_write() {
+                let reason = match e {
+                    RouchError::BadRequest(reason) => reason,
+                    other => other.to_string(),
+                };
+                slots.push(Slot::Denied(rouchdb_core::write::error_result(
+                    &doc.id,
+                    "bad_request",
+                    &reason,
+                )));
+                continue;
+            }
             match validate_doc(&self.plugins, self.adapter.as_ref(), &doc, &ctx).await? {
                 None => {
                     slots.push(Slot::Write {

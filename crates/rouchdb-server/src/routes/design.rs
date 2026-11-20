@@ -40,6 +40,8 @@ pub async fn put_design(
     state.check_db(&db)?;
     let mut obj = super::json_object_body(&body)?;
 
+    let is_deleted = obj.get("_deleted").and_then(|v| v.as_bool()) == Some(true);
+
     // Parse the body as a design document (which keeps every member),
     // injecting _id and the revision from `?rev`, `_rev` or `If-Match`.
     let body_rev = obj.get("_rev").and_then(|v| v.as_str()).map(String::from);
@@ -60,8 +62,14 @@ pub async fn put_design(
 
     let result = super::write_result(writer.put_design(design).await?)?;
 
+    // A deletion is 200 OK in CouchDB, like `DELETE`; other writes are 201.
+    let status = if is_deleted {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
     let mut resp = (
-        StatusCode::CREATED,
+        status,
         Json(serde_json::json!({
             "ok": result.ok,
             "id": result.id,

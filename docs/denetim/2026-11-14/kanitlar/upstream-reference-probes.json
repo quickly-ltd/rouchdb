@@ -1,0 +1,223 @@
+[
+  {
+    "case": "version",
+    "status": 200,
+    "body": {
+      "couchdb": "Welcome",
+      "version": "3.5.1",
+      "git_sha": "44f6a43d8",
+      "uuid": "37077be195dc00d380bd30dfde90017b",
+      "features": [
+        "access-ready",
+        "partitioned",
+        "pluggable-storage-engines",
+        "reshard",
+        "scheduler"
+      ],
+      "vendor": {
+        "name": "The Apache Software Foundation"
+      }
+    },
+    "location": null
+  },
+  {
+    "case": "index_x",
+    "status": 200,
+    "body": {
+      "result": "created",
+      "id": "_design/first",
+      "name": "same"
+    },
+    "location": null
+  },
+  {
+    "case": "index_y_second_ddoc",
+    "status": 200,
+    "body": {
+      "result": "created",
+      "id": "_design/second",
+      "name": "same"
+    },
+    "location": null
+  },
+  {
+    "case": "replace_x_by_y",
+    "status": 200,
+    "body": {
+      "result": "created",
+      "id": "_design/first",
+      "name": "same"
+    },
+    "location": null
+  },
+  {
+    "case": "indexes_after_redefinition",
+    "status": 200,
+    "body": {
+      "total_rows": 3,
+      "indexes": [
+        {
+          "ddoc": null,
+          "name": "_all_docs",
+          "type": "special",
+          "def": {
+            "fields": [
+              {
+                "_id": "asc"
+              }
+            ]
+          }
+        },
+        {
+          "ddoc": "_design/first",
+          "name": "same",
+          "type": "json",
+          "partitioned": false,
+          "def": {
+            "fields": [
+              {
+                "y": "asc"
+              }
+            ]
+          }
+        },
+        {
+          "ddoc": "_design/second",
+          "name": "same",
+          "type": "json",
+          "partitioned": false,
+          "def": {
+            "fields": [
+              {
+                "y": "asc"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "location": null
+  },
+  {
+    "case": "empty_index_fields",
+    "status": 200,
+    "body": {
+      "result": "created",
+      "id": "_design/empty",
+      "name": "empty"
+    },
+    "location": null
+  },
+  {
+    "case": "forwarded_location",
+    "status": 201,
+    "body": {
+      "ok": true,
+      "id": "forwarded",
+      "rev": "1-0785e9eb543380151003dc452c3a001a"
+    },
+    "location": "https://untrusted.invalid/rouchdb_online_cbb80f2936a24a84a0594216dddd20b8/forwarded"
+  },
+  {
+    "case": "local_max_rev",
+    "status": 201,
+    "body": {
+      "ok": true,
+      "id": "_local/overflow",
+      "rev": "0-18446744073709551616"
+    },
+    "location": "http://127.0.0.1:32770/rouchdb_online_cbb80f2936a24a84a0594216dddd20b8/_local%2Foverflow"
+  },
+  {
+    "case": "revision_max_seed",
+    "status": 201,
+    "body": [],
+    "location": null
+  },
+  {
+    "case": "revision_max_edit",
+    "status": 201,
+    "body": {
+      "ok": true,
+      "id": "maxrev",
+      "rev": "18446744073709551616-c88a8a00e50b3be6760f5b4b8c8ff320"
+    },
+    "location": "http://127.0.0.1:32770/rouchdb_online_cbb80f2936a24a84a0594216dddd20b8/maxrev"
+  },
+  {
+    "case": "find_large_skip",
+    "status": 200,
+    "body": {
+      "docs": [],
+      "bookmark": "nil"
+    },
+    "location": null
+  },
+  {
+    "case": "info_before_purge",
+    "status": 200,
+    "body": {
+      "instance_start_time": "1794645739",
+      "db_name": "rouchdb_online_cbb80f2936a24a84a0594216dddd20b8",
+      "purge_seq": "0-g2wAAAABaANkAA1ub25vZGVAbm9ob3N0bAAAAAJhAG4EAP____9qYQBq",
+      "update_seq": "10-g1AAAABHeJzLYWBgYMxgTmHgzcvPy09JdcjLz8gvLskBCjMlMuSxMPwHgqwM5kSuXKAQu2GqQWqqpTG68iwA1-MVzg",
+      "sizes": {
+        "file": 61645,
+        "external": 489,
+        "active": 2759
+      },
+      "props": {},
+      "doc_del_count": 0,
+      "doc_count": 8,
+      "disk_format_version": 8,
+      "compact_running": false,
+      "cluster": {
+        "q": 1,
+        "n": 1,
+        "w": 1,
+        "r": 1
+      }
+    },
+    "location": null
+  },
+  {
+    "case": "purge_result",
+    "status": 201,
+    "body": {
+      "purge_seq": null,
+      "purged": {
+        "purgecase": [
+          "1-cd9932ac8aceac95b6c0caa1401f90f3"
+        ]
+      }
+    },
+    "location": null
+  },
+  {
+    "case": "info_after_purge",
+    "status": 200,
+    "body": {
+      "instance_start_time": "1794645739",
+      "db_name": "rouchdb_online_cbb80f2936a24a84a0594216dddd20b8",
+      "purge_seq": "1-g2wAAAABaANkAA1ub25vZGVAbm9ob3N0bAAAAAJhAG4EAP____9qYQFq",
+      "update_seq": "11-g1AAAABHeJzLYWBgYMxgTmHgzcvPy09JdcjLz8gvLskBCjMlMuSxMPwHgqwM5kTuXKAQu2GqQWqqpTG68iwA2AEVzw",
+      "sizes": {
+        "file": 65751,
+        "external": 481,
+        "active": 2624
+      },
+      "props": {},
+      "doc_del_count": 0,
+      "doc_count": 7,
+      "disk_format_version": 8,
+      "compact_running": false,
+      "cluster": {
+        "q": 1,
+        "n": 1,
+        "w": 1,
+        "r": 1
+      }
+    },
+    "location": null
+  }
+]

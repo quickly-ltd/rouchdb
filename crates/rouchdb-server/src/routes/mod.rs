@@ -116,9 +116,13 @@ pub(crate) fn write_result(result: rouchdb::DocResult) -> Result<rouchdb::DocRes
     if result.ok {
         return Ok(result);
     }
+    let reason = result.reason.unwrap_or_else(|| "write failed".into());
     Err(AppError(match result.error.as_deref() {
         Some("conflict") => RouchError::Conflict,
-        _ => RouchError::BadRequest(result.reason.unwrap_or_else(|| "write failed".into())),
+        Some("not_found") => RouchError::NotFound(reason),
+        Some("unauthorized") => RouchError::Unauthorized,
+        Some("forbidden") => RouchError::Forbidden(reason),
+        _ => RouchError::BadRequest(reason),
     }))
 }
 
@@ -242,10 +246,9 @@ mod tests {
         rouchdb::DocResult::error("doc", error, reason)
     }
 
-    /// A failed single-document write keeps CouchDB's status: a conflict is
-    /// a 409 (reached over HTTP when another writer creates the document
-    /// between an attachment upload's existence check and its write), any
-    /// other failure a 400 with the write's reason.
+    /// A failed single-document write keeps CouchDB's status: conflicts (409),
+    /// missing docs (404), authorization failures (401/403), and any other
+    /// failure as a 400 with the write's reason.
     #[tokio::test]
     async fn write_result_maps_failures_to_couchdb_errors() {
         let ok = rouchdb::DocResult::ok("doc", "1-a");
@@ -257,6 +260,24 @@ mod tests {
                 StatusCode::CONFLICT,
                 "conflict",
                 "Document update conflict.",
+            ),
+            (
+                failed("not_found", "missing"),
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "missing",
+            ),
+            (
+                failed("unauthorized", "You are not a db or server admin."),
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "You are not authorized",
+            ),
+            (
+                failed("forbidden", "foreign tenant"),
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "foreign tenant",
             ),
             (
                 failed("bad_request", "Invalid rev format"),

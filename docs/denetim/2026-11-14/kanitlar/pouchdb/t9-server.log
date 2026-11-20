@@ -1,0 +1,6 @@
+RouchDB server listening on http://127.0.0.1:55838
+Fauxton UI: http://127.0.0.1:55838/_utils/
+Database:   http://127.0.0.1:55838/appserver
+Auth:       disabled (set --admin or ROUCHDB_ADMIN to require credentials)
+CORS:       disabled
+Hosts:      localhost, 127.0.0.1, [::1]

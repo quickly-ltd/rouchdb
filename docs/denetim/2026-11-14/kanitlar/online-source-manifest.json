@@ -1,0 +1,288 @@
+{
+  "review_date": "2026-11-14",
+  "rouchdb_commit": "d1259449bb1ad20d2df2626989b3a581b7e7893f",
+  "upstream_refs": {
+    "apache/couchdb": {
+      "tag": "3.5.1",
+      "commit": "44f6a43d81b83b203a110f6036d107dc2afb5556"
+    },
+    "pouchdb/pouchdb": {
+      "tag": "9.0.0",
+      "commit": "b2882c1bd006bc2aaeb6fdc83ea632c9c923b9b1"
+    }
+  },
+  "scope": "Sürüme sabit resmî kaynaklar; indirme bütün dosyanın manuel incelendiği anlamına gelmez. İlgili fonksiyonlar/başlıklar okundu.",
+  "sources": [
+    {
+      "repo": "apache/couchdb",
+      "path": "src/mango/src/mango_idx.erl",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/mango/src/mango_idx.erl",
+      "bytes": 22641,
+      "sha256": "13c89e019f4259b025dd2ff40db870f13f73e3ec1601f26358fcf06d66186871",
+      "lines": 726
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/mango/src/mango_idx_view.erl",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/mango/src/mango_idx_view.erl",
+      "bytes": 23345,
+      "sha256": "4836c0c3e510f6cf47edb3211eb181d763f37dbee5f45d4a6c211a784e0855df",
+      "lines": 716,
+      "targeted_lines_read": [
+        [
+          38,
+          55
+        ],
+        [
+          198,
+          225
+        ]
+      ]
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/chttpd/src/chttpd.erl",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/chttpd/src/chttpd.erl",
+      "bytes": 58600,
+      "sha256": "e694c5de92b7af244626add82d5fc688e17f34d0e470d4db6e2e1b2fbc8f543e",
+      "lines": 1697,
+      "targeted_lines_read": [
+        [
+          751,
+          796
+        ]
+      ]
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/chttpd/src/chttpd_db.erl",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/chttpd/src/chttpd_db.erl",
+      "bytes": 103777,
+      "sha256": "ecbbe6fb1c2718cf07a69e33755a1e32b78844fe2a52668014dd8199386967f5",
+      "lines": 2743,
+      "targeted_lines_read": [
+        [
+          695,
+          720
+        ]
+      ]
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/couch/src/couch_doc.erl",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/couch/src/couch_doc.erl",
+      "bytes": 19800,
+      "sha256": "b9d082ff6dd933f5e5e72ab9d87174e4235439caaf0b704a70d14300e7147211",
+      "lines": 588,
+      "targeted_lines_read": [
+        [
+          200,
+          222
+        ],
+        [
+          283,
+          285
+        ],
+        [
+          327,
+          344
+        ]
+      ]
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/mango/src/mango_selector.erl",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/mango/src/mango_selector.erl",
+      "bytes": 35024,
+      "sha256": "225320c6e4b4155ce51dfa24695c76a77348be51587b60bd22ad2683743ee967",
+      "lines": 1090,
+      "targeted_lines_read": [
+        [
+          52,
+          62
+        ],
+        [
+          480,
+          487
+        ]
+      ]
+    },
+    {
+      "repo": "pouchdb/pouchdb",
+      "path": "dist/pouchdb.js",
+      "url": "https://raw.githubusercontent.com/pouchdb/pouchdb/b2882c1bd006bc2aaeb6fdc83ea632c9c923b9b1/dist/pouchdb.js",
+      "bytes": 375958,
+      "sha256": "054b60b7582f76b94802a1c0a0895ecd894cfc25a3f3b18de91d188fd9c42eb7",
+      "lines": 13082,
+      "targeted_lines_read": [
+        [
+          2649,
+          2656
+        ],
+        [
+          4988,
+          5010
+        ],
+        [
+          5400,
+          5447
+        ],
+        [
+          12225,
+          12237
+        ]
+      ]
+    },
+    {
+      "repo": "pouchdb/pouchdb",
+      "path": "dist/pouchdb.find.js",
+      "url": "https://raw.githubusercontent.com/pouchdb/pouchdb/b2882c1bd006bc2aaeb6fdc83ea632c9c923b9b1/dist/pouchdb.find.js",
+      "bytes": 186104,
+      "sha256": "19ba6a57f1f2e3e3853bde6d79c446a7ace2264c18e98b2e0801f8c9e2186c19",
+      "lines": 6333,
+      "targeted_lines_read": [
+        [
+          2825,
+          2843
+        ],
+        [
+          5408,
+          5415
+        ],
+        [
+          5495,
+          5569
+        ]
+      ]
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/mango/src/mango_sort.erl",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/mango/src/mango_sort.erl",
+      "bytes": 1879,
+      "sha256": "a84031281e8c7d4a2453e22b5228e34853e22487d66f31125beb53d565295d8f",
+      "lines": 68,
+      "targeted_lines_read": [
+        [
+          24,
+          28
+        ],
+        [
+          57,
+          69
+        ]
+      ]
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/mango/src/mango_opts.erl",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/mango/src/mango_opts.erl",
+      "bytes": 10362,
+      "sha256": "118322e90b0d6375a537a313f3997f9ae4eb70407aebf0b44865b3dd28fff167",
+      "lines": 366,
+      "targeted_lines_read": [
+        [
+          100,
+          117
+        ],
+        [
+          223,
+          226
+        ],
+        [
+          299,
+          300
+        ]
+      ]
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/couch/src/couch_httpd.erl",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/couch/src/couch_httpd.erl",
+      "bytes": 54410,
+      "sha256": "145b1131eba85c31a6010d2670b8ff53a80ca41154d647dab9122c9168c17665",
+      "lines": 1524
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/couch/src/couch_httpd_db.erl",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/couch/src/couch_httpd_db.erl",
+      "bytes": 56608,
+      "sha256": "437ccda0186809bd5c8257451d3f1bb0eb723d0529e69f1f6ca49dda1bd489f4",
+      "lines": 1421
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/couch_mrview/src/couch_mrview_util.erl",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/couch_mrview/src/couch_mrview_util.erl",
+      "bytes": 45284,
+      "sha256": "6a043e90252e9868eb0c054bed8acf863ea12c4c5687abf07bd3f9d2c955338b",
+      "lines": 1367
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/fabric/src/fabric_db_info.erl",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/fabric/src/fabric_db_info.erl",
+      "bytes": 6400,
+      "sha256": "dbdb2bbc8ee40bb0acc05c141d0fcea778b40c1ae0c070d4f04bae00e425b452",
+      "lines": 191,
+      "targeted_lines_read": [
+        [
+          72,
+          88
+        ]
+      ]
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/docs/src/replication/intro.rst",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/docs/src/replication/intro.rst",
+      "bytes": 6652,
+      "sha256": "c81877aaccc47db716167f61aca712f1694558bf6b46aecd988aa46d55a1d412",
+      "lines": 140
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/docs/src/config/http.rst",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/docs/src/config/http.rst",
+      "bytes": 28495,
+      "sha256": "19a83aa3e79602e3e6137419400701329098c2cebe498b82d2d8041d45a8b0a3",
+      "lines": 754
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/docs/src/api/database/common.rst",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/docs/src/api/database/common.rst",
+      "bytes": 15269,
+      "sha256": "7b1acc87c6f8600dab841bb15c52f0e88a98c1ccf52790ed63b781de86e6c3b0",
+      "lines": 473
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/docs/src/api/database/find.rst",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/docs/src/api/database/find.rst",
+      "bytes": 38021,
+      "sha256": "b998a51ba40620acaf91fb051aa550e2066eca263c1ab9868167263cbc140677",
+      "lines": 993
+    },
+    {
+      "repo": "apache/couchdb",
+      "path": "src/docs/src/api/basics.rst",
+      "url": "https://raw.githubusercontent.com/apache/couchdb/44f6a43d81b83b203a110f6036d107dc2afb5556/src/docs/src/api/basics.rst",
+      "bytes": 22348,
+      "sha256": "b119710d007bf1b8c5cf5dee2fb5c26dac8412fa38fa009576e611fbd84c75f7",
+      "lines": 622
+    }
+  ],
+  "release_layout_note": "PouchDB 9.0.0 release etiketi src paket ağacı yerine resmî dist dosyaları taşır; doğrulama küçültülmemiş dist üzerinde yapıldı.",
+  "online_docs_read": [
+    "https://docs.couchdb.org/en/stable/replication/intro.html",
+    "https://docs.couchdb.org/en/stable/config/http.html",
+    "https://docs.couchdb.org/en/stable/api/database/find.html",
+    "https://docs.couchdb.org/en/stable/api/database/common.html",
+    "https://docs.couchdb.org/en/3.5.1/api/basics.html",
+    "https://docs.couchdb.org/en/3.5.1/api/database/misc.html",
+    "https://pouchdb.com/api.html",
+    "https://pouchdb.com/guides/replication.html"
+  ]
+}

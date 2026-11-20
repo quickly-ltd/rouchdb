@@ -479,3 +479,32 @@ async fn local_delete_via_put_redb() {
     let db = Arc::new(Database::open(dir.path().join("db.redb"), DB).unwrap());
     check_local_delete_via_put(app_with(db, &config())).await;
 }
+
+/// A `PUT /_design/{ddoc}` with `_deleted: true` returns `200 OK` and keeps
+/// extra body fields in the tombstone, matching regular documents.
+#[tokio::test]
+async fn design_doc_delete_via_put_returns_200_and_keeps_body() {
+    let app = app();
+    let resp = put(&app, "/db/_design/d", json!({"views": {}})).await;
+    assert_eq!(resp.status, StatusCode::CREATED);
+    let rev = resp.json()["rev"].as_str().unwrap().to_string();
+
+    let resp = put(
+        &app,
+        "/db/_design/d",
+        json!({"_rev": rev, "_deleted": true, "deleted_by": "admin"}),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK, "{:?}", resp.body);
+    let tomb_rev = resp.json()["rev"].as_str().unwrap().to_string();
+
+    let doc = get(&app, &format!("/db/_design/d?rev={tomb_rev}"))
+        .await
+        .json();
+    assert_eq!(doc["_deleted"], true);
+    assert_eq!(doc["deleted_by"], "admin");
+    assert_eq!(
+        get(&app, "/db/_design/d").await.status,
+        StatusCode::NOT_FOUND
+    );
+}

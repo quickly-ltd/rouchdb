@@ -1,0 +1,128 @@
+{
+  "pouchdb_version": "9.0.0",
+  "results": [
+    {
+      "case": "empty_index_fields",
+      "result": {
+        "id": "_design/empty",
+        "name": "empty",
+        "result": "created"
+      }
+    },
+    {
+      "case": "index_x",
+      "result": {
+        "id": "_design/first",
+        "name": "same",
+        "result": "created"
+      }
+    },
+    {
+      "case": "index_y_second_ddoc",
+      "result": {
+        "id": "_design/second",
+        "name": "same",
+        "result": "created"
+      }
+    },
+    {
+      "case": "replace_x_by_y",
+      "result": {
+        "id": "_design/first",
+        "name": "same",
+        "result": "exists"
+      }
+    },
+    {
+      "case": "indexes_after_redefinition",
+      "result": {
+        "indexes": [
+          {
+            "ddoc": null,
+            "name": "_all_docs",
+            "type": "special",
+            "def": {
+              "fields": [
+                {
+                  "_id": "asc"
+                }
+              ]
+            }
+          },
+          {
+            "ddoc": "_design/empty",
+            "name": "empty",
+            "type": "json",
+            "def": {
+              "fields": []
+            }
+          },
+          {
+            "ddoc": "_design/first",
+            "name": "same",
+            "type": "json",
+            "def": {
+              "fields": [
+                {
+                  "x": "asc"
+                }
+              ]
+            }
+          },
+          {
+            "ddoc": "_design/second",
+            "name": "same",
+            "type": "json",
+            "def": {
+              "fields": [
+                {
+                  "y": "asc"
+                }
+              ]
+            }
+          }
+        ],
+        "total_rows": 4
+      }
+    },
+    {
+      "case": "zero_batch",
+      "ok": true,
+      "docs_written": 1,
+      "target_count": 1
+    },
+    {
+      "case": "old_handle_after_destroy",
+      "error": "database is closed"
+    },
+    {
+      "case": "new_handle_after_destroy",
+      "result": {
+        "docs": [
+          {
+            "x": 1,
+            "_id": "new",
+            "_rev": "1-91abf905a9041104d25013143548c8c8"
+          }
+        ],
+        "warning": "No matching index found, create an index to optimize query time."
+      }
+    },
+    {
+      "case": "tombstone_stored_body",
+      "result": {
+        "tenant": "A",
+        "deleted_at": "2026-11-14",
+        "_id": "tomb",
+        "_rev": "2-11f1123ea84ccb1dfbac530e631fc59b",
+        "_deleted": true
+      }
+    },
+    {
+      "case": "javascript_large_integer",
+      "one": 18446744073709552000,
+      "two": 18446744073709552000,
+      "equal": true
+    }
+  ]
+}

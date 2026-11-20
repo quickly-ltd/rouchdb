@@ -1,0 +1,87 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Function:crates/rouchdb/src/lib.rs:Database.index_candidates#2",
+    "name": "index_candidates",
+    "kind": "Function",
+    "filePath": "crates/rouchdb/src/lib.rs",
+    "startLine": 865,
+    "endLine": 903
+  },
+  "epistemic": "exact",
+  "incoming": {
+    "accesses": [
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:Database.find#1",
+        "name": "find",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      }
+    ],
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:Database.find#1",
+        "name": "find",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      }
+    ],
+    "has_method": [
+      {
+        "uid": "Impl:crates/rouchdb/src/lib.rs:Database",
+        "name": "Database",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      }
+    ]
+  },
+  "outgoing": {
+    "accesses": [
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:Database.adapter#0",
+        "name": "adapter",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:Database.get#1",
+        "name": "get",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:ChangesResponse.last_seq",
+        "name": "last_seq",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:ChangesResponse.results",
+        "name": "results",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-core/src/document.rs:ChangesResponse.results",
+        "name": "results",
+        "filePath": "crates/rouchdb-core/src/document.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb/src/lib.rs:Database.indexes",
+        "name": "indexes",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb/src/lib.rs:Database.indexes",
+        "name": "indexes",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb/src/lib.rs:Database.indexes",
+        "name": "indexes",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      }
+    ]
+  },
+  "processes": [
+    {
+      "id": "proc_71_run",
+      "name": "Run → Index_candidates",
+      "step_index": 3,
+      "step_count": 3
+    }
+  ]
+}

@@ -1,0 +1,204 @@
+{
+  "processes": [
+    {
+      "id": "proc_303_destroy_clears_every",
+      "summary": "Destroy_clears_everything → New",
+      "priority": 0.087,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 7
+    },
+    {
+      "id": "proc_304_destroy_clears_every",
+      "summary": "Destroy_clears_everything → Invalid",
+      "priority": 0.087,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 7
+    },
+    {
+      "id": "proc_305_destroy_clears_every",
+      "summary": "Destroy_clears_everything → AttachmentMeta",
+      "priority": 0.087,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 7
+    },
+    {
+      "id": "proc_307_destroy_clears_every",
+      "summary": "Destroy_clears_everything → Inner",
+      "priority": 0.087,
+      "symbol_count": 1,
+      "process_type": "intra_community",
+      "step_count": 6
+    }
+  ],
+  "process_symbols": [
+    {
+      "id": "Function:crates/rouchdb-adapter-memory/src/lib.rs:tests.destroy_clears_everything",
+      "name": "destroy_clears_everything",
+      "filePath": "crates/rouchdb-adapter-memory/src/lib.rs",
+      "startLine": 1328,
+      "endLine": 1379,
+      "module": "Cluster_8",
+      "process_id": "proc_303_destroy_clears_every",
+      "step_index": 1
+    }
+  ],
+  "definitions": [
+    {
+      "id": "File:crates/rouchdb/src/lib.rs",
+      "name": "lib.rs",
+      "filePath": "crates/rouchdb/src/lib.rs"
+    },
+    {
+      "id": "Impl:crates/rouchdb-query/src/mango.rs:BuiltIndex",
+      "name": "BuiltIndex",
+      "filePath": "crates/rouchdb-query/src/mango.rs",
+      "startLine": 177,
+      "endLine": 274
+    },
+    {
+      "id": "Function:crates/rouchdb-query/src/mango.rs:find_in_docs",
+      "name": "find_in_docs",
+      "filePath": "crates/rouchdb-query/src/mango.rs",
+      "startLine": 508,
+      "endLine": 513,
+      "module": "Cluster_107"
+    },
+    {
+      "id": "Function:crates/rouchdb-query/src/mango.rs:tests.index_candidates_are_narrowed_by_the_first_field",
+      "name": "index_candidates_are_narrowed_by_the_first_field",
+      "filePath": "crates/rouchdb-query/src/mango.rs",
+      "startLine": 2126,
+      "endLine": 2163,
+      "module": "Cluster_105"
+    },
+    {
+      "id": "Function:crates/rouchdb/tests/parity_views.rs:view_engine_resets_after_database_recreated",
+      "name": "view_engine_resets_after_database_recreated",
+      "filePath": "crates/rouchdb/tests/parity_views.rs",
+      "startLine": 570,
+      "endLine": 589,
+      "module": "Tests"
+    },
+    {
+      "id": "Function:crates/rouchdb/tests/parity_views.rs:view_engine_drops_purged_docs",
+      "name": "view_engine_drops_purged_docs",
+      "filePath": "crates/rouchdb/tests/parity_views.rs",
+      "startLine": 592,
+      "endLine": 608,
+      "module": "Tests"
+    },
+    {
+      "id": "Function:crates/rouchdb/tests/parity_views.rs:destroy_clears_mango_indexes",
+      "name": "destroy_clears_mango_indexes",
+      "filePath": "crates/rouchdb/tests/parity_views.rs",
+      "startLine": 812,
+      "endLine": 832,
+      "module": "Tests"
+    },
+    {
+      "id": "Function:crates/rouchdb/tests/mango_queries.rs:assert_index_matches_scan",
+      "name": "assert_index_matches_scan",
+      "filePath": "crates/rouchdb/tests/mango_queries.rs",
+      "startLine": 423,
+      "endLine": 460,
+      "module": "Tests"
+    },
+    {
+      "id": "Function:crates/rouchdb/tests/mango_queries.rs:run_index_differential",
+      "name": "run_index_differential",
+      "filePath": "crates/rouchdb/tests/mango_queries.rs",
+      "startLine": 481,
+      "endLine": 550,
+      "module": "Tests"
+    },
+    {
+      "id": "Function:crates/rouchdb/tests/mango_queries.rs:indexed_find_matches_a_full_scan_after_every_write",
+      "name": "indexed_find_matches_a_full_scan_after_every_write",
+      "filePath": "crates/rouchdb/tests/mango_queries.rs",
+      "startLine": 553,
+      "endLine": 559,
+      "module": "Tests"
+    },
+    {
+      "id": "Impl:crates/rouchdb-views/src/engine.rs:ViewEngine",
+      "name": "ViewEngine",
+      "filePath": "crates/rouchdb-views/src/engine.rs",
+      "startLine": 57,
+      "endLine": 217
+    },
+    {
+      "id": "Function:crates/rouchdb-views/src/engine.rs:ViewEngine.update_index#3",
+      "name": "update_index",
+      "filePath": "crates/rouchdb-views/src/engine.rs",
+      "startLine": 90,
+      "endLine": 153,
+      "module": "Tests"
+    },
+    {
+      "id": "File:crates/rouchdb-views/src/engine.rs",
+      "name": "engine.rs",
+      "filePath": "crates/rouchdb-views/src/engine.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-memory/src/lib.rs:MemoryAdapter.destroy#0",
+      "name": "destroy",
+      "filePath": "crates/rouchdb-adapter-memory/src/lib.rs",
+      "startLine": 868,
+      "endLine": 882,
+      "module": "Destroy"
+    },
+    {
+      "id": "File:crates/rouchdb-adapter-memory/src/lib.rs",
+      "name": "lib.rs",
+      "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb/tests/adapter_conformance.rs:purge_leaf_removes_doc",
+      "name": "purge_leaf_removes_doc",
+      "filePath": "crates/rouchdb/tests/adapter_conformance.rs",
+      "startLine": 1451,
+      "endLine": 1488,
+      "module": "Tests"
+    },
+    {
+      "id": "Function:crates/rouchdb/tests/adapter_conformance.rs:purge_conflict_loser",
+      "name": "purge_conflict_loser",
+      "filePath": "crates/rouchdb/tests/adapter_conformance.rs",
+      "startLine": 1492,
+      "endLine": 1514,
+      "module": "Tests"
+    },
+    {
+      "id": "File:crates/rouchdb/tests/adapter_conformance.rs",
+      "name": "adapter_conformance.rs",
+      "filePath": "crates/rouchdb/tests/adapter_conformance.rs"
+    },
+    {
+      "id": "Property:crates/rouchdb/tests/plugin_contract.rs:Probe.destroy_error",
+      "name": "destroy_error",
+      "filePath": "crates/rouchdb/tests/plugin_contract.rs",
+      "startLine": 47,
+      "endLine": 47
+    },
+    {
+      "id": "Function:crates/rouchdb/tests/plugin_contract.rs:Probe.on_destroy#0",
+      "name": "on_destroy",
+      "filePath": "crates/rouchdb/tests/plugin_contract.rs",
+      "startLine": 124,
+      "endLine": 130,
+      "module": "Tests"
+    }
+  ],
+  "timing": {
+    "vector": 3.4,
+    "bm25": 137.5,
+    "merge": 0.1,
+    "symbol_lookup": 13,
+    "ranking": 0.1,
+    "formatting": 0.1,
+    "wall": 150.9
+  }
+}

@@ -1,0 +1,174 @@
+{
+  "processes": [
+    {
+      "id": "proc_10_builtin_sum_and_stat",
+      "summary": "Builtin_sum_and_stats_follow_couchdb → Inner",
+      "priority": 0.012,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 7
+    },
+    {
+      "id": "proc_118_total_rows_and_offse",
+      "summary": "Total_rows_and_offset_describe_the_whole_view → Inner",
+      "priority": 0.012,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 7
+    },
+    {
+      "id": "proc_185_attachment_roundtrip",
+      "summary": "Attachment_roundtrip → Inner",
+      "priority": 0.012,
+      "symbol_count": 1,
+      "process_type": "intra_community",
+      "step_count": 6
+    }
+  ],
+  "process_symbols": [
+    {
+      "id": "Struct:crates/rouchdb-adapter-memory/src/lib.rs:Inner",
+      "name": "Inner",
+      "filePath": "crates/rouchdb-adapter-memory/src/lib.rs",
+      "startLine": 44,
+      "endLine": 65,
+      "process_id": "proc_10_builtin_sum_and_stat",
+      "step_index": 7
+    }
+  ],
+  "definitions": [
+    {
+      "name": "db_with",
+      "type": "File",
+      "filePath": "crates/rouchdb/tests/mango_queries.rs"
+    },
+    {
+      "name": "put_and_get_design_document",
+      "type": "File",
+      "filePath": "crates/rouchdb/tests/parity_views.rs"
+    },
+    {
+      "name": "encode_bookmark",
+      "type": "File",
+      "filePath": "crates/rouchdb-server/src/routes/query.rs"
+    },
+    {
+      "name": "with_couch_db",
+      "type": "File",
+      "filePath": "crates/rouchdb/tests/couchdb_query_parity.rs"
+    },
+    {
+      "name": "wait_for_idle",
+      "type": "File",
+      "filePath": "crates/rouchdb-server/tests/active_tasks.rs"
+    },
+    {
+      "id": "Struct:crates/rouchdb/src/lib.rs:ReadmeDoctests",
+      "name": "ReadmeDoctests",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "startLine": 37,
+      "endLine": 37
+    },
+    {
+      "id": "Trait:crates/rouchdb/src/lib.rs:Plugin",
+      "name": "Plugin",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "startLine": 83,
+      "endLine": 114
+    },
+    {
+      "name": "name",
+      "type": "File",
+      "filePath": "crates/rouchdb/src/lib.rs"
+    },
+    {
+      "id": "Const:crates/rouchdb-server/src/routes/query.rs:DEFAULT_FIND_LIMIT",
+      "name": "DEFAULT_FIND_LIMIT",
+      "filePath": "crates/rouchdb-server/src/routes/query.rs",
+      "startLine": 16,
+      "endLine": 16
+    },
+    {
+      "id": "Property:crates/rouchdb-server/tests/auth_matrix.rs:Snapshot.security",
+      "name": "security",
+      "filePath": "crates/rouchdb-server/tests/auth_matrix.rs",
+      "startLine": 204,
+      "endLine": 204
+    },
+    {
+      "id": "Property:crates/rouchdb-server/tests/auth_matrix.rs:Snapshot.indexes",
+      "name": "indexes",
+      "filePath": "crates/rouchdb-server/tests/auth_matrix.rs",
+      "startLine": 205,
+      "endLine": 205
+    },
+    {
+      "id": "File:crates/rouchdb-server/src/routes/security.rs",
+      "name": "security.rs",
+      "filePath": "crates/rouchdb-server/src/routes/security.rs"
+    },
+    {
+      "id": "Property:crates/rouchdb-query/src/mango.rs:ExplainResponse.index",
+      "name": "index",
+      "filePath": "crates/rouchdb-query/src/mango.rs",
+      "startLine": 116,
+      "endLine": 116
+    },
+    {
+      "id": "Property:crates/rouchdb-query/src/mango.rs:ExplainIndex.index_type",
+      "name": "index_type",
+      "filePath": "crates/rouchdb-query/src/mango.rs",
+      "startLine": 144,
+      "endLine": 144
+    },
+    {
+      "id": "Impl:crates/rouchdb-query/src/mango.rs:BuiltIndex",
+      "name": "BuiltIndex",
+      "filePath": "crates/rouchdb-query/src/mango.rs",
+      "startLine": 177,
+      "endLine": 274
+    },
+    {
+      "id": "Struct:crates/rouchdb-server/src/auth.rs:Auth",
+      "name": "Auth",
+      "filePath": "crates/rouchdb-server/src/auth.rs",
+      "startLine": 57,
+      "endLine": 64
+    },
+    {
+      "id": "Impl:crates/rouchdb-server/src/auth.rs:Auth",
+      "name": "Auth",
+      "filePath": "crates/rouchdb-server/src/auth.rs",
+      "startLine": 77,
+      "endLine": 188
+    },
+    {
+      "id": "Module:crates/rouchdb/tests/couchdb_query_parity.rs:common",
+      "name": "common",
+      "filePath": "crates/rouchdb/tests/couchdb_query_parity.rs",
+      "startLine": 9,
+      "endLine": 9
+    },
+    {
+      "id": "Impl:crates/rouchdb-adapter-http/src/request.rs:HttpAdapter",
+      "name": "HttpAdapter",
+      "filePath": "crates/rouchdb-adapter-http/src/request.rs",
+      "startLine": 8,
+      "endLine": 39
+    },
+    {
+      "id": "File:crates/rouchdb-adapter-http/src/request.rs",
+      "name": "request.rs",
+      "filePath": "crates/rouchdb-adapter-http/src/request.rs"
+    }
+  ],
+  "timing": {
+    "vector": 3.4,
+    "bm25": 107,
+    "merge": 0.1,
+    "symbol_lookup": 12.6,
+    "ranking": 0.1,
+    "formatting": 0.1,
+    "wall": 120.1
+  }
+}

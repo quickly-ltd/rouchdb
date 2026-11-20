@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use rouchdb_core::adapter::Adapter;
-use rouchdb_core::document::{Document, GetOptions, SecurityDocument};
+use rouchdb_core::document::{Document, GetOptions, SecurityDocument, normalize_rev_hash};
 use rouchdb_core::error::{Result, RouchError};
 
 /// The role CouchDB gives server admins.
@@ -226,7 +226,7 @@ pub(crate) async fn prior<'a>(
     }
     match &doc.rev {
         Some(rev) => {
-            let rev = rev.to_string();
+            let rev = rev.clone().normalized().to_string();
             match revision(adapter, id, &rev, true).await? {
                 // `latest` stays on the revision only when it is a leaf.
                 Some(old) if old.rev.as_ref().is_some_and(|r| r.to_string() == rev) => {
@@ -259,8 +259,12 @@ fn replicated_ancestors(doc: &Document) -> Vec<String> {
             .filter_map(|id| id.as_str())
             .enumerate()
             .take_while(|(i, _)| (*i as u64) < start)
-            .map(|(i, id)| format!("{}-{}", start - i as u64, id))
+            .map(|(i, id)| format!("{}-{}", start - i as u64, normalize_rev_hash(id)))
             .collect(),
-        _ => doc.rev.iter().map(|r| r.to_string()).collect(),
+        _ => doc
+            .rev
+            .iter()
+            .map(|r| r.clone().normalized().to_string())
+            .collect(),
     }
 }

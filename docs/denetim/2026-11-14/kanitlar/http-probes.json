@@ -1,0 +1,345 @@
+{
+  "results": [
+    {
+      "case": "seed",
+      "status": 201,
+      "body": [
+        {
+          "id": "a",
+          "ok": true,
+          "rev": "1-545be91a07decfefddcecd34397f114c"
+        },
+        {
+          "id": "b",
+          "ok": true,
+          "rev": "1-a214c8d403c97a772f5cf9a7cae9cd28"
+        }
+      ],
+      "location": null
+    },
+    {
+      "case": "index_x",
+      "status": 200,
+      "body": {
+        "id": "_design/first",
+        "name": "same",
+        "result": "created"
+      },
+      "location": null
+    },
+    {
+      "case": "index_y_same_name",
+      "status": 200,
+      "body": {
+        "id": "_design/second",
+        "name": "same",
+        "result": "exists"
+      },
+      "location": null
+    },
+    {
+      "case": "indexes_before_restart",
+      "status": 200,
+      "body": {
+        "indexes": [
+          {
+            "ddoc": null,
+            "def": {
+              "fields": [
+                {
+                  "_id": "asc"
+                }
+              ]
+            },
+            "name": "_all_docs",
+            "type": "special"
+          },
+          {
+            "ddoc": "_design/first",
+            "def": {
+              "fields": [
+                {
+                  "x": "asc"
+                }
+              ]
+            },
+            "name": "same",
+            "partitioned": false,
+            "type": "json"
+          },
+          {
+            "ddoc": "_design/second",
+            "def": {
+              "fields": [
+                {
+                  "y": "asc"
+                }
+              ]
+            },
+            "name": "same",
+            "partitioned": false,
+            "type": "json"
+          }
+        ],
+        "total_rows": 3
+      },
+      "location": null
+    },
+    {
+      "case": "explain_y_before_restart",
+      "status": 200,
+      "body": {
+        "dbname": "audit",
+        "fields": null,
+        "index": {
+          "ddoc": null,
+          "def": {
+            "fields": []
+          },
+          "name": "_all_docs",
+          "type": "special"
+        },
+        "selector": {
+          "y": 42
+        }
+      },
+      "location": null
+    },
+    {
+      "case": "replace_x_with_y",
+      "status": 200,
+      "body": {
+        "id": "_design/first",
+        "name": "same",
+        "result": "exists"
+      },
+      "location": null
+    },
+    {
+      "case": "indexes_after_replace",
+      "status": 200,
+      "body": {
+        "indexes": [
+          {
+            "ddoc": null,
+            "def": {
+              "fields": [
+                {
+                  "_id": "asc"
+                }
+              ]
+            },
+            "name": "_all_docs",
+            "type": "special"
+          },
+          {
+            "ddoc": "_design/first",
+            "def": {
+              "fields": [
+                {
+                  "y": "asc"
+                }
+              ]
+            },
+            "name": "same",
+            "partitioned": false,
+            "type": "json"
+          },
+          {
+            "ddoc": "_design/second",
+            "def": {
+              "fields": [
+                {
+                  "y": "asc"
+                }
+              ]
+            },
+            "name": "same",
+            "partitioned": false,
+            "type": "json"
+          }
+        ],
+        "total_rows": 3
+      },
+      "location": null
+    },
+    {
+      "case": "explain_x_after_replace",
+      "status": 200,
+      "body": {
+        "dbname": "audit",
+        "fields": null,
+        "index": {
+          "ddoc": "_design/first",
+          "def": {
+            "fields": [
+              "x"
+            ]
+          },
+          "name": "same",
+          "type": "json"
+        },
+        "selector": {
+          "x": 1
+        }
+      },
+      "location": null
+    },
+    {
+      "case": "empty_page",
+      "status": 200,
+      "body": {
+        "bookmark": "nil",
+        "docs": []
+      },
+      "location": null
+    },
+    {
+      "case": "reuse_empty_bookmark",
+      "status": 400,
+      "body": {
+        "error": "invalid_bookmark",
+        "reason": "Invalid bookmark value: \"nil\""
+      },
+      "location": null
+    },
+    {
+      "case": "bookmark_skip_overflow",
+      "transport_error": "Remote end closed connection without response"
+    },
+    {
+      "case": "health_after_overflow",
+      "status": 200,
+      "body": {
+        "committed_update_seq": 5,
+        "compact_running": false,
+        "compacted_seq": 0,
+        "data_size": 0,
+        "db_name": "audit",
+        "disk_format_version": 8,
+        "disk_size": 0,
+        "doc_count": 4,
+        "doc_del_count": 0,
+        "instance_start_time": "0",
+        "props": {},
+        "purge_seq": 0,
+        "sizes": {
+          "active": 0,
+          "external": 0,
+          "file": 0
+        },
+        "update_seq": 5,
+        "uuid": "389b0af7d675cdfe529f5555d57d022d"
+      },
+      "location": null
+    },
+    {
+      "case": "forged_forwarded_location",
+      "status": 201,
+      "body": {
+        "id": "c",
+        "ok": true,
+        "rev": "1-dcf8b90e1ecb7c54509f386a9a6f4e8d"
+      },
+      "location": "https://untrusted.invalid/audit/c"
+    },
+    {
+      "case": "tombstone_delete",
+      "status": 201,
+      "body": {
+        "id": "tomb",
+        "ok": true,
+        "rev": "2-2b75fa7f7782e1bc77b627a4844aefa3"
+      },
+      "location": "http://127.0.0.1:61518/audit/tomb"
+    },
+    {
+      "case": "tombstone_stored_body",
+      "status": 200,
+      "body": {
+        "_deleted": true,
+        "_id": "tomb",
+        "_rev": "2-2b75fa7f7782e1bc77b627a4844aefa3"
+      },
+      "location": null
+    },
+    {
+      "case": "local_revision_overflow",
+      "transport_error": "Remote end closed connection without response"
+    },
+    {
+      "case": "max_revision_seed",
+      "status": 201,
+      "body": [],
+      "location": null
+    },
+    {
+      "case": "max_revision_edit",
+      "status": 500,
+      "body": {
+        "error": "internal_server_error",
+        "reason": "database error: storage task failed: task 52 panicked with message \"attempt to add with overflow\""
+      },
+      "location": null
+    },
+    {
+      "case": "changes_max_since",
+      "status": 200,
+      "body": {
+        "last_seq": 18446744073709551615,
+        "pending": 0,
+        "results": []
+      },
+      "location": null
+    },
+    {
+      "case": "purge_result",
+      "status": 201,
+      "body": {
+        "purge_seq": 1,
+        "purged": {
+          "purgecase": [
+            "1-bc349e31df1bf9ec072812fa37ea594c"
+          ]
+        }
+      },
+      "location": null
+    },
+    {
+      "case": "info_after_purge",
+      "status": 200,
+      "body": {
+        "committed_update_seq": 11,
+        "compact_running": false,
+        "compacted_seq": 0,
+        "data_size": 0,
+        "db_name": "audit",
+        "disk_format_version": 8,
+        "disk_size": 0,
+        "doc_count": 6,
+        "doc_del_count": 1,
+        "instance_start_time": "0",
+        "props": {},
+        "purge_seq": 0,
+        "sizes": {
+          "active": 0,
+          "external": 0,
+          "file": 0
+        },
+        "update_seq": 11,
+        "uuid": "389b0af7d675cdfe529f5555d57d022d"
+      },
+      "location": null
+    },
+    {
+      "case": "null_index_field",
+      "status": 400,
+      "body": {
+        "error": "bad_request",
+        "reason": "index.fields must be a non-empty list of field names or {field: direction}"
+      },
+      "location": null
+    }
+  ],
+  "server_log": "RouchDB server listening on http://127.0.0.1:61518\nFauxton UI: http://127.0.0.1:61518/_utils/\nDatabase:   http://127.0.0.1:61518/audit\nAuth:       disabled (set --admin or ROUCHDB_ADMIN to require credentials)\nCORS:       disabled\nHosts:      localhost, 127.0.0.1, [::1]\n\nthread 'tokio-runtime-worker' (23392170) panicked at crates/rouchdb-server/src/routes/query.rs:73:16:\nattempt to add with overflow\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\nthread 'tokio-runtime-worker' (23392170) panicked at crates/rouchdb-server/src/routes/local.rs:79:31:\nattempt to add with overflow\n\nthread 'tokio-runtime-worker' (23392206) panicked at crates/rouchdb-core/src/write.rs:140:43:\nattempt to add with overflow\n"
+}

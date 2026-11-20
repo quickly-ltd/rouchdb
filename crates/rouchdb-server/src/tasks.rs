@@ -87,6 +87,9 @@ struct PushProgress {
     /// The source sequence the push had processed when it last caught up
     /// ([`ReplicationEvent::CaughtUp`]).
     caught_up_seq: Option<u64>,
+    /// Adapter `id()` of the source database when `caught_up_seq` was recorded,
+    /// so a destroyed/recreated local database does not reuse a stale sequence.
+    source_id: Option<String>,
 }
 
 fn now_unix_ms() -> u64 {
@@ -272,20 +275,25 @@ impl ActiveTasks {
     /// [`Self::sync_status_summary`] plus
     /// [`SyncStatusSummary::pending_changes`], measured against `local`, the
     /// source of the push to `remote_label`. `pending_changes` stays `None`
-    /// if that push never caught up or `local`'s info cannot be read.
+    /// if that push never caught up, if `local` was destroyed/recreated since
+    /// the last catch-up, or if `local`'s id/info cannot be read.
     pub async fn sync_status_with_pending(
         &self,
         remote_label: &str,
         local: &Database,
     ) -> SyncStatusSummary {
         let mut summary = self.sync_status_summary(remote_label);
-        let caught_up = self
-            .push_progress
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(remote_label)
-            .and_then(|p| p.caught_up_seq);
-        if let (Some(caught_up), Ok(info)) = (caught_up, local.info().await) {
+        let (caught_up, source_id) = {
+            let guard = self.push_progress.read().unwrap_or_else(|e| e.into_inner());
+            guard
+                .get(remote_label)
+                .map(|p| (p.caught_up_seq, p.source_id.clone()))
+                .unwrap_or((None, None))
+        };
+        if let (Some(caught_up), Some(source_id)) = (caught_up, source_id)
+            && let (Ok(current_id), Ok(info)) = (local.adapter().id().await, local.info().await)
+            && source_id == current_id
+        {
             summary.pending_changes = Some(info.update_seq.as_num().saturating_sub(caught_up));
         }
         summary
@@ -354,9 +362,15 @@ impl ActiveTasks {
         let registry = self.inner.clone();
         let denied_docs = self.denied.clone();
         let push_progress = self.push_progress.clone();
+        let source_db = source.as_user(source.user_ctx().clone());
         tokio::spawn(async move {
             let mut previous = (0u64, 0u64, 0u64, 0u64);
             while let Some(event) = rx.recv().await {
+                let caught_up_source_id = if matches!(event, ReplicationEvent::CaughtUp { .. }) {
+                    source_db.adapter().id().await.ok()
+                } else {
+                    None
+                };
                 {
                     let mut tasks = registry.write().unwrap_or_else(|e| e.into_inner());
                     let Some(entry) = tasks.get_mut(&task_id) else {
@@ -405,12 +419,11 @@ impl ActiveTasks {
                         // Every source change up to `last_seq` was
                         // processed (written, denied or filtered out).
                         ReplicationEvent::CaughtUp { last_seq, .. } => {
-                            push_progress
-                                .write()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .entry(entry.target.clone())
-                                .or_default()
-                                .caught_up_seq = Some(last_seq.as_num());
+                            let mut progress =
+                                push_progress.write().unwrap_or_else(|e| e.into_inner());
+                            let record = progress.entry(entry.target.clone()).or_default();
+                            record.caught_up_seq = Some(last_seq.as_num());
+                            record.source_id = caught_up_source_id;
                         }
                         ReplicationEvent::Paused => {
                             entry.status = "idle";
@@ -853,5 +866,81 @@ mod tests {
             offline.last_push_at, caught_up.last_push_at,
             "the last push time is kept"
         );
+    }
+
+    /// Destroying the local database resets its `update_seq` and assigns a new
+    /// adapter `id()`. `sync_status_with_pending` must not subtract the old
+    /// `caught_up_seq` (which would saturate to `Some(0)` even with new writes);
+    /// it reports `None` until a new push catches up on the recreated database.
+    #[tokio::test]
+    async fn sync_status_with_pending_ignores_stale_seq_after_local_destroy() {
+        let local = Database::memory("alldata");
+        let remote = Database::memory("remote-db");
+        for i in 0..5 {
+            local
+                .put(&format!("old-{i}"), serde_json::json!({"v": i}))
+                .await
+                .unwrap();
+        }
+
+        let active_tasks = ActiveTasks::new();
+        let first =
+            active_tasks.start_live_replication(&local, &remote, "alldata", "remote", fast_opts());
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let s = active_tasks
+                    .sync_status_with_pending("remote", &local)
+                    .await;
+                if s.state == "idle" && s.pending_changes == Some(0) {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("initial push should catch up");
+
+        first.cancel();
+        timeout(Duration::from_secs(5), async {
+            while !active_tasks.snapshot().is_empty() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first task should be removed");
+
+        // Destroy the local database and write 3 new docs (update_seq = 3 < old caught_up_seq = 5).
+        local.destroy().await.unwrap();
+        for id in ["new-1", "new-2", "new-3"] {
+            local.put(id, serde_json::json!({"v": 1})).await.unwrap();
+        }
+
+        let after_destroy = active_tasks
+            .sync_status_with_pending("remote", &local)
+            .await;
+        assert_eq!(
+            after_destroy.pending_changes, None,
+            "stale caught_up_seq from destroyed DB must not report Some(0)"
+        );
+
+        // Start a new live replication; once it catches up on the new DB, pending_changes is Some(0).
+        let second =
+            active_tasks.start_live_replication(&local, &remote, "alldata", "remote", fast_opts());
+        let recovered = timeout(Duration::from_secs(5), async {
+            loop {
+                let s = active_tasks
+                    .sync_status_with_pending("remote", &local)
+                    .await;
+                if s.state == "idle" && s.pending_changes == Some(0) {
+                    break s;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("second push should catch up on recreated DB");
+        assert_eq!(recovered.pending_changes, Some(0));
+        assert!(remote.get("new-3").await.is_ok());
+        second.cancel();
     }
 }

@@ -1,0 +1,106 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Function:crates/rouchdb-adapter-memory/src/lib.rs:MemoryAdapter.purge#1",
+    "name": "purge",
+    "kind": "Function",
+    "filePath": "crates/rouchdb-adapter-memory/src/lib.rs",
+    "startLine": 888,
+    "endLine": 945
+  },
+  "epistemic": "lower-bound",
+  "boundaries": [
+    "1 call site invoking `purge` was dropped at index time because the receiver's type could not be established (e.g. an unresolved constructor, factory or chained expression). Those callers are absent from this result — actual impact may be higher.",
+    "purge is an interface with 5 implementations; callers that bind via the interface (e.g. a DI container or dynamic dispatch) are not traced to the concrete symbol — actual impact may be higher."
+  ],
+  "causes": {
+    "scopeExtractionFiles": 0,
+    "receiverTyping": 1,
+    "dispatchBoundary": 5,
+    "externalBoundary": 0,
+    "undecidedSatisfaction": 0,
+    "callableValueReferences": 0
+  },
+  "incoming": {
+    "accesses": [
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:SpyAdapter.purge#1",
+        "name": "purge",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      }
+    ],
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb/src/lib.rs:SpyAdapter.purge#1",
+        "name": "purge",
+        "filePath": "crates/rouchdb/src/lib.rs"
+      }
+    ],
+    "has_method": [
+      {
+        "uid": "Struct:crates/rouchdb-adapter-memory/src/lib.rs:MemoryAdapter",
+        "name": "MemoryAdapter",
+        "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+      }
+    ]
+  },
+  "outgoing": {
+    "accesses": [
+      {
+        "uid": "Function:crates/rouchdb-adapter-memory/src/lib.rs:MemoryAdapter.announce#2",
+        "name": "announce",
+        "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-adapter-memory/src/lib.rs:MemoryAdapter.changes#1",
+        "name": "changes",
+        "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-adapter-memory/src/lib.rs:MemoryAdapter.changes#1",
+        "name": "changes",
+        "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-adapter-memory/src/lib.rs:MemoryAdapter.get#2",
+        "name": "get",
+        "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+      },
+      {
+        "uid": "Property:crates/rouchdb-adapter-memory/src/lib.rs:MemoryAdapter.inner",
+        "name": "inner",
+        "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+      }
+    ],
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-adapter-memory/src/lib.rs:MemoryAdapter.announce#2",
+        "name": "announce",
+        "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-adapter-memory/src/lib.rs:MemoryAdapter.new#1",
+        "name": "new",
+        "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-adapter-memory/src/lib.rs:canonical_rev",
+        "name": "canonical_rev",
+        "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-adapter-memory/src/lib.rs:collect_unreferenced_attachments",
+        "name": "collect_unreferenced_attachments",
+        "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+      }
+    ],
+    "method_implements": [
+      {
+        "uid": "Function:crates/rouchdb-core/src/adapter.rs:Adapter.purge#1",
+        "name": "purge",
+        "filePath": "crates/rouchdb-core/src/adapter.rs"
+      }
+    ]
+  },
+  "processes": []
+}

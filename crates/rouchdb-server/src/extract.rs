@@ -97,6 +97,29 @@ where
 /// [`require_auth`]: crate::auth::require_auth
 pub struct Writer(pub rouchdb::Database);
 
+impl Writer {
+    /// Require that the request's user is a server admin (`_admin` role).
+    pub fn require_server_admin(&self) -> Result<(), AppError> {
+        if !self.0.user_ctx().is_admin() {
+            return Err(AppError(RouchError::Unauthorized));
+        }
+        Ok(())
+    }
+
+    /// Require that the request's user is a server admin (`_admin` role) or a
+    /// database admin listed in `_security.admins`.
+    pub async fn require_db_admin(&self) -> Result<(), AppError> {
+        if self.0.user_ctx().is_admin() {
+            return Ok(());
+        }
+        let sec = self.0.get_security().await?;
+        if !self.0.user_ctx().is_db_admin(&sec) {
+            return Err(AppError(RouchError::Unauthorized));
+        }
+        Ok(())
+    }
+}
+
 impl axum::extract::FromRequestParts<crate::state::AppState> for Writer {
     type Rejection = std::convert::Infallible;
 

@@ -1,0 +1,4 @@
+{"case":"shared_handle_reset","full_scan":[{"_id":"new","_rev":"1-16acaca98c86f5e92ac4f94328d15aa1","x":1}],"indexed":[]}
+{"case":"zero_batch","docs_read":0,"docs_written":0,"last_seq":0,"ok":true,"source_count":1,"target_count":0}
+{"case":"big_integer_eq","docs":[{"_id":"one","_rev":"1-509d15c6a07e08be460f22d2c5057a08","n":18446744073709551616},{"_id":"two","_rev":"1-a9162072faaa20e5f27a738939b845e1","n":18446744073709551617}]}
+{"case":"empty_index","result":"Ok(CreateIndexResponse { result: \"created\", name: \"empty\" })"}

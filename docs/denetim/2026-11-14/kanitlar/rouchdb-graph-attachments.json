@@ -1,0 +1,191 @@
+{
+  "processes": [
+    {
+      "id": "proc_145_revpos_is_the_genera",
+      "summary": "Revpos_is_the_generation_that_uploaded_the_data → Document",
+      "priority": 0.109,
+      "symbol_count": 1,
+      "process_type": "intra_community",
+      "step_count": 3
+    },
+    {
+      "id": "proc_24_revpos_is_the_genera",
+      "summary": "Revpos_is_the_generation_that_uploaded_the_data → Error_result",
+      "priority": 0.109,
+      "symbol_count": 1,
+      "process_type": "intra_community",
+      "step_count": 5
+    },
+    {
+      "id": "proc_47_revpos_is_the_genera",
+      "summary": "Revpos_is_the_generation_that_uploaded_the_data → Attachment_digest",
+      "priority": 0.109,
+      "symbol_count": 1,
+      "process_type": "intra_community",
+      "step_count": 4
+    }
+  ],
+  "process_symbols": [
+    {
+      "id": "Function:crates/rouchdb-core/src/write.rs:tests.revpos_is_the_generation_that_uploaded_the_data",
+      "name": "revpos_is_the_generation_that_uploaded_the_data",
+      "filePath": "crates/rouchdb-core/src/write.rs",
+      "startLine": 811,
+      "endLine": 863,
+      "module": "Cluster_69",
+      "process_id": "proc_145_revpos_is_the_genera",
+      "step_index": 1
+    }
+  ],
+  "definitions": [
+    {
+      "id": "Function:crates/rouchdb-core/src/write.rs:tests.tombstones_drop_attachments_and_explicit_sets_are_exact",
+      "name": "tombstones_drop_attachments_and_explicit_sets_are_exact",
+      "filePath": "crates/rouchdb-core/src/write.rs",
+      "startLine": 761,
+      "endLine": 808,
+      "module": "Cluster_69"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-memory/src/lib.rs:process_doc_replication",
+      "name": "process_doc_replication",
+      "filePath": "crates/rouchdb-adapter-memory/src/lib.rs",
+      "startLine": 1011,
+      "endLine": 1045,
+      "module": "Cluster_8"
+    },
+    {
+      "id": "File:crates/rouchdb-adapter-memory/src/lib.rs",
+      "name": "lib.rs",
+      "filePath": "crates/rouchdb-adapter-memory/src/lib.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/lib.rs:write_replicated",
+      "name": "write_replicated",
+      "filePath": "crates/rouchdb-adapter-redb/src/lib.rs",
+      "startLine": 1880,
+      "endLine": 1921,
+      "module": "Cluster_23"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/lib.rs:apply_write",
+      "name": "apply_write",
+      "filePath": "crates/rouchdb-adapter-redb/src/lib.rs",
+      "startLine": 1925,
+      "endLine": 1979,
+      "module": "Cluster_23"
+    },
+    {
+      "id": "File:crates/rouchdb-adapter-redb/src/lib.rs",
+      "name": "lib.rs",
+      "filePath": "crates/rouchdb-adapter-redb/src/lib.rs"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/upgrade.rs:analyze",
+      "name": "analyze",
+      "filePath": "crates/rouchdb-adapter-redb/src/upgrade.rs",
+      "startLine": 944,
+      "endLine": 1125,
+      "module": "Cluster_25"
+    },
+    {
+      "id": "Function:crates/rouchdb-adapter-redb/src/upgrade.rs:apply",
+      "name": "apply",
+      "filePath": "crates/rouchdb-adapter-redb/src/upgrade.rs",
+      "startLine": 1482,
+      "endLine": 1540,
+      "module": "Cluster_37"
+    },
+    {
+      "id": "File:crates/rouchdb-adapter-redb/src/upgrade.rs",
+      "name": "upgrade.rs",
+      "filePath": "crates/rouchdb-adapter-redb/src/upgrade.rs"
+    },
+    {
+      "id": "Impl:crates/rouchdb-core/src/document.rs:Document",
+      "name": "Document",
+      "filePath": "crates/rouchdb-core/src/document.rs",
+      "startLine": 224,
+      "endLine": 388
+    },
+    {
+      "id": "Function:crates/rouchdb-core/src/document.rs:BulkDocsOptions.new#0",
+      "name": "new",
+      "filePath": "crates/rouchdb-core/src/document.rs",
+      "startLine": 715,
+      "endLine": 717
+    },
+    {
+      "id": "File:crates/rouchdb-core/src/document.rs",
+      "name": "document.rs",
+      "filePath": "crates/rouchdb-core/src/document.rs"
+    },
+    {
+      "id": "Impl:crates/rouchdb/src/lib.rs:PluginAdapter",
+      "name": "PluginAdapter",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "startLine": 133,
+      "endLine": 175
+    },
+    {
+      "id": "Function:crates/rouchdb/src/lib.rs:PluginAdapter.validate_attachment_edit#3",
+      "name": "validate_attachment_edit",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "startLine": 141,
+      "endLine": 174,
+      "module": "Tests"
+    },
+    {
+      "id": "Function:crates/rouchdb/src/lib.rs:PluginAdapter.remove_attachment#3",
+      "name": "remove_attachment",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "startLine": 305,
+      "endLine": 315,
+      "module": "Tests"
+    },
+    {
+      "id": "Struct:crates/rouchdb-server/src/routes/bulk.rs:BulkDocsBody",
+      "name": "BulkDocsBody",
+      "filePath": "crates/rouchdb-server/src/routes/bulk.rs",
+      "startLine": 14,
+      "endLine": 18
+    },
+    {
+      "id": "Property:crates/rouchdb-server/src/routes/bulk.rs:BulkDocsBody.new_edits",
+      "name": "new_edits",
+      "filePath": "crates/rouchdb-server/src/routes/bulk.rs",
+      "startLine": 17,
+      "endLine": 17
+    },
+    {
+      "id": "Function:crates/rouchdb-server/src/routes/bulk.rs:validate",
+      "name": "validate",
+      "filePath": "crates/rouchdb-server/src/routes/bulk.rs",
+      "startLine": 28,
+      "endLine": 37,
+      "module": "Routes"
+    },
+    {
+      "id": "Function:crates/rouchdb-server/src/routes/query.rs:normalized_fields",
+      "name": "normalized_fields",
+      "filePath": "crates/rouchdb-server/src/routes/query.rs",
+      "startLine": 310,
+      "endLine": 319,
+      "module": "Routes"
+    },
+    {
+      "id": "File:crates/rouchdb-server/src/routes/query.rs",
+      "name": "query.rs",
+      "filePath": "crates/rouchdb-server/src/routes/query.rs"
+    }
+  ],
+  "timing": {
+    "vector": 12.8,
+    "bm25": 386.7,
+    "merge": 0.1,
+    "symbol_lookup": 26.3,
+    "ranking": 0.1,
+    "formatting": 0.1,
+    "wall": 413.9
+  }
+}

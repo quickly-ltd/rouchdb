@@ -1,0 +1,806 @@
+{
+  "commit": "d1259449bb1ad20d2df2626989b3a581b7e7893f",
+  "inventory_is_not_line_coverage": true,
+  "files": [
+    {
+      "path": ".github/workflows/bench.yml",
+      "lines": 56,
+      "sha256": "5fe5af7af6d23a8638d5ea3174c7b3cb9ce39b51e0c5d1199576606ac5e2ea0e"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "lines": 263,
+      "sha256": "9e604558dd40c20cbe4fc35ae66a038195380c8d4cf03319fac627f8c61907b5"
+    },
+    {
+      "path": ".github/workflows/coverage.yml",
+      "lines": 82,
+      "sha256": "0a72d99c04e8ac3ca1eeaabc60c86cd2ad8acf61dd123c966df49b67f47115d0"
+    },
+    {
+      "path": ".github/workflows/docs.yml",
+      "lines": 49,
+      "sha256": "407ceff2bc409d4fce2e2103eb70958701383cd24d87518a1de04a0e43271808"
+    },
+    {
+      "path": ".github/workflows/minimal-versions.yml",
+      "lines": 55,
+      "sha256": "e57b2a7de79cfe1cbe6939ac7c38f9c03298d75ee0ed54bdfa88b837bd3e6e9f"
+    },
+    {
+      "path": ".github/workflows/mutants.yml",
+      "lines": 175,
+      "sha256": "833bb5df050713069ac9a84ff14ebeae673814b2377d2adef76705e25a33fa10"
+    },
+    {
+      "path": ".github/workflows/nightly.yml",
+      "lines": 83,
+      "sha256": "fab2ddd8111ad295de7ac1aee59530c9f396e39b1f06ea62ebf533727cb44bfc"
+    },
+    {
+      "path": "Cargo.lock",
+      "lines": 2963,
+      "sha256": "5525f795f42768c5d9990786b0eaf22763aac865c4b5d1a36c85cfb8349b3768"
+    },
+    {
+      "path": "Cargo.toml",
+      "lines": 30,
+      "sha256": "3d4a5e51b0f15aeb3d227da70ea2c4c8755dd5b5ae3b1a566de33ca4763dad17"
+    },
+    {
+      "path": "README.md",
+      "lines": 355,
+      "sha256": "faa8b5b3207e9ce75349d566c89e5f6f003d2ff7ba5414d2fb93ab6441e21052"
+    },
+    {
+      "path": "crates/rouchdb-adapter-http/Cargo.toml",
+      "lines": 39,
+      "sha256": "2b5e7c4883ca1457836219d3551afdf549ed211c0c65bbfaab4cc5d0a6e065ce"
+    },
+    {
+      "path": "crates/rouchdb-adapter-http/src/auth.rs",
+      "lines": 229,
+      "sha256": "d8498eec55a20f512372e966f6f1e1106bbd173be0fbd8d2b636abd7a9c1850f"
+    },
+    {
+      "path": "crates/rouchdb-adapter-http/src/lib.rs",
+      "lines": 2461,
+      "sha256": "c2da74a70e61a5e97fedda1c89142b2c07285a027c72e18703f9c44ef3696453"
+    },
+    {
+      "path": "crates/rouchdb-adapter-http/src/request.rs",
+      "lines": 39,
+      "sha256": "41570341dc198be784def9490b913056f5acf2c67a5b6a6c23a3b44d3fdcd36b"
+    },
+    {
+      "path": "crates/rouchdb-adapter-memory/Cargo.toml",
+      "lines": 23,
+      "sha256": "5136560c00e0f38db48ccde707aad73c53f55d1e24f9ffb85bf7a5d780fc32ec"
+    },
+    {
+      "path": "crates/rouchdb-adapter-memory/src/lib.rs",
+      "lines": 1842,
+      "sha256": "d868f55a40a8689beba75ad5dcf52a5d0fefe04a309ed2250888a148f401d0c9"
+    },
+    {
+      "path": "crates/rouchdb-adapter-redb/Cargo.toml",
+      "lines": 27,
+      "sha256": "6907ac1f93802eda0da06ed2a712677377b99d4aa71c86b9c7f2617d05a4c9e7"
+    },
+    {
+      "path": "crates/rouchdb-adapter-redb/src/lib.rs",
+      "lines": 3253,
+      "sha256": "ec33260b7a837c348bd2512c1df620bb3016b86414128b7a4bae13e9014dfc1c"
+    },
+    {
+      "path": "crates/rouchdb-adapter-redb/src/upgrade.rs",
+      "lines": 3056,
+      "sha256": "0224f3a98679cc7e0abde22db4e015b0a926cba82bceb759b770c2c7fe8998c6"
+    },
+    {
+      "path": "crates/rouchdb-bench/Cargo.toml",
+      "lines": 32,
+      "sha256": "a2adb287f4611d8b5453a484b3448d14ecf1db40a29cc3bfe6cbcd4a56665b3e"
+    },
+    {
+      "path": "crates/rouchdb-bench/benches/core_ops.rs",
+      "lines": 288,
+      "sha256": "6d7bea9a8dbf7815220452fa67f1dd9f3d568a179eae12ca4b750026c7748c91"
+    },
+    {
+      "path": "crates/rouchdb-bench/benches/revtree.rs",
+      "lines": 150,
+      "sha256": "2f168bfa9f320f8cea80e28c27054dc30a71db55225d31a774410fdddfe7a9d4"
+    },
+    {
+      "path": "crates/rouchdb-bench/src/lib.rs",
+      "lines": 137,
+      "sha256": "49866bda3676b4946cff2c2e75984e0607f127ca6c5f7147a6c4547e99876dd4"
+    },
+    {
+      "path": "crates/rouchdb-changes/Cargo.toml",
+      "lines": 25,
+      "sha256": "819e13c781bb90a9996883b76d29a44d9d342d40d32df30f738147a29e58c365"
+    },
+    {
+      "path": "crates/rouchdb-changes/src/lib.rs",
+      "lines": 1656,
+      "sha256": "5ff76a20efab8342766c247a37ce5f426f4bd7555284006ce514090aa7ee1594"
+    },
+    {
+      "path": "crates/rouchdb-cli/Cargo.toml",
+      "lines": 39,
+      "sha256": "0a30272368e20a2807b156ddc4f3515bbdb5e1e3c328bd8fbac9a110c1690402"
+    },
+    {
+      "path": "crates/rouchdb-cli/README.md",
+      "lines": 59,
+      "sha256": "58e6246f2ea47884ed084dac6e40b521a5146be44a2b56edcf904208fcc7684e"
+    },
+    {
+      "path": "crates/rouchdb-cli/src/main.rs",
+      "lines": 1044,
+      "sha256": "f8d13a8fe2f360b1bba2451498f286042cb01dca933f710256e93e4c59fd9802"
+    },
+    {
+      "path": "crates/rouchdb-cli/tests/cli_tests.rs",
+      "lines": 2997,
+      "sha256": "c240a49ff0a321dbfd0bff8f9a45a53975437b0279fac81c3a696fe0fdfa116e"
+    },
+    {
+      "path": "crates/rouchdb-cli/tests/migrate.rs",
+      "lines": 150,
+      "sha256": "c776b003cc825aecb014ed98df6dad05a853632b5a63ed5b4dbb898f34832643"
+    },
+    {
+      "path": "crates/rouchdb-compat-tests/Cargo.toml",
+      "lines": 21,
+      "sha256": "9062551e3ce2ae5c1952c0c01000a925361d233e42a72dd3fe623a59b91e644d"
+    },
+    {
+      "path": "crates/rouchdb-compat-tests/src/lib.rs",
+      "lines": 2,
+      "sha256": "affeac8e42362eadfb999363d8ae0f2bfc68b7288e48c34bfd57457fdbdda736"
+    },
+    {
+      "path": "crates/rouchdb-compat-tests/tests/redb_0_4_to_0_5.rs",
+      "lines": 788,
+      "sha256": "97c2270f6e12408f244377d20e6947f3db0f8f5214738df3bf5770d8e1d3ed52"
+    },
+    {
+      "path": "crates/rouchdb-core/Cargo.toml",
+      "lines": 25,
+      "sha256": "23bb25e7142b8fa35999ddc5c035fc3d465f4406f121c26a5bdd31d7bee5610e"
+    },
+    {
+      "path": "crates/rouchdb-core/src/adapter.rs",
+      "lines": 319,
+      "sha256": "f189278897edc810f2b15707527dfc7e6227c3e47cf2e0af35cab0833dcd29a7"
+    },
+    {
+      "path": "crates/rouchdb-core/src/collation.rs",
+      "lines": 748,
+      "sha256": "49f086ead41c87aa37142e49c96888819074d0aa38dfeb44bb2cb968634c0e94"
+    },
+    {
+      "path": "crates/rouchdb-core/src/document.rs",
+      "lines": 2086,
+      "sha256": "9ec38b4612c7ded95e9a984ff0448bbcb4afeda39f132bebdef900730e250958"
+    },
+    {
+      "path": "crates/rouchdb-core/src/error.rs",
+      "lines": 108,
+      "sha256": "e3c311a484f3f07e568fe38c1bfb9a64dee1099a9f973b139d2373fccfe6b72f"
+    },
+    {
+      "path": "crates/rouchdb-core/src/json.rs",
+      "lines": 269,
+      "sha256": "d9c11cd0a1d65750dd449e6d1bd77806ff84ff6bf847b7c453138e64f3109da3"
+    },
+    {
+      "path": "crates/rouchdb-core/src/lib.rs",
+      "lines": 8,
+      "sha256": "74b7c510d679bad0bbca8878a420cf7259eeb7a95143f9f77e6094e53b9962d9"
+    },
+    {
+      "path": "crates/rouchdb-core/src/merge.rs",
+      "lines": 1220,
+      "sha256": "d6194450746a6082dedbf60f0a243985a765f7952eb8fe5725beeb0845da78ed"
+    },
+    {
+      "path": "crates/rouchdb-core/src/rev_tree.rs",
+      "lines": 570,
+      "sha256": "35cb4e3db33920edf13d28c35f41287e4280ef14d15ab0dbdb836f77080390fe"
+    },
+    {
+      "path": "crates/rouchdb-core/src/write.rs",
+      "lines": 1187,
+      "sha256": "3b148741770f2e48087303a01489d0038db53fe7d0fbfdfff4f6b9229716dc98"
+    },
+    {
+      "path": "crates/rouchdb-core/tests/rev_tree_properties.rs",
+      "lines": 777,
+      "sha256": "6619f632729344c74657b498f9d4c7051a8a2dd1d1ae696f388997e633b3571d"
+    },
+    {
+      "path": "crates/rouchdb-query/Cargo.toml",
+      "lines": 22,
+      "sha256": "3f3f4499eb9f90cf7fcdd42221bfa09866c8835269e486194954052829c8d667"
+    },
+    {
+      "path": "crates/rouchdb-query/src/lib.rs",
+      "lines": 21,
+      "sha256": "8c564229aa8a0c75391472f991ff7dfb6ada80c795fed28c1a4585026d9e0582"
+    },
+    {
+      "path": "crates/rouchdb-query/src/mango.rs",
+      "lines": 2217,
+      "sha256": "bcd5eb2aa6569158b3663fed3a694afce98555d59e2512e9ccf28b8344a1b196"
+    },
+    {
+      "path": "crates/rouchdb-query/src/mapreduce.rs",
+      "lines": 1706,
+      "sha256": "1ff2ddd1556664d45437f4b59e4fff1bd059e7a41dcbdcbc41f5ffe3bfd7adad"
+    },
+    {
+      "path": "crates/rouchdb-replication/Cargo.toml",
+      "lines": 27,
+      "sha256": "e7e7aa404b749773403e76a3c894340dfc3f7874ee7833b834462bb3ba2e7449"
+    },
+    {
+      "path": "crates/rouchdb-replication/src/checkpoint.rs",
+      "lines": 463,
+      "sha256": "0f7c32eebb69f80850dcd712424a14579715b3321b276175d13bab072b9d84c5"
+    },
+    {
+      "path": "crates/rouchdb-replication/src/lib.rs",
+      "lines": 18,
+      "sha256": "fdb6dae2833b5e32b95a912b297386c914eeab25a532555f1538d5b256b3b736"
+    },
+    {
+      "path": "crates/rouchdb-replication/src/protocol.rs",
+      "lines": 3438,
+      "sha256": "f02fb62d1b6e0004ec6d8193faf0365c7a4e8741a3376668999c5fd2f1c98edd"
+    },
+    {
+      "path": "crates/rouchdb-replication/tests/checkpoints.rs",
+      "lines": 221,
+      "sha256": "3d769837659b8e7d9d02fd0d637177e70568176db3ded68ca2c5d86f4c8a136c"
+    },
+    {
+      "path": "crates/rouchdb-server/Cargo.toml",
+      "lines": 38,
+      "sha256": "ea3f29a3b21a2f721c10f1349c81577d9a70d188ae6aabeebdb4b0ca769c6ba2"
+    },
+    {
+      "path": "crates/rouchdb-server/fauxton/.gitkeep",
+      "lines": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "crates/rouchdb-server/src/auth.rs",
+      "lines": 405,
+      "sha256": "e446bd9ad8888a1f606021b0b24c627f38ac4427bce7a626c11dbda925eaa7df"
+    },
+    {
+      "path": "crates/rouchdb-server/src/error.rs",
+      "lines": 178,
+      "sha256": "ff59fe839eb2c648f23780afcc8caaed8dd9988de4121a2e7201fe7462a700b2"
+    },
+    {
+      "path": "crates/rouchdb-server/src/extract.rs",
+      "lines": 116,
+      "sha256": "aabda53d25a1cea30ff252d66d3f5621b5f7d3b895fb5553397d59e1badebee7"
+    },
+    {
+      "path": "crates/rouchdb-server/src/host.rs",
+      "lines": 324,
+      "sha256": "7d2a075ab41697c282e5a8539cd85478de68d8f47bd47d0b2b7d07ff340be8a6"
+    },
+    {
+      "path": "crates/rouchdb-server/src/lib.rs",
+      "lines": 306,
+      "sha256": "b9aad2b7ea3c1fa3efffcfd300a3382a284c36c77c0186c98a4f20a57b2757aa"
+    },
+    {
+      "path": "crates/rouchdb-server/src/main.rs",
+      "lines": 224,
+      "sha256": "7328acdbfbe234d0d7c72ee2d381f390f980a04e6daf5ef484af030e70a3fded"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/active_tasks.rs",
+      "lines": 11,
+      "sha256": "cedf5b63a6bf64b7c435d3e6e1617908b70d7b8e5000e5dd115387cb5aea2120"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/all_dbs.rs",
+      "lines": 13,
+      "sha256": "7f5039974e8d595a13f355b4577c666e7e90c37dbac5cd7e1fe3619f1664ed99"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/all_docs.rs",
+      "lines": 279,
+      "sha256": "05815489c84bc38d6e31166655db194c60be8b142670ece6320c26bbbfe02204"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/attachment.rs",
+      "lines": 215,
+      "sha256": "2806dfee95a46bcca9b5bde3a128b68efc6c213a00d6db67c6826d8d9d77b444"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/bulk.rs",
+      "lines": 97,
+      "sha256": "92435b5a7bf47aaa9cc6b267ecf2eb82ec72f73c2dd6a52d160043f26f0826b1"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/changes.rs",
+      "lines": 497,
+      "sha256": "2466678a136f67f2d7d3bad88098952b2c0ddbaa34e523b7e9c578ce9a012d7f"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/compact.rs",
+      "lines": 26,
+      "sha256": "8dd7ef70d55713e696b845ac505a4b46a06c6d8d1bc557b8418b8bb5954ed288"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/database.rs",
+      "lines": 115,
+      "sha256": "ed53b3234d2bd9252b4ddd444876a0a6af5872b11ed1ce76e03bd17dc2022616"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/design.rs",
+      "lines": 96,
+      "sha256": "6bc8e5a0793f08f16f086a402a4d5ab9221f3ec23adf31c69bb5a4f3013a7f05"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/document.rs",
+      "lines": 340,
+      "sha256": "683a119ca1fc4a21953de3e2325df6ef75d28fc3ccfd5d2856c02d961d92dd2c"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/fauxton.rs",
+      "lines": 58,
+      "sha256": "49c3e06b93eb17d0bd072ab3d18f38d11b38e2d4ab17c78fd88e644fa9e5039d"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/local.rs",
+      "lines": 118,
+      "sha256": "db3defa412fcf119fe3f181c322b21ec90bec7b688d1cdeeea0d878d5bf54079"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/membership.rs",
+      "lines": 9,
+      "sha256": "06a5eb2bb358a8bc9efcfd9a1e13aaf0e29ef2f6c663e5369306ab5187db3a2b"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/mod.rs",
+      "lines": 281,
+      "sha256": "487fbbaa5da70a06424f681f3e4126093851976d6871d6b6648286926c0dff56"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/query.rs",
+      "lines": 468,
+      "sha256": "4568b0d2fb4ca1491a07ac33132f5f2334fdc2353c1e72b05769f556fda974db"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/replication.rs",
+      "lines": 163,
+      "sha256": "c90d89b91e4d30bc338b2b86087509d0f1c615e722ad891bb6e467f5a79da4fe"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/root.rs",
+      "lines": 23,
+      "sha256": "37b2ec67dad400dfd60071e6836773bd46d883bcb645407c348af5f93fbbd0b2"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/security.rs",
+      "lines": 38,
+      "sha256": "ce173fb11c482550ba8948be68742ce0700c642c7f72fcebc6a745e85d343767"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/session.rs",
+      "lines": 147,
+      "sha256": "a4af010d6d33cecd419de405a6d076e198d4f84076b2c11b103596fdfc66ff4b"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/uuids.rs",
+      "lines": 23,
+      "sha256": "c15698a220282d1035fe360fe629407ee52db58d3dc2ff2377509e8369b151d1"
+    },
+    {
+      "path": "crates/rouchdb-server/src/routes/views.rs",
+      "lines": 109,
+      "sha256": "71f932507f0481ff7516d9a7f8087d4f7a1608e2e4ab60d487193bc2df4ce808"
+    },
+    {
+      "path": "crates/rouchdb-server/src/state.rs",
+      "lines": 85,
+      "sha256": "b3b437cd31a79a7299023d8f14cec9a5a50dfd12bfee3f2ed54208549dafe0ca"
+    },
+    {
+      "path": "crates/rouchdb-server/src/tasks.rs",
+      "lines": 447,
+      "sha256": "33c25d4f04618a0f2127784f500cf4d174a9cb3b40960dbbee78f9bc240e88e9"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/active_tasks.rs",
+      "lines": 161,
+      "sha256": "291b21ab875d748c7f4a29e0607a726d8757ab9d4582e29fc651c95870201830"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/all_docs.rs",
+      "lines": 266,
+      "sha256": "150da0cbbc7830f5343a9dd9ebd251588662b28605ca8757017b04363e7018dc"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/attachments.rs",
+      "lines": 186,
+      "sha256": "f89d887834b31b72c71f1cfdcdb78d275ec067d188e46fb02f9bcb43e32d675f"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/auth_fidelity.rs",
+      "lines": 359,
+      "sha256": "f222c0fd3b922c9f0f720fab7a819d1405f115b6832aed2de2c3db3935534a20"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/auth_matrix.rs",
+      "lines": 669,
+      "sha256": "d6a80bd209e5a293f65f320e85c071bea6464ab99b993986bcfc72fbdf623756"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/basics.rs",
+      "lines": 154,
+      "sha256": "3c81bca77a135c28be4c1b38d7aedddd700bbb5cc1f60154ce9c9cfa60654e87"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/changes.rs",
+      "lines": 307,
+      "sha256": "948e492ba29b0ef6c114c879530155090cbdff12264036732c3bf07926191506"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/common/mod.rs",
+      "lines": 124,
+      "sha256": "1d8a0a2d1ef1533adbb30fe6170d1b7067c73ce14cbfed58e715249aa962179a"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/couchdb_fidelity.rs",
+      "lines": 987,
+      "sha256": "053bba8e67cb60b71075ea271275a1d6f900ca5ec6bf11b93529b1ea4ffa5e87"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/db_lifecycle.rs",
+      "lines": 168,
+      "sha256": "2f7b7b11d1dd126bc01f9b00bb946971bb765bf1d8164afd19905464aef2bf84"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/deep_json.rs",
+      "lines": 147,
+      "sha256": "f4964935f58a5da6fa3c564daf8cc1ebef9ce3d7f20c6276c0ede8d8044070a8"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/deep_json_binary.rs",
+      "lines": 322,
+      "sha256": "5c6bebde847c36bfb4b9aa7b3f5f283ad2f42b8b015b207fbb3b59556bed3cbd"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/documents.rs",
+      "lines": 314,
+      "sha256": "b0b9644b98b96cff07fc0c3c783a96ddc716a8f8184e937907db5c95f17e149d"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/errors.rs",
+      "lines": 161,
+      "sha256": "2219a20c8e557f1ee6be58cceafe4ba4d61f8a4a8cdd8caa354264bd2d87c923"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/pouchdb_setup.rs",
+      "lines": 35,
+      "sha256": "b660068be467e6c70f63cebaef28aa0a1323610db61c30ab88d5e859a78ad2ef"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/query.rs",
+      "lines": 281,
+      "sha256": "9ad6e59f2820af99b0c2bfe92cdea177b928f15df40fc1df4efdb7149d36f42a"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/replication.rs",
+      "lines": 881,
+      "sha256": "d4fcdc8d3e5057b6f9f3af15366827c38ebb6d16438fef082b65e3c2fe3c38c9"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/security.rs",
+      "lines": 893,
+      "sha256": "a049dd70b5c71114b055fe001d67a532f6ff235c1d795867fdcd4a3e69420eed"
+    },
+    {
+      "path": "crates/rouchdb-server/tests/startup.rs",
+      "lines": 293,
+      "sha256": "a12cc23d07ad87d9ce9a383f8500b4f9221d68b4ff1a84bdaca2ad5e85258cea"
+    },
+    {
+      "path": "crates/rouchdb-views/Cargo.toml",
+      "lines": 22,
+      "sha256": "3115dd16c1e1e04a6182e80b36451d0e53309701d4bca53e13ab7a1fe65c0923"
+    },
+    {
+      "path": "crates/rouchdb-views/src/design_doc.rs",
+      "lines": 392,
+      "sha256": "eab8e4f8ec92fc98b466198211582be2d4cd936a6cae2c2abd407f4220a53213"
+    },
+    {
+      "path": "crates/rouchdb-views/src/engine.rs",
+      "lines": 297,
+      "sha256": "c6d9069916b38f1ade37894d3e4dece99f1c3c8c35c47c8154a28392c280d0fc"
+    },
+    {
+      "path": "crates/rouchdb-views/src/lib.rs",
+      "lines": 155,
+      "sha256": "3489e9fc18b395448e6081e95cdc8713be1a9faaa0cab470d2d50005cc4d7e7d"
+    },
+    {
+      "path": "crates/rouchdb/Cargo.toml",
+      "lines": 48,
+      "sha256": "541c1663117a185ebab0b3a2c028b7712f292ff1299914aa35b3e124380b34f7"
+    },
+    {
+      "path": "crates/rouchdb/examples/quick.rs",
+      "lines": 16,
+      "sha256": "64728bdeefa381e57ea8cc89f430d6008fa5a604d0735984bbf0ee9ded1b2c90"
+    },
+    {
+      "path": "crates/rouchdb/examples/quick_redb.rs",
+      "lines": 21,
+      "sha256": "acb26e772d32aba2a2063a0b0db1496451b3b13acebfc4577c54a2bc0aa6c0b5"
+    },
+    {
+      "path": "crates/rouchdb/src/lib.rs",
+      "lines": 3317,
+      "sha256": "0a290fc5791f7abbf7c45dddaea5e63d693e7cc3ea9b81373d992bd7bd37708b"
+    },
+    {
+      "path": "crates/rouchdb/tests/adapter_conformance.rs",
+      "lines": 3183,
+      "sha256": "a9714c7ddb7055fa88312c294411ac2acbc565f61807635e4f2bf5f982661f5b"
+    },
+    {
+      "path": "crates/rouchdb/tests/all_docs.rs",
+      "lines": 310,
+      "sha256": "17cf6e89cf88603575fd61db281de374dd99d67db2e9b8773265a963aa820359"
+    },
+    {
+      "path": "crates/rouchdb/tests/attachments.rs",
+      "lines": 125,
+      "sha256": "8a99ff6e6fc7fee0c7dc3bb38cf16ea0024c075213a637ba80b08c31cff4952a"
+    },
+    {
+      "path": "crates/rouchdb/tests/backends/mod.rs",
+      "lines": 54,
+      "sha256": "c0913da1cc5163c7cdd4bcd5ad9f3229829dfa93733506dedc27e6a1d96d08cf"
+    },
+    {
+      "path": "crates/rouchdb/tests/big_numbers.rs",
+      "lines": 130,
+      "sha256": "5651b7984d39f33c69e40568148e037e5de024b6c1d55d9fa02a948c7ff2a851"
+    },
+    {
+      "path": "crates/rouchdb/tests/bug_hunting.rs",
+      "lines": 657,
+      "sha256": "af1b66191e65889bf45bc08614fd183394667f985d4139bff93274c116012ba9"
+    },
+    {
+      "path": "crates/rouchdb/tests/changes_feed.rs",
+      "lines": 218,
+      "sha256": "41091b32d95d875ed6910d2c208d98141c382383c42184e3186e23af7fee4e0a"
+    },
+    {
+      "path": "crates/rouchdb/tests/common/mod.rs",
+      "lines": 238,
+      "sha256": "15e4af064b9792bb219ed291eac4b560e55b8bbf3cbce2c370be6c5de6d11c83"
+    },
+    {
+      "path": "crates/rouchdb/tests/conflicts.rs",
+      "lines": 278,
+      "sha256": "21c81238dc9e3db7efb207c3ec3c8b05076e8a1fe4fb848a694bf48fddf13d06"
+    },
+    {
+      "path": "crates/rouchdb/tests/couchdb_query_parity.rs",
+      "lines": 1545,
+      "sha256": "636c28431f30490317fb96bd8a138aa2994ecda14a0150f869dd3ebea85598c0"
+    },
+    {
+      "path": "crates/rouchdb/tests/couchdb_semantics.rs",
+      "lines": 420,
+      "sha256": "a5bd30aef9fcece31e969b8ddd9603868d1a032a5d6d9df7b017bd8657b2d548"
+    },
+    {
+      "path": "crates/rouchdb/tests/couchdb_view_keys.rs",
+      "lines": 172,
+      "sha256": "216e58270f04eef10520379e7c6a27cafb94ded7a80ebd98a0d2df719605f3fd"
+    },
+    {
+      "path": "crates/rouchdb/tests/data_diversity.rs",
+      "lines": 225,
+      "sha256": "ce54efe2cc63d363dce0a34a62036be8a36b26fb974390fe075eafb362fdaa89"
+    },
+    {
+      "path": "crates/rouchdb/tests/database_ops.rs",
+      "lines": 222,
+      "sha256": "44e37ad05cc1a9e8019ac4ecb0ab047e8d93f79a22cdef8d5bfe055c83d21eef"
+    },
+    {
+      "path": "crates/rouchdb/tests/edge_cases.rs",
+      "lines": 826,
+      "sha256": "fe15f224ad543559a2177528d1f30bd3d983e6418c482a53536c60076544545d"
+    },
+    {
+      "path": "crates/rouchdb/tests/error_conditions.rs",
+      "lines": 293,
+      "sha256": "f11e5c63a170af99aa9a5a30ffd115fa89361c7719873167835b5eaffdacf99c"
+    },
+    {
+      "path": "crates/rouchdb/tests/http_crud.rs",
+      "lines": 90,
+      "sha256": "c799dd1edb1a2c639376ac2d3f1a4baa5bcf57c1f1d09b0b721be11fc2cfeaaf"
+    },
+    {
+      "path": "crates/rouchdb/tests/live_sync_test.rs",
+      "lines": 88,
+      "sha256": "5f90ba015461ebfce83a1b899ae6b91469f50e1412f7e0aa7270b843f2774fbc"
+    },
+    {
+      "path": "crates/rouchdb/tests/mango_queries.rs",
+      "lines": 559,
+      "sha256": "2050748deeaa1e710f3e0fc56d39dc36bbbb2da9bd6b9bfc52dcc8ab74e75bb6"
+    },
+    {
+      "path": "crates/rouchdb/tests/map_reduce.rs",
+      "lines": 829,
+      "sha256": "75646021f338ac170fd320ba4b02d88830c49cf436baea9d280a54c7954fc9a7"
+    },
+    {
+      "path": "crates/rouchdb/tests/parity_changes.rs",
+      "lines": 348,
+      "sha256": "c35336b0eaad3141ca1879adbe3375ba25b3b6633b8e739e24dfbce0d7ffbad4"
+    },
+    {
+      "path": "crates/rouchdb/tests/parity_core.rs",
+      "lines": 865,
+      "sha256": "909eea285a9948ab21d48a7fcd5a6e130c7e6ebba68121b69e649996020ec581"
+    },
+    {
+      "path": "crates/rouchdb/tests/parity_http.rs",
+      "lines": 399,
+      "sha256": "7dd810e665811d522cc0cd361d05effb4caa514b5e16f74d6170a8f913de2d27"
+    },
+    {
+      "path": "crates/rouchdb/tests/parity_plugins.rs",
+      "lines": 301,
+      "sha256": "243001d354b2b458bd1ed4428323541d9a9373fbb08ea4fbd7e8c940cf1d1da9"
+    },
+    {
+      "path": "crates/rouchdb/tests/parity_replication.rs",
+      "lines": 211,
+      "sha256": "3339031df5b9e05d61272cd92e5c206121aa93aad87c3c6cecf8101063dcfc85"
+    },
+    {
+      "path": "crates/rouchdb/tests/parity_views.rs",
+      "lines": 930,
+      "sha256": "4e57d578b99a303f4f8ffeb84785bcf60b8aa55081a5987a9962aad564edcd8c"
+    },
+    {
+      "path": "crates/rouchdb/tests/partition.rs",
+      "lines": 462,
+      "sha256": "e6842d54d46ed76fdddf299f5729a5a3026c503f0ac1de7d0af8ccf17745ccf5"
+    },
+    {
+      "path": "crates/rouchdb/tests/plugin_contract.rs",
+      "lines": 716,
+      "sha256": "ded4760c1d9ad649258c6d04d65d2d75b2e5397edb43236e649183a168b4b579"
+    },
+    {
+      "path": "crates/rouchdb/tests/plugins_replication.rs",
+      "lines": 211,
+      "sha256": "aef962fc6e4c2ec0e17537785d5b49ef5a6162c4da321ad04d03718bdb849763"
+    },
+    {
+      "path": "crates/rouchdb/tests/post_and_attachments.rs",
+      "lines": 176,
+      "sha256": "2d44bdae1dce19448fcbf0535a150665b6fd6a3c64f250d7efd70cacb9f66a20"
+    },
+    {
+      "path": "crates/rouchdb/tests/replication.rs",
+      "lines": 1485,
+      "sha256": "b7679e47677d8ac608c5c3c3346400aa2e6a5273442e9c536bf4a61fe9c82569"
+    },
+    {
+      "path": "crates/rouchdb/tests/replication_identity.rs",
+      "lines": 592,
+      "sha256": "a84fe8d5f74014dd981f9f8a437d17acf324bc9887f7825b1f7ba634b5c6e7fa"
+    },
+    {
+      "path": "crates/rouchdb/tests/snapshot/mod.rs",
+      "lines": 120,
+      "sha256": "791135f6a45732e86ccd4355b4aad1401ae96c2ce7776b00dcb0f968c895b8fe"
+    },
+    {
+      "path": "crates/rouchdb/tests/storage_fidelity_couchdb.rs",
+      "lines": 549,
+      "sha256": "a8710a1767c485db8730233eac720c7b4c18f00d4d741c4363ff5f8c84ba4050"
+    },
+    {
+      "path": "docs/DECISIONS.md",
+      "lines": 30,
+      "sha256": "ccc04613937752ca85376277b6f9fd3b8674edf79952b1ae00d9915275db2573"
+    },
+    {
+      "path": "package-lock.json",
+      "lines": 1003,
+      "sha256": "e58d6ae29f4df6265ad93fa2f155ec1c7aa42a24d74b9745f07e238b6d3de53c"
+    },
+    {
+      "path": "package.json",
+      "lines": 16,
+      "sha256": "c14956f8e1ce4b4f66c98c183700f7a6aa9e8c34cbb99749b0afebbf47653700"
+    },
+    {
+      "path": "pouchdb-tests/common.js",
+      "lines": 118,
+      "sha256": "d9320b6a2a74c830bc99590c908851dded395da6b4980468ecd64f7513bc8a10"
+    },
+    {
+      "path": "pouchdb-tests/t1-push.js",
+      "lines": 29,
+      "sha256": "557233842f73a4fa4d4d3a0e5c050aad0b0dadfee48afc791734333dffda1aa9"
+    },
+    {
+      "path": "pouchdb-tests/t2-pull.js",
+      "lines": 29,
+      "sha256": "46707ffdb7d6715db743e64734897a9650b9c916299eb8f66aed77c6843a023a"
+    },
+    {
+      "path": "pouchdb-tests/t3-bidirectional.js",
+      "lines": 22,
+      "sha256": "9943981883812ad836deb2e88c7bc7a203639d5635bd99a56298028f7e39069d"
+    },
+    {
+      "path": "pouchdb-tests/t4-live.js",
+      "lines": 87,
+      "sha256": "81623aa5dc89365a533e10c4b39a1078d5f31c172e623783a57d8c5d47a11e22"
+    },
+    {
+      "path": "pouchdb-tests/t5-tombstone.js",
+      "lines": 49,
+      "sha256": "bfc83101b712d00f4f0c8e8b5a218be6fad19e21bc03f3a5dbd92b0706e7906f"
+    },
+    {
+      "path": "pouchdb-tests/t6-conflict.js",
+      "lines": 39,
+      "sha256": "dc0d718299832d5da53461a0e506e451325a3d253e7c00c4bc20dff698bc9176"
+    },
+    {
+      "path": "pouchdb-tests/t7-checkpoint.js",
+      "lines": 42,
+      "sha256": "b914aa8326a84af9e89e0ace51da12560605ed6204b70003bb24ba38a1f01fbe"
+    },
+    {
+      "path": "pouchdb-tests/t8-scale-push.js",
+      "lines": 31,
+      "sha256": "3761eeb38a701b7e9e9eb3e28cbdd5dfaa38f9a427640f432711cd9842df2013"
+    },
+    {
+      "path": "pouchdb-tests/t9-scale-tombstones.js",
+      "lines": 58,
+      "sha256": "4e68ebf612ff0445b27fa031998125b39a79c80d8c0feab61c588aaf68964093"
+    },
+    {
+      "path": "run-tests.sh",
+      "lines": 78,
+      "sha256": "1ebfac7d2ce91864870e4da9a5df9403ba3be2c8b44f62bdb1d393bf16242769"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "lines": 10,
+      "sha256": "301ba16f8174fc3248ab29e8bfdde94da8f8868317f0175f7f188edd941d8226"
+    }
+  ]
+}

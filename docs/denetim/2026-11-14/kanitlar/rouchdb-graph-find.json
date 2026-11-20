@@ -1,0 +1,39 @@
+{
+  "status": "ambiguous",
+  "message": "Found 4 symbols matching 'find'. Use uid, file_path, or kind to disambiguate.",
+  "totalCandidates": 4,
+  "candidates": [
+    {
+      "uid": "Function:crates/rouchdb/src/lib.rs:Database.find#1",
+      "name": "find",
+      "kind": "Function",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "line": 824,
+      "score": 0.96
+    },
+    {
+      "uid": "Function:crates/rouchdb/src/lib.rs:Partition.find#1",
+      "name": "find",
+      "kind": "Function",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "line": 1407,
+      "score": 0.96
+    },
+    {
+      "uid": "Function:crates/rouchdb/src/lib.rs:indexed_find_reads_only_the_changes_since_the_index.find@3215:8",
+      "name": "find",
+      "kind": "Function",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "line": 3216,
+      "score": 0.96
+    },
+    {
+      "uid": "Function:crates/rouchdb/src/lib.rs:indexed_find_updates_index_incrementally.find@2332:8",
+      "name": "find",
+      "kind": "Function",
+      "filePath": "crates/rouchdb/src/lib.rs",
+      "line": 2333,
+      "score": 0.96
+    }
+  ]
+}

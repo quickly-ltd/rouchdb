@@ -1,0 +1,36 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Function:crates/rouchdb-core/src/collation.rs:compare_numbers",
+    "name": "compare_numbers",
+    "kind": "Function",
+    "filePath": "crates/rouchdb-core/src/collation.rs",
+    "startLine": 126,
+    "endLine": 139
+  },
+  "epistemic": "exact",
+  "incoming": {
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-core/src/collation.rs:collate",
+        "name": "collate",
+        "filePath": "crates/rouchdb-core/src/collation.rs"
+      }
+    ]
+  },
+  "outgoing": {
+    "calls": [
+      {
+        "uid": "Function:crates/rouchdb-core/src/collation.rs:as_i128",
+        "name": "as_i128",
+        "filePath": "crates/rouchdb-core/src/collation.rs"
+      },
+      {
+        "uid": "Function:crates/rouchdb-core/src/collation.rs:compare_int_float",
+        "name": "compare_int_float",
+        "filePath": "crates/rouchdb-core/src/collation.rs"
+      }
+    ]
+  },
+  "processes": []
+}

@@ -1,0 +1,12 @@
+[package]
+name = "rouchdb-source-audit-probes"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[features]
+arbitrary-precision = ["rouchdb/arbitrary-precision"]
+[workspace]
+[dependencies]
+rouchdb = {path = "../../../../../crates/rouchdb"}
+serde_json = "1"
+tokio = {version="1", features=["macros", "rt-multi-thread", "time"]}
