@@ -840,7 +840,9 @@ impl Database {
     /// Update an existing document (requires providing the current rev).
     ///
     /// Returns `RouchError::Conflict` if `rev` is not a current leaf
-    /// revision of the document.
+    /// revision of the document, or if the document is deleted: as in
+    /// CouchDB, a deleted document is re-created with [`Database::put`]
+    /// (without a revision), not by editing its tombstone.
     pub async fn update(&self, id: &str, rev: &str, data: serde_json::Value) -> Result<DocResult> {
         if id.is_empty() {
             return Err(RouchError::MissingId);

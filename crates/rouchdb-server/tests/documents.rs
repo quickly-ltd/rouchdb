@@ -379,3 +379,43 @@ async fn delete_via_put_without_a_revision() {
     let tomb = put(&app, "/db/n", json!({"_deleted": true, "k": 1})).await;
     assert_eq!(tomb.status, StatusCode::CONFLICT);
 }
+
+/// An edit of a deleted document's tombstone is a conflict, as in CouchDB
+/// 3.5.1 (`_rev` in the body, `?rev=` and `_bulk_docs`); without a
+/// revision the document is re-created.
+#[tokio::test]
+async fn edit_of_a_tombstone_is_a_conflict() {
+    let app = app();
+    let rev = put(&app, "/db/a", json!({"v": 1})).await.json()["rev"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tomb = delete(&app, &format!("/db/a?rev={rev}")).await.json()["rev"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let conflict = json!({"error": "conflict", "reason": "Document update conflict."});
+    let resp = put(&app, "/db/a", json!({"_rev": tomb, "v": 2})).await;
+    assert_eq!(
+        (resp.status, resp.json()),
+        (StatusCode::CONFLICT, conflict.clone())
+    );
+    let resp = put(&app, &format!("/db/a?rev={tomb}"), json!({"v": 2})).await;
+    assert_eq!(
+        (resp.status, resp.json()),
+        (StatusCode::CONFLICT, conflict.clone())
+    );
+    let resp = post(
+        &app,
+        "/db/_bulk_docs",
+        json!({"docs": [{"_id": "a", "_rev": tomb, "v": 3}]}),
+    )
+    .await;
+    assert_eq!(resp.json()[0]["error"], "conflict");
+    assert_eq!(get(&app, "/db/a").await.status, StatusCode::NOT_FOUND);
+
+    let resp = put(&app, "/db/a", json!({"v": 9})).await;
+    assert_eq!(resp.status, StatusCode::CREATED);
+    assert!(resp.json()["rev"].as_str().unwrap().starts_with("3-"));
+}

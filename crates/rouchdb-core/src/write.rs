@@ -145,6 +145,12 @@ pub fn plan_new_edit(
         // CouchDB (PUT and `_bulk_docs`) and PouchDB: a revision of a
         // document that does not exist is a conflict, not "missing".
         (None, Some(_)) => return Err(conflict(&id)),
+        // CouchDB 3.5.1 (`couch_db_updater:merge_rev_tree`): a deleted
+        // document is only re-created from its root, without a revision; an
+        // edit of any of its revisions, the deleted leaves included, is a
+        // conflict. (A deleted losing leaf of a live document can still be
+        // edited.)
+        (Some(tree), Some(_)) if is_deleted(tree) => return Err(conflict(&id)),
         (Some(tree), None) if parent.is_none() && !tree.is_empty() => return Err(conflict(&id)),
         _ => {}
     }

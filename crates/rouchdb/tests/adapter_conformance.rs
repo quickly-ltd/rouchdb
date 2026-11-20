@@ -3205,3 +3205,58 @@ conformance!(storage_fidelity:
     changes_limit_zero_is_empty,
     old_edit_of_deleted_document_conflicts,
 );
+
+// === section: edits of deleted documents ===
+
+/// As in CouchDB 3.5.1 (`couch_db_updater:merge_rev_tree`), a deleted
+/// document is re-created without a revision only: an edit of its
+/// tombstone (or of any other of its revisions) is a conflict, through
+/// `update`, `bulk_docs` and a `_deleted` edit. A deleted losing leaf of a
+/// live document can still be edited.
+async fn edit_of_deleted_document_conflicts(fx: Fx) {
+    let db = fx.db();
+    let r1 = write(db, serde_json::json!({"_id": "d", "v": 1})).await;
+    let tomb = db.remove("d", &r1).await.unwrap().rev.unwrap();
+    let seq = db.info().await.unwrap().update_seq;
+
+    for rev in [&tomb, &r1] {
+        assert!(
+            matches!(
+                db.update("d", rev, serde_json::json!({"v": 2})).await,
+                Err(RouchError::Conflict)
+            ),
+            "update on {rev}"
+        );
+        for deleted in [false, true] {
+            let res = db
+                .bulk_docs(
+                    vec![doc(
+                        serde_json::json!({"_id": "d", "_rev": rev, "_deleted": deleted}),
+                    )],
+                    BulkDocsOptions::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res[0].error.as_deref(), Some("conflict"), "{rev} {deleted}");
+        }
+    }
+    assert_eq!(db.info().await.unwrap().update_seq, seq, "nothing written");
+    assert!(matches!(db.get("d").await, Err(RouchError::NotFound(_))));
+
+    // Without a revision the document is re-created on its tombstone.
+    let r3 = db.put("d", serde_json::json!({"v": 3})).await.unwrap();
+    assert_eq!(generation(&r3.rev.unwrap()), 3);
+
+    // A deleted losing leaf of a live document can be edited (CouchDB adds
+    // a branch on it).
+    let (_, loser, winner) = make_conflict(db, "c").await;
+    let loser_tomb = db.remove("c", &loser).await.unwrap().rev.unwrap();
+    assert_eq!(db.get("c").await.unwrap().rev.unwrap().to_string(), winner);
+    let revived = db
+        .update("c", &loser_tomb, serde_json::json!({"v": "revived"}))
+        .await
+        .unwrap();
+    assert_eq!(generation(revived.rev.as_ref().unwrap()), 4);
+}
+
+conformance!(deleted_edits: edit_of_deleted_document_conflicts);

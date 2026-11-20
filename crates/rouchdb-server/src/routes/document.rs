@@ -244,18 +244,10 @@ pub async fn put_doc(
     let body_rev = body.get("_rev").and_then(|v| v.as_str()).map(String::from);
     let rev = resolve_rev(query.rev, body_rev, &headers)?;
 
-    // CouchDB answers 409 when a revision of an already deleted document is
-    // deleted again. Without a revision, `put` creates a tombstone for a new
-    // id and is a conflict for an existing (live or deleted) one, as in
-    // CouchDB.
-    if is_deleted && rev.is_some() {
-        match writer.get(&docid).await {
-            Err(RouchError::NotFound(_)) => return Err(AppError(RouchError::Conflict)),
-            other => {
-                other?;
-            }
-        }
-    }
+    // As in CouchDB, an edit (or deletion) of a revision of a deleted
+    // document is a conflict (`update` reports it). Without a revision,
+    // `put` creates a tombstone for a new id and is a conflict for an
+    // existing (live or deleted) one.
     if let Some(obj) = body.as_object_mut() {
         obj.remove("_id");
         obj.remove("_rev");
