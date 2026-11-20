@@ -158,7 +158,8 @@ fn index_view(fields: &[SortField]) -> serde_json::Value {
     })
 }
 
-/// Read the index fields back from a stored view.
+/// Read the index fields back from a stored view. An empty list is a valid
+/// index, as in CouchDB 3.5.1 and PouchDB.
 fn view_fields(view: &serde_json::Value) -> Option<Vec<SortField>> {
     let fields = serde_json::from_value::<Vec<SortField>>(view["options"]["def"]["fields"].clone())
         .ok()
@@ -173,7 +174,7 @@ fn view_fields(view: &serde_json::Value) -> Option<Vec<SortField>> {
                     .collect(),
             )
         })?;
-    (!fields.is_empty() && fields.iter().all(valid_field)).then_some(fields)
+    fields.iter().all(valid_field).then_some(fields)
 }
 
 fn is_query_ddoc(doc: &serde_json::Value) -> bool {
@@ -295,10 +296,11 @@ pub async fn create_index(
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     state.check_db(&db)?;
 
+    // An empty list is accepted, as by CouchDB 3.5.1 and PouchDB.
     let fields = body.index.fields;
-    if fields.is_empty() || !fields.iter().all(valid_field) {
+    if !fields.iter().all(valid_field) {
         return Err(AppError(RouchError::BadRequest(
-            "index.fields must be a non-empty list of field names or {field: direction}".into(),
+            "index.fields must be a list of field names or {field: direction}".into(),
         )));
     }
     // Same automatic name as Database::create_index; the design document

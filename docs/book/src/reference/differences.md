@@ -75,6 +75,18 @@ mode on with its own `arbitrary-precision` feature. See
 [Installation](../getting-started/installation.md#exact-numbers); pinned by
 `big_numbers.rs`.
 
+## Mango index without fields
+
+CouchDB 3.5.1 and PouchDB accept an index with `fields: []`, and so does
+RouchDB (`POST /_index` and `create_index`): it is stored, listed, restored
+after a restart and deleted like any other. CouchDB's `_explain` then picks
+it for every selector, since it holds every document; RouchDB never uses
+an index without fields and answers from `_all_docs`, so `_explain` names
+`_all_docs` while the documents returned are the same.
+
+Pinned by `accepted_divergence_empty_index_is_not_used` (rouchdb-server
+`query.rs`).
+
 ## Counter limits
 
 CouchDB's revision generations, `_local` revision counters and `_find`

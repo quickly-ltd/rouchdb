@@ -437,3 +437,72 @@ async fn bulk_delete_keeps_same_name_in_other_ddoc() {
         json!(["_design/second", "same", [{"y": "asc"}]])
     );
 }
+
+// ─── F09: an index without fields ───────────────────────────────────────────
+
+/// CouchDB 3.5.1 and PouchDB accept `fields: []`; so does the server, and
+/// the index is listed and restored like any other. Queries still answer
+/// from a full scan (see `accepted_divergence_empty_index_is_not_used`).
+#[tokio::test]
+async fn index_with_empty_fields_is_accepted_and_restored() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.redb");
+    let body = json!({"index": {"fields": []}, "name": "empty", "ddoc": "emp"});
+    {
+        let db = Arc::new(Database::open(&path, DB).unwrap());
+        x_y_docs(&db).await;
+        let app = app_with(db.clone(), &config());
+        let resp = post(&app, "/db/_index", body.clone()).await;
+        assert_eq!(resp.status, StatusCode::OK, "{:?}", resp.body);
+        assert_eq!(
+            resp.json(),
+            json!({"result": "created", "id": "_design/emp", "name": "empty"})
+        );
+        assert_eq!(
+            post(&app, "/db/_index", body.clone()).await.json()["result"],
+            "exists"
+        );
+        let ddoc = db.get("_design/emp").await.unwrap().to_json();
+        assert_eq!(ddoc["views"]["empty"]["map"]["fields"], json!({}));
+        assert_eq!(
+            ddoc["views"]["empty"]["options"]["def"]["fields"],
+            json!([])
+        );
+        assert_eq!(
+            index_defs(&app).await,
+            [json!(["_design/emp", "empty", []])]
+        );
+    }
+
+    let db = Arc::new(Database::open(&path, DB).unwrap());
+    assert_eq!(rouchdb_server::restore_indexes(&db).await.unwrap(), 1);
+    let app = app_with(db, &config());
+    assert_eq!(
+        index_defs(&app).await,
+        [json!(["_design/emp", "empty", []])]
+    );
+    let resp = post(&app, "/db/_find", json!({"selector": {"x": 1}})).await;
+    assert_eq!(doc_ids(&resp), ["a"]);
+
+    let resp = delete(&app, "/db/_index/emp/json/empty").await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert!(index_defs(&app).await.is_empty());
+}
+
+/// CouchDB 3.5.1's `_explain` picks an index without fields for any
+/// selector (it covers every document); RouchDB never uses it and scans
+/// `_all_docs`. The results are the same.
+#[tokio::test]
+async fn accepted_divergence_empty_index_is_not_used() {
+    let db = Arc::new(Database::memory(DB));
+    x_y_docs(&db).await;
+    let app = app_with(db, &config());
+    let body = json!({"index": {"fields": []}, "name": "empty", "ddoc": "emp"});
+    post(&app, "/db/_index", body).await;
+    assert_eq!(
+        explained(&app, json!({"x": 1})).await,
+        json!([null, "_all_docs", []])
+    );
+    let resp = post(&app, "/db/_find", json!({"selector": {"x": {"$gt": 0}}})).await;
+    assert_eq!(doc_ids(&resp), ["a", "b"]);
+}
