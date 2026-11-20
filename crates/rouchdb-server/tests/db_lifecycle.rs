@@ -166,3 +166,23 @@ async fn audit_regression_recreation_waits_until_destroy_finishes() {
     );
     assert_eq!(get(&app, "/db/survivor").await.json()["v"], 1);
 }
+
+/// F08: `GET /{db}` reports the purge state instead of a constant 0; it
+/// changes with every `_purge` request and survives a restart.
+#[tokio::test]
+async fn db_info_purge_seq_follows_purges() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.redb");
+    {
+        let app = app_with(Arc::new(Database::open(&path, DB).unwrap()), &config());
+        assert_eq!(get(&app, "/db").await.json()["purge_seq"], 0);
+        let rev = put(&app, "/db/d", json!({})).await.json()["rev"].clone();
+        let resp = post(&app, "/db/_purge", json!({ "d": [rev] })).await;
+        assert_eq!(resp.status, StatusCode::CREATED, "{:?}", resp.body);
+        assert_eq!(get(&app, "/db").await.json()["purge_seq"], 1);
+        post(&app, "/db/_purge", json!({"missing": ["1-abc"]})).await;
+        assert_eq!(get(&app, "/db").await.json()["purge_seq"], 2);
+    }
+    let app = app_with(Arc::new(Database::open(&path, DB).unwrap()), &config());
+    assert_eq!(get(&app, "/db").await.json()["purge_seq"], 2);
+}

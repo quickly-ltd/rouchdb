@@ -44,7 +44,7 @@ Types the library returns are `#[non_exhaustive]`. Their fields stay public, so 
 | Type | Constructors |
 |------|--------------|
 | `DocResult` | `DocResult::ok(id, rev)`, `DocResult::error(id, error, reason)` |
-| `DbInfo` | `DbInfo::new(db_name, doc_count, doc_del_count, update_seq)` |
+| `DbInfo` | `DbInfo::new(db_name, doc_count, doc_del_count, update_seq)`, `.with_purge_seq(seq)` |
 | `AllDocsResponse` | `AllDocsResponse::new(total_rows, offset, rows)`, `.with_update_seq(seq)` |
 | `AllDocsRow` | `AllDocsRow::document(id, value)`, `.with_doc(doc)`, `AllDocsRow::not_found(key)` |
 | `AllDocsRowValue` | `AllDocsRowValue::new(rev, deleted)` |

@@ -279,3 +279,230 @@ async fn bulk_delete_removes_index_design_docs() {
     assert!(db.get("_design/my-idx").await.is_err());
     assert!(db.get_indexes().await.is_empty());
 }
+
+// ─── F04: an index is identified by (ddoc, name) ────────────────────────────
+
+/// `_explain`'s index as `(ddoc, name, fields)`.
+async fn explained(app: &axum::Router, selector: serde_json::Value) -> serde_json::Value {
+    let index = post(app, "/db/_explain", json!({ "selector": selector }))
+        .await
+        .json()["index"]
+        .clone();
+    // Fields as `{field: direction}`, as `_index` lists them.
+    let fields: Vec<_> = index["def"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| match f.as_str() {
+            Some(name) => json!({ name: "asc" }),
+            None => f.clone(),
+        })
+        .collect();
+    json!([index["ddoc"], index["name"], fields])
+}
+
+async fn index_defs(app: &axum::Router) -> Vec<serde_json::Value> {
+    get(app, "/db/_index").await.json()["indexes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .skip(1)
+        .map(|i| json!([i["ddoc"], i["name"], i["def"]["fields"]]))
+        .collect()
+}
+
+async fn x_y_docs(db: &Database) {
+    db.put("a", json!({"x": 1, "y": 2})).await.unwrap();
+    db.put("b", json!({"x": 2, "y": 1})).await.unwrap();
+}
+
+/// Same checks as CouchDB 3.5.1: the same name in two design documents is
+/// two indexes, and re-creating `(ddoc, name)` with other fields replaces it.
+#[tokio::test]
+async fn same_index_name_in_two_ddocs_and_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.redb");
+    {
+        let db = Arc::new(Database::open(&path, DB).unwrap());
+        x_y_docs(&db).await;
+        let app = app_with(db.clone(), &config());
+        let create = |fields: serde_json::Value, ddoc: &str| json!({"index": {"fields": fields}, "name": "same", "ddoc": ddoc});
+
+        let resp = post(&app, "/db/_index", create(json!(["x"]), "first")).await;
+        assert_eq!(resp.json()["result"], "created");
+        let resp = post(&app, "/db/_index", create(json!(["y"]), "second")).await;
+        assert_eq!(
+            resp.json(),
+            json!({"result": "created", "id": "_design/second", "name": "same"})
+        );
+        let resp = post(&app, "/db/_index", create(json!(["y"]), "second")).await;
+        assert_eq!(resp.json()["result"], "exists");
+        assert_eq!(
+            explained(&app, json!({"y": {"$gt": 0}})).await,
+            json!(["_design/second", "same", [{"y": "asc"}]])
+        );
+        assert_eq!(
+            explained(&app, json!({"x": {"$gt": 0}})).await,
+            json!(["_design/first", "same", [{"x": "asc"}]])
+        );
+
+        // first/same now indexes y: the stored definition, the list and the
+        // plan all show it; a query on x is a full scan.
+        let resp = post(&app, "/db/_index", create(json!(["y"]), "first")).await;
+        assert_eq!(
+            resp.json(),
+            json!({"result": "created", "id": "_design/first", "name": "same"})
+        );
+        let ddoc = db.get("_design/first").await.unwrap().to_json();
+        assert_eq!(ddoc["views"]["same"]["map"]["fields"], json!({"y": "asc"}));
+        assert_eq!(
+            index_defs(&app).await,
+            [
+                json!(["_design/first", "same", [{"y": "asc"}]]),
+                json!(["_design/second", "same", [{"y": "asc"}]]),
+            ]
+        );
+        assert_eq!(
+            explained(&app, json!({"x": {"$gt": 0}})).await,
+            json!([null, "_all_docs", []])
+        );
+        let resp = post(&app, "/db/_find", json!({"selector": {"x": {"$gt": 0}}})).await;
+        assert_eq!(doc_ids(&resp), ["a", "b"]);
+        let resp = post(&app, "/db/_find", json!({"selector": {"y": {"$gt": 1}}})).await;
+        assert_eq!(doc_ids(&resp), ["a"]);
+
+        // Deleting second/same keeps first/same.
+        let resp = delete(&app, "/db/_index/second/json/same").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            index_defs(&app).await,
+            [json!(["_design/first", "same", [{"y": "asc"}]])]
+        );
+        assert_eq!(
+            explained(&app, json!({"y": {"$gt": 0}})).await,
+            json!(["_design/first", "same", [{"y": "asc"}]])
+        );
+    }
+
+    // After a restart the indexes are rebuilt from the stored definitions.
+    let db = Arc::new(Database::open(&path, DB).unwrap());
+    rouchdb_server::restore_indexes(&db).await.unwrap();
+    let app = app_with(db, &config());
+    assert_eq!(
+        index_defs(&app).await,
+        [json!(["_design/first", "same", [{"y": "asc"}]])]
+    );
+    assert_eq!(
+        explained(&app, json!({"y": {"$gt": 0}})).await,
+        json!(["_design/first", "same", [{"y": "asc"}]])
+    );
+    assert_eq!(
+        explained(&app, json!({"x": {"$gt": 0}})).await,
+        json!([null, "_all_docs", []])
+    );
+    let resp = post(&app, "/db/_find", json!({"selector": {"y": {"$gt": 1}}})).await;
+    assert_eq!(doc_ids(&resp), ["a"]);
+}
+
+/// Bulk-deleting a design document drops its indexes only, not the
+/// same-named index of another design document.
+#[tokio::test]
+async fn bulk_delete_keeps_same_name_in_other_ddoc() {
+    let db = Arc::new(Database::memory(DB));
+    x_y_docs(&db).await;
+    let app = app_with(db.clone(), &config());
+    for (field, ddoc) in [("x", "first"), ("y", "second")] {
+        let body = json!({"index": {"fields": [field]}, "name": "same", "ddoc": ddoc});
+        post(&app, "/db/_index", body).await;
+    }
+    let resp = post(
+        &app,
+        "/db/_index/_bulk_delete",
+        json!({"docids": ["_design/first"]}),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let left: Vec<_> = db
+        .get_indexes()
+        .await
+        .into_iter()
+        .map(|i| (i.ddoc, i.name))
+        .collect();
+    assert_eq!(
+        left,
+        [(Some("_design/second".to_string()), "same".to_string())]
+    );
+    assert_eq!(
+        explained(&app, json!({"y": 1})).await,
+        json!(["_design/second", "same", [{"y": "asc"}]])
+    );
+}
+
+// ─── F09: an index without fields ───────────────────────────────────────────
+
+/// CouchDB 3.5.1 and PouchDB accept `fields: []`; so does the server, and
+/// the index is listed and restored like any other. Queries still answer
+/// from a full scan (see `accepted_divergence_empty_index_is_not_used`).
+#[tokio::test]
+async fn index_with_empty_fields_is_accepted_and_restored() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.redb");
+    let body = json!({"index": {"fields": []}, "name": "empty", "ddoc": "emp"});
+    {
+        let db = Arc::new(Database::open(&path, DB).unwrap());
+        x_y_docs(&db).await;
+        let app = app_with(db.clone(), &config());
+        let resp = post(&app, "/db/_index", body.clone()).await;
+        assert_eq!(resp.status, StatusCode::OK, "{:?}", resp.body);
+        assert_eq!(
+            resp.json(),
+            json!({"result": "created", "id": "_design/emp", "name": "empty"})
+        );
+        assert_eq!(
+            post(&app, "/db/_index", body.clone()).await.json()["result"],
+            "exists"
+        );
+        let ddoc = db.get("_design/emp").await.unwrap().to_json();
+        assert_eq!(ddoc["views"]["empty"]["map"]["fields"], json!({}));
+        assert_eq!(
+            ddoc["views"]["empty"]["options"]["def"]["fields"],
+            json!([])
+        );
+        assert_eq!(
+            index_defs(&app).await,
+            [json!(["_design/emp", "empty", []])]
+        );
+    }
+
+    let db = Arc::new(Database::open(&path, DB).unwrap());
+    assert_eq!(rouchdb_server::restore_indexes(&db).await.unwrap(), 1);
+    let app = app_with(db, &config());
+    assert_eq!(
+        index_defs(&app).await,
+        [json!(["_design/emp", "empty", []])]
+    );
+    let resp = post(&app, "/db/_find", json!({"selector": {"x": 1}})).await;
+    assert_eq!(doc_ids(&resp), ["a"]);
+
+    let resp = delete(&app, "/db/_index/emp/json/empty").await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert!(index_defs(&app).await.is_empty());
+}
+
+/// CouchDB 3.5.1's `_explain` picks an index without fields for any
+/// selector (it covers every document); RouchDB never uses it and scans
+/// `_all_docs`. The results are the same.
+#[tokio::test]
+async fn accepted_divergence_empty_index_is_not_used() {
+    let db = Arc::new(Database::memory(DB));
+    x_y_docs(&db).await;
+    let app = app_with(db, &config());
+    let body = json!({"index": {"fields": []}, "name": "empty", "ddoc": "emp"});
+    post(&app, "/db/_index", body).await;
+    assert_eq!(
+        explained(&app, json!({"x": 1})).await,
+        json!([null, "_all_docs", []])
+    );
+    let resp = post(&app, "/db/_find", json!({"selector": {"x": {"$gt": 0}}})).await;
+    assert_eq!(doc_ids(&resp), ["a", "b"]);
+}

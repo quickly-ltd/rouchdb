@@ -94,7 +94,7 @@ pub trait Adapter: Send + Sync {
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `info` | `async fn info(&self) -> Result<DbInfo>` | Returns the database name, document count, and current update sequence. |
+| `info` | `async fn info(&self) -> Result<DbInfo>` | Returns the database name, document counts, current update sequence and purge state. |
 
 **Behavior contract:** Must always succeed for a valid, non-destroyed database. The `update_seq` should reflect the latest write.
 

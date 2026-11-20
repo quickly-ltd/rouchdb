@@ -58,7 +58,9 @@ pub async fn get_local(
 /// PUT /{db}/_local/{id} — write a local document.
 ///
 /// Like CouchDB 3, local documents are not MVCC-checked: the new revision is
-/// `0-(N+1)` where `0-N` is the revision sent (or `0-1` without one).
+/// `0-(N+1)` where `0-N` is the revision sent (or `0-1` without one). A body
+/// with `_deleted: true` deletes the document instead, as CouchDB does:
+/// `200` with revision `0-0`, also when it does not exist.
 pub async fn put_local(
     State(state): State<AppState>,
     Path((db, id)): Path<(String, String)>,
@@ -72,11 +74,38 @@ pub async fn put_local(
     let body_rev = obj
         .remove("_rev")
         .and_then(|r| r.as_str().map(String::from));
+    // The revision must be well formed, even for a deletion.
     let current = match query.rev.or(body_rev) {
         Some(rev) => parse_local_rev(&rev)?,
         None => 0,
     };
-    let rev = format!("0-{}", current + 1);
+    let deleted = obj.remove("_deleted").and_then(|d| d.as_bool()) == Some(true);
+    let local_id = format!("_local/{id}");
+
+    if deleted {
+        match state.db.adapter().remove_local(&id).await {
+            Ok(()) | Err(RouchError::NotFound(_)) => {}
+            Err(e) => return Err(AppError(e)),
+        }
+        let mut resp = Json(serde_json::json!({
+            "ok": true,
+            "id": local_id,
+            "rev": "0-0",
+        }))
+        .into_response();
+        set_location(&mut resp, &headers, &[&db, &local_id]);
+        return Ok(resp);
+    }
+
+    // CouchDB has no limit; ours is a u64, so the counter after u64::MAX is
+    // refused instead of overflowing.
+    let next = current.checked_add(1).ok_or_else(|| {
+        AppError(RouchError::BadRequest(format!(
+            "Local revision cannot be incremented past 0-{}",
+            u64::MAX
+        )))
+    })?;
+    let rev = format!("0-{next}");
 
     obj.remove("_id");
     obj.insert("_rev".into(), rev.clone().into());
@@ -86,7 +115,6 @@ pub async fn put_local(
         .put_local(&id, serde_json::Value::Object(obj))
         .await?;
 
-    let local_id = format!("_local/{id}");
     let mut resp = (
         StatusCode::CREATED,
         Json(serde_json::json!({

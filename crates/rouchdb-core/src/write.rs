@@ -94,6 +94,18 @@ fn conflict(id: &str) -> DocResult {
     error_result(id, "conflict", "Document update conflict.")
 }
 
+/// The result of an edit whose new revision generation would not fit a u64.
+fn generation_overflow(id: &str) -> DocResult {
+    error_result(
+        id,
+        "bad_request",
+        &format!(
+            "Revision generation of {id} cannot be incremented past {}",
+            u64::MAX
+        ),
+    )
+}
+
 /// The revision a `new_edits=true` write builds on: the supplied `_rev`, or
 /// the deleted winner when a deleted document is re-created without one.
 ///
@@ -133,11 +145,23 @@ pub fn plan_new_edit(
         // CouchDB (PUT and `_bulk_docs`) and PouchDB: a revision of a
         // document that does not exist is a conflict, not "missing".
         (None, Some(_)) => return Err(conflict(&id)),
+        // CouchDB 3.5.1 (`couch_db_updater:merge_rev_tree`): a deleted
+        // document is only re-created from its root, without a revision; an
+        // edit of any of its revisions, the deleted leaves included, is a
+        // conflict. (A deleted losing leaf of a live document can still be
+        // edited.)
+        (Some(tree), Some(_)) if is_deleted(tree) => return Err(conflict(&id)),
         (Some(tree), None) if parent.is_none() && !tree.is_empty() => return Err(conflict(&id)),
         _ => {}
     }
 
-    let new_pos = parent.as_ref().map(|r| r.pos + 1).unwrap_or(1);
+    // Generations are u64: an edit of a revision at u64::MAX (only
+    // reachable through a replicated revision) is refused, not wrapped.
+    let new_pos = match parent.as_ref().map(|r| r.pos.checked_add(1)) {
+        None => 1,
+        Some(Some(pos)) => pos,
+        Some(None) => return Err(generation_overflow(&id)),
+    };
 
     // Resolve the final attachment set before hashing, so the revision id
     // covers the attachments.
@@ -504,6 +528,58 @@ mod tests {
         let winner = winning_rev(&b.tree).unwrap().to_string();
         let loser = collect_conflicts(&b.tree)[0].to_string();
         (b.tree, winner, loser)
+    }
+
+    /// A tree holding a single replicated revision at generation `pos`.
+    fn replicated_at(pos: u64) -> (RevTree, String) {
+        let hash = "a".repeat(32);
+        let rev = format!("{pos}-{hash}");
+        let w = plan_replicated_edit(
+            None,
+            doc(
+                "d",
+                Some(&rev),
+                serde_json::json!({"_revisions": {"start": pos, "ids": [hash]}}),
+            ),
+            false,
+            1000,
+        )
+        .unwrap();
+        let ReplicatedWrite::Write(w) = w else {
+            panic!()
+        };
+        (w.tree, rev)
+    }
+
+    /// F05: the generation after u64::MAX is refused, not wrapped (debug
+    /// builds used to panic).
+    #[test]
+    fn accepted_divergence_generation_stops_at_u64_max() {
+        for (pos, next) in [
+            (0, Some(1)),
+            (u64::MAX - 1, Some(u64::MAX)),
+            (u64::MAX, None),
+        ] {
+            let (tree, rev) = if pos == 0 {
+                (Vec::new(), String::new())
+            } else {
+                replicated_at(pos)
+            };
+            let edit = doc(
+                "d",
+                (pos != 0).then_some(rev.as_str()),
+                serde_json::json!({"v": 2}),
+            );
+            let existing = (pos != 0).then_some(&tree);
+            match (plan_new_edit(existing, edit, None, true, 1000), next) {
+                (Ok(w), Some(next)) => assert_eq!(w.rev.pos, next),
+                (Err(r), None) => {
+                    assert_eq!(r.error.as_deref(), Some("bad_request"), "{r:?}");
+                    assert!(r.reason.unwrap().contains("Revision generation"));
+                }
+                (got, want) => panic!("generation {pos}: {got:?}, expected {want:?}"),
+            }
+        }
     }
 
     fn revs(v: &[Revision]) -> Vec<String> {

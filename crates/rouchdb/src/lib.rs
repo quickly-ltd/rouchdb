@@ -538,10 +538,36 @@ pub struct Database {
     /// Set for `http()` databases, whose Mango queries and indexes run on
     /// the server.
     remote: Option<Arc<HttpAdapter>>,
-    indexes: Arc<RwLock<HashMap<String, MangoIndex>>>,
+    indexes: Arc<RwLock<HashMap<IndexKey, MangoIndex>>>,
     plugins: Vec<Arc<dyn Plugin>>,
     /// Who this handle writes as (see [`Database::as_user`]).
     user_ctx: UserCtx,
+}
+
+/// Identity of a Mango index, as in CouchDB: its design document id (with
+/// the `_design/` prefix; `None` for an index created without one) and its
+/// name. The same name may be used in several design documents.
+type IndexKey = (Option<String>, String);
+
+/// The design document id of `ddoc` (`"x"` and `"_design/x"` are the same
+/// design document); `None` when no (or an empty) design document is given.
+fn design_doc_id(ddoc: Option<String>) -> Option<String> {
+    ddoc.filter(|d| !d.is_empty()).map(|d| {
+        if d.starts_with("_design/") {
+            d
+        } else {
+            format!("_design/{d}")
+        }
+    })
+}
+
+/// Whether two index definitions index the same fields in the same
+/// directions (`"x"` and `{"x": "asc"}` are the same field).
+fn same_fields(a: &[SortField], b: &[SortField]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(a, b)| a.field_and_direction() == b.field_and_direction())
 }
 
 /// A Mango index kept up to date from the changes feed.
@@ -583,12 +609,12 @@ impl MangoIndex {
     }
 }
 
-/// Name of an index whose first field the selector constrains (the one
-/// with the smallest name if several are usable).
+/// Key of an index whose first field the selector constrains (the one with
+/// the smallest name, then design document, if several are usable).
 fn usable_index(
-    indexes: &HashMap<String, MangoIndex>,
+    indexes: &HashMap<IndexKey, MangoIndex>,
     selector: &serde_json::Value,
-) -> Option<String> {
+) -> Option<IndexKey> {
     indexes
         .iter()
         .filter(|(_, index)| {
@@ -598,8 +624,8 @@ fn usable_index(
                     .is_ok_and(|(field, _)| selector.get(field).is_some())
             })
         })
-        .map(|(name, _)| name)
-        .min()
+        .map(|(key, _)| key)
+        .min_by(|a, b| (&a.1, &a.0).cmp(&(&b.1, &b.0)))
         .cloned()
 }
 
@@ -814,7 +840,9 @@ impl Database {
     /// Update an existing document (requires providing the current rev).
     ///
     /// Returns `RouchError::Conflict` if `rev` is not a current leaf
-    /// revision of the document.
+    /// revision of the document, or if the document is deleted: as in
+    /// CouchDB, a deleted document is re-created with [`Database::put`]
+    /// (without a revision), not by editing its tombstone.
     pub async fn update(&self, id: &str, rev: &str, data: serde_json::Value) -> Result<DocResult> {
         if id.is_empty() {
             return Err(RouchError::MissingId);
@@ -1102,7 +1130,7 @@ impl Database {
 
         let usable = usable_index(&*self.indexes.read().await, &opts.selector);
         let candidate_ids = match usable {
-            Some(name) => self.index_candidates(&name, &opts.selector).await?,
+            Some(key) => self.index_candidates(&key, &opts.selector).await?,
             None => None,
         };
         let Some(candidate_ids) = candidate_ids else {
@@ -1122,7 +1150,7 @@ impl Database {
         find_in_docs(all.rows.into_iter().filter_map(|row| row.doc), &opts)
     }
 
-    /// Bring index `name` up to date with the changes feed and return the
+    /// Bring index `key` up to date with the changes feed and return the
     /// ids of the documents that may match `selector`, or `None` if the index
     /// no longer exists.
     ///
@@ -1130,11 +1158,11 @@ impl Database {
     /// taken to apply them.
     async fn index_candidates(
         &self,
-        name: &str,
+        key: &IndexKey,
         selector: &serde_json::Value,
     ) -> Result<Option<Vec<String>>> {
         loop {
-            let (since, built_from, def) = match self.indexes.read().await.get(name) {
+            let (since, built_from, def) = match self.indexes.read().await.get(key) {
                 Some(index) => (
                     index.last_seq.clone(),
                     index.identity.clone(),
@@ -1158,7 +1186,7 @@ impl Database {
                 // the index and its sequence describe the old database.
                 let rebuilt = MangoIndex::build(self.adapter.as_ref(), def).await?;
                 let mut indexes = self.indexes.write().await;
-                match indexes.get_mut(name) {
+                match indexes.get_mut(key) {
                     Some(index) if index.identity == built_from && index.last_seq == since => {
                         *index = rebuilt;
                     }
@@ -1171,12 +1199,12 @@ impl Database {
             if changes.results.is_empty() {
                 let indexes = self.indexes.read().await;
                 return Ok(indexes
-                    .get(name)
+                    .get(key)
                     .map(|index| index.built.find_matching(selector)));
             }
 
             let mut indexes = self.indexes.write().await;
-            let Some(index) = indexes.get_mut(name) else {
+            let Some(index) = indexes.get_mut(key) else {
                 return Ok(None);
             };
             // Another query applied changes (or rebuilt the index after a
@@ -1200,6 +1228,12 @@ impl Database {
     /// immediately by scanning all documents; later finds keep it up to date
     /// from the changes feed. On an `http()` database the index is created
     /// on the server (`_index`).
+    ///
+    /// As in CouchDB, an index is identified by its design document
+    /// (`ddoc`, `"x"` meaning `"_design/x"`) and its name: the same name in
+    /// another design document is another index. Creating an index that
+    /// already exists with the same fields answers `"exists"`; with other
+    /// fields it replaces the old definition and answers `"created"`.
     pub async fn create_index(&self, def: IndexDefinition) -> Result<CreateIndexResponse> {
         for sort_field in &def.fields {
             sort_field.try_field_and_direction()?;
@@ -1223,24 +1257,31 @@ impl Database {
             return remote_create_index(remote, name, def).await;
         }
 
+        let key = (design_doc_id(def.ddoc), name.clone());
         let exists = || CreateIndexResponse::new("exists", name.clone());
-        if self.indexes.read().await.contains_key(&name) {
+        let is_same = |indexes: &HashMap<IndexKey, MangoIndex>| {
+            indexes
+                .get(&key)
+                .is_some_and(|index| same_fields(&index.built.def.fields, &def.fields))
+        };
+        if is_same(&*self.indexes.read().await) {
             return Ok(exists());
         }
 
         let index_def = IndexDefinition {
             name: name.clone(),
-            fields: def.fields,
-            ddoc: def.ddoc,
+            fields: def.fields.clone(),
+            ddoc: key.0.clone(),
         };
 
         let index = MangoIndex::build(self.adapter.as_ref(), index_def).await?;
 
         let mut indexes = self.indexes.write().await;
-        if indexes.contains_key(&name) {
+        if is_same(&indexes) {
             return Ok(exists());
         }
-        indexes.insert(name.clone(), index);
+        // A new index, or a new definition replacing the old one.
+        indexes.insert(key.clone(), index);
 
         Ok(CreateIndexResponse::new("created", name))
     }
@@ -1257,7 +1298,7 @@ impl Database {
                 .into_iter()
                 .map(|(_, info)| info)
                 .collect();
-            result.sort_by(|a, b| a.name.cmp(&b.name));
+            result.sort_by(|a, b| (&a.name, &a.ddoc).cmp(&(&b.name, &b.ddoc)));
             return result;
         }
         let indexes = self.indexes.read().await;
@@ -1268,7 +1309,7 @@ impl Database {
                 IndexInfo::new(def.name.clone(), def.ddoc.clone(), def.fields.clone())
             })
             .collect();
-        result.sort_by(|a, b| a.name.cmp(&b.name));
+        result.sort_by(|a, b| (&a.name, &a.ddoc).cmp(&(&b.name, &b.ddoc)));
         result
     }
 
@@ -1284,7 +1325,7 @@ impl Database {
         let usable = {
             let indexes = self.indexes.read().await;
             usable_index(&indexes, &opts.selector)
-                .and_then(|name| indexes.get(&name))
+                .and_then(|key| indexes.get(&key))
                 .map(|index| index.built.def.clone())
         };
 
@@ -1308,15 +1349,47 @@ impl Database {
     }
 
     /// Delete an index by name.
+    ///
+    /// The same name may be used in several design documents: then this is
+    /// a `BadRequest` and [`Database::delete_index_in_ddoc`] says which one
+    /// to delete.
     pub async fn delete_index(&self, name: &str) -> Result<()> {
         if let Some(ref remote) = self.remote {
-            return remote_delete_index(remote, name).await;
+            let ddoc = unique_index_ddoc(
+                name,
+                remote_indexes(remote)
+                    .await?
+                    .into_iter()
+                    .filter(|(_, info)| info.name == name)
+                    .map(|(ddoc, _)| Some(ddoc)),
+            )?;
+            return remote_delete_index(remote, ddoc.as_deref().unwrap_or_default(), name).await;
         }
         let mut indexes = self.indexes.write().await;
-        indexes
-            .remove(name)
-            .ok_or_else(|| RouchError::NotFound(format!("index {}", name)))?;
+        let ddoc = unique_index_ddoc(
+            name,
+            indexes
+                .keys()
+                .filter(|(_, n)| n == name)
+                .map(|(ddoc, _)| ddoc.clone()),
+        )?;
+        indexes.remove(&(ddoc, name.to_string()));
         Ok(())
+    }
+
+    /// Delete the index `name` of design document `ddoc` (`"x"` or
+    /// `"_design/x"`), as CouchDB's `DELETE /{db}/_index/{ddoc}/json/{name}`.
+    pub async fn delete_index_in_ddoc(&self, ddoc: &str, name: &str) -> Result<()> {
+        if let Some(ref remote) = self.remote {
+            return remote_delete_index(remote, ddoc, name).await;
+        }
+        let key = (design_doc_id(Some(ddoc.to_string())), name.to_string());
+        self.indexes
+            .write()
+            .await
+            .remove(&key)
+            .map(|_| ())
+            .ok_or_else(|| RouchError::NotFound(format!("index {ddoc}/{name}")))
     }
 
     // -----------------------------------------------------------------
@@ -1827,14 +1900,25 @@ async fn remote_indexes(remote: &HttpAdapter) -> Result<Vec<(String, IndexInfo)>
     Ok(result)
 }
 
-async fn remote_delete_index(remote: &HttpAdapter, name: &str) -> Result<()> {
-    let ddoc = remote_indexes(remote)
-        .await?
-        .into_iter()
-        .find(|(_, info)| info.name == name)
-        .map(|(ddoc, _)| ddoc)
+/// The design document of the only index named `name` among `ddocs` (the
+/// design documents of the indexes with that name).
+fn unique_index_ddoc(
+    name: &str,
+    mut ddocs: impl Iterator<Item = Option<String>>,
+) -> Result<Option<String>> {
+    let ddoc = ddocs
+        .next()
         .ok_or_else(|| RouchError::NotFound(format!("index {}", name)))?;
-    let ddoc = ddoc.strip_prefix("_design/").unwrap_or(&ddoc);
+    if ddocs.next().is_some() {
+        return Err(RouchError::BadRequest(format!(
+            "several design documents have an index named {name}: use delete_index_in_ddoc"
+        )));
+    }
+    Ok(ddoc)
+}
+
+async fn remote_delete_index(remote: &HttpAdapter, ddoc: &str, name: &str) -> Result<()> {
+    let ddoc = ddoc.strip_prefix("_design/").unwrap_or(ddoc);
     let path = format!(
         "_index/{}/json/{}",
         encode_path_segment(ddoc),

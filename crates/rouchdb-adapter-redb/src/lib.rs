@@ -998,7 +998,8 @@ impl Inner {
             meta.doc_count,
             meta.doc_del_count,
             meta.update_seq,
-        ))
+        )
+        .with_purge_seq(meta.purge_seq))
     }
 
     /// The database's persisted uuid (renewed by `destroy()`) and the hash

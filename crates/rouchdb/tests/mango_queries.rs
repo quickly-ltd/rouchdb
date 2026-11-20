@@ -557,3 +557,98 @@ async fn indexed_find_matches_a_full_scan_after_every_write() {
     let redb = Database::open(dir.path().join("differential.redb"), "differential").unwrap();
     run_index_differential(&redb).await;
 }
+
+fn index_in(ddoc: &str, name: &str, field: &str) -> IndexDefinition {
+    IndexDefinition {
+        ddoc: Some(ddoc.into()),
+        ..index_on(name, &[field])
+    }
+}
+
+async fn explained(db: &Database, selector: Value) -> (Option<String>, String) {
+    let plan = db
+        .explain(FindOptions {
+            selector,
+            ..Default::default()
+        })
+        .await;
+    (plan.index.ddoc, plan.index.name)
+}
+
+/// An index is identified by its design document and name, as in CouchDB
+/// 3.5.1: the same name in another design document is another index, and
+/// re-creating an index with other fields replaces its definition.
+#[tokio::test]
+async fn mango_index_identity_is_ddoc_and_name() {
+    let db = db_with(vec![
+        json!({"_id": "a", "x": 1, "y": 2}),
+        json!({"_id": "b", "x": 2, "y": 1}),
+    ])
+    .await;
+    let first = || Some("_design/first".to_string());
+    let second = || Some("_design/second".to_string());
+
+    let r = db
+        .create_index(index_in("first", "same", "x"))
+        .await
+        .unwrap();
+    assert_eq!(r.result, "created");
+    let r = db
+        .create_index(index_in("second", "same", "y"))
+        .await
+        .unwrap();
+    assert_eq!(r.result, "created");
+    // "second" and "_design/second" are the same design document.
+    let r = db
+        .create_index(index_in("_design/second", "same", "y"))
+        .await
+        .unwrap();
+    assert_eq!(r.result, "exists");
+    assert_eq!(db.get_indexes().await.len(), 2);
+    assert_eq!(
+        explained(&db, json!({"x": 1})).await,
+        (first(), "same".into())
+    );
+    assert_eq!(
+        explained(&db, json!({"y": 1})).await,
+        (second(), "same".into())
+    );
+
+    // Replacing first/same's fields: the running index follows.
+    let r = db
+        .create_index(index_in("first", "same", "y"))
+        .await
+        .unwrap();
+    assert_eq!(r.result, "created");
+    let first_fields: Vec<_> = db
+        .get_indexes()
+        .await
+        .into_iter()
+        .filter(|i| i.ddoc == first())
+        .map(|i| i.def.fields[0].field_and_direction().0.to_string())
+        .collect();
+    assert_eq!(first_fields, ["y"]);
+    assert_eq!(
+        explained(&db, json!({"x": 1})).await,
+        (None, "_all_docs".into())
+    );
+    assert_eq!(find_ids(&db, json!({"y": {"$gt": 1}})).await, ["a"]);
+    assert_eq!(find_ids(&db, json!({"x": {"$gt": 1}})).await, ["b"]);
+
+    // A bare name is ambiguous; the design document says which to delete.
+    assert!(matches!(
+        db.delete_index("same").await,
+        Err(rouchdb::RouchError::BadRequest(_))
+    ));
+    db.delete_index_in_ddoc("second", "same").await.unwrap();
+    assert!(matches!(
+        db.delete_index_in_ddoc("_design/second", "same").await,
+        Err(rouchdb::RouchError::NotFound(_))
+    ));
+    assert_eq!(
+        explained(&db, json!({"y": 1})).await,
+        (first(), "same".into())
+    );
+    db.delete_index("same").await.unwrap();
+    assert!(db.get_indexes().await.is_empty());
+}

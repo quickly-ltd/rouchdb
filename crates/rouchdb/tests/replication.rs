@@ -384,18 +384,21 @@ async fn replicate_delete_and_recreate() {
 
     assert!(remote.get("doc1").await.is_err());
 
-    // Find the tombstone rev via changes and update to "un-delete"
+    // As in CouchDB, editing the tombstone is a conflict; a put without a
+    // revision re-creates the document on it ("un-delete").
     let changes = local.changes(ChangesOptions::default()).await.unwrap();
     let doc1_change = changes.results.iter().find(|r| r.id == "doc1").unwrap();
     let tombstone_rev = &doc1_change.changes[0].rev;
+    assert!(matches!(
+        local
+            .update("doc1", tombstone_rev, serde_json::json!({"v": "x"}))
+            .await,
+        Err(rouchdb::RouchError::Conflict)
+    ));
 
     assert!(
         local
-            .update(
-                "doc1",
-                tombstone_rev,
-                serde_json::json!({"v": "resurrected"}),
-            )
+            .put("doc1", serde_json::json!({"v": "resurrected"}))
             .await
             .unwrap()
             .ok

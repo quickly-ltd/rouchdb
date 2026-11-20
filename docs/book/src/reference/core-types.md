@@ -154,6 +154,7 @@ pub struct DbInfo {
     pub doc_count: u64,
     pub doc_del_count: u64,
     pub update_seq: Seq,
+    pub purge_seq: Seq,
 }
 ```
 
@@ -163,8 +164,9 @@ pub struct DbInfo {
 | `doc_count` | `u64` | Number of non-deleted documents. |
 | `doc_del_count` | `u64` | Number of deleted documents. |
 | `update_seq` | `Seq` | The current update sequence number. Increments with every write. |
+| `purge_seq` | `Seq` | The purge state, an opaque token as CouchDB's `purge_seq`: it changes with every purge request (memory and redb report the number of purge requests applied; a clustered CouchDB sends a string). Do not count purges with it. |
 
-Custom adapters build it with `DbInfo::new(db_name, doc_count, doc_del_count, update_seq)`.
+Custom adapters build it with `DbInfo::new(db_name, doc_count, doc_del_count, update_seq)` (purge state `0`) and `.with_purge_seq(seq)`.
 
 ---
 

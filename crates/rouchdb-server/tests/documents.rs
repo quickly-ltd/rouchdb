@@ -379,3 +379,103 @@ async fn delete_via_put_without_a_revision() {
     let tomb = put(&app, "/db/n", json!({"_deleted": true, "k": 1})).await;
     assert_eq!(tomb.status, StatusCode::CONFLICT);
 }
+
+/// An edit of a deleted document's tombstone is a conflict, as in CouchDB
+/// 3.5.1 (`_rev` in the body, `?rev=` and `_bulk_docs`); without a
+/// revision the document is re-created.
+#[tokio::test]
+async fn edit_of_a_tombstone_is_a_conflict() {
+    let app = app();
+    let rev = put(&app, "/db/a", json!({"v": 1})).await.json()["rev"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tomb = delete(&app, &format!("/db/a?rev={rev}")).await.json()["rev"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let conflict = json!({"error": "conflict", "reason": "Document update conflict."});
+    let resp = put(&app, "/db/a", json!({"_rev": tomb, "v": 2})).await;
+    assert_eq!(
+        (resp.status, resp.json()),
+        (StatusCode::CONFLICT, conflict.clone())
+    );
+    let resp = put(&app, &format!("/db/a?rev={tomb}"), json!({"v": 2})).await;
+    assert_eq!(
+        (resp.status, resp.json()),
+        (StatusCode::CONFLICT, conflict.clone())
+    );
+    let resp = post(
+        &app,
+        "/db/_bulk_docs",
+        json!({"docs": [{"_id": "a", "_rev": tomb, "v": 3}]}),
+    )
+    .await;
+    assert_eq!(resp.json()[0]["error"], "conflict");
+    assert_eq!(get(&app, "/db/a").await.status, StatusCode::NOT_FOUND);
+
+    let resp = put(&app, "/db/a", json!({"v": 9})).await;
+    assert_eq!(resp.status, StatusCode::CREATED);
+    assert!(resp.json()["rev"].as_str().unwrap().starts_with("3-"));
+}
+
+/// A `_local` `PUT` with `_deleted: true` deletes the document, as in
+/// CouchDB 3.5.1: `200` with `rev: "0-0"`, whatever the revision sent (it
+/// must still be well formed) and also when the document does not exist.
+async fn check_local_delete_via_put(app: axum::Router) {
+    let resp = put(&app, "/db/_local/x", json!({"v": 1})).await;
+    assert_eq!(resp.status, StatusCode::CREATED);
+
+    let resp = put(
+        &app,
+        "/db/_local/x",
+        json!({"_rev": "0-1", "_deleted": true, "k": 1}),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK, "{:?}", resp.body);
+    assert_eq!(
+        resp.json(),
+        json!({"ok": true, "id": "_local/x", "rev": "0-0"})
+    );
+    let resp = get(&app, "/db/_local/x").await;
+    assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        resp.json(),
+        json!({"error": "not_found", "reason": "missing"})
+    );
+
+    // Already gone, without or with any revision: still 200.
+    for uri in ["/db/_local/x", "/db/_local/x?rev=0-18446744073709551615"] {
+        let resp = put(&app, uri, json!({"_deleted": true})).await;
+        assert_eq!(resp.status, StatusCode::OK, "{uri}");
+        assert_eq!(resp.json()["rev"], "0-0");
+    }
+    let resp = put(
+        &app,
+        "/db/_local/x",
+        json!({"_deleted": true, "_rev": "abc"}),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+
+    // `_deleted: false` writes the document, without the member.
+    let resp = put(&app, "/db/_local/w", json!({"_deleted": false, "v": 1})).await;
+    assert_eq!(resp.status, StatusCode::CREATED);
+    assert_eq!(
+        get(&app, "/db/_local/w").await.json(),
+        json!({"_id": "_local/w", "_rev": "0-1", "v": 1})
+    );
+}
+
+#[tokio::test]
+async fn local_delete_via_put_memory() {
+    check_local_delete_via_put(app()).await;
+}
+
+#[tokio::test]
+async fn local_delete_via_put_redb() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::open(dir.path().join("db.redb"), DB).unwrap());
+    check_local_delete_via_put(app_with(db, &config())).await;
+}

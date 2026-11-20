@@ -71,7 +71,17 @@ pub async fn find(
 
     // A bookmark resumes after the results already returned; `skip` applies
     // on top of it, as in CouchDB.
-    let skip = offset.unwrap_or(0) + opts.skip.unwrap_or(0);
+    // Offsets are u64: a sum past u64::MAX is refused, not wrapped.
+    let overflow = || {
+        AppError(RouchError::BadRequest(format!(
+            "bookmark offset plus skip exceeds {}",
+            u64::MAX
+        )))
+    };
+    let skip = offset
+        .unwrap_or(0)
+        .checked_add(opts.skip.unwrap_or(0))
+        .ok_or_else(overflow)?;
     opts.skip = Some(skip);
     opts.limit = Some(opts.limit.unwrap_or(DEFAULT_FIND_LIMIT));
 
@@ -79,7 +89,8 @@ pub async fn find(
     let bookmark = if response.docs.is_empty() && offset.is_none() {
         "nil".to_string()
     } else {
-        encode_bookmark(skip + response.docs.len() as u64)
+        let returned = u64::try_from(response.docs.len()).map_err(|_| overflow())?;
+        encode_bookmark(skip.checked_add(returned).ok_or_else(overflow)?)
     };
     Ok(Json(serde_json::json!({
         "docs": response.docs,
@@ -147,7 +158,8 @@ fn index_view(fields: &[SortField]) -> serde_json::Value {
     })
 }
 
-/// Read the index fields back from a stored view.
+/// Read the index fields back from a stored view. An empty list is a valid
+/// index, as in CouchDB 3.5.1 and PouchDB.
 fn view_fields(view: &serde_json::Value) -> Option<Vec<SortField>> {
     let fields = serde_json::from_value::<Vec<SortField>>(view["options"]["def"]["fields"].clone())
         .ok()
@@ -162,7 +174,7 @@ fn view_fields(view: &serde_json::Value) -> Option<Vec<SortField>> {
                     .collect(),
             )
         })?;
-    (!fields.is_empty() && fields.iter().all(valid_field)).then_some(fields)
+    fields.iter().all(valid_field).then_some(fields)
 }
 
 fn is_query_ddoc(doc: &serde_json::Value) -> bool {
@@ -228,12 +240,15 @@ fn body_of(doc: &rouchdb::Document) -> serde_json::Map<String, serde_json::Value
 }
 
 /// Store the index in its design document (creating it when needed).
+/// Returns `false` when the design document already had this exact index
+/// (CouchDB's `"exists"`), `true` when it was added or its definition
+/// replaced (`"created"`).
 async fn persist_index(
     db: &Database,
     ddoc_id: &str,
     name: &str,
     fields: &[SortField],
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     let view = index_view(fields);
     match db.get(ddoc_id).await {
         Ok(doc) => {
@@ -248,19 +263,19 @@ async fn persist_index(
                 *views = serde_json::json!({});
             }
             if views.get(name) == Some(&view) {
-                return Ok(());
+                return Ok(false);
             }
             views[name] = view;
             let rev = doc.rev.map(|r| r.to_string()).unwrap_or_default();
             // `update` / `put` / `remove` report a failed write as an error.
             db.update(ddoc_id, &rev, serde_json::Value::Object(body))
                 .await?;
-            Ok(())
+            Ok(true)
         }
         Err(RouchError::NotFound(_)) => {
             let body = serde_json::json!({ "language": "query", "views": { name: view } });
             db.put(ddoc_id, body).await?;
-            Ok(())
+            Ok(true)
         }
         Err(e) => Err(AppError(e)),
     }
@@ -269,7 +284,10 @@ async fn persist_index(
 /// POST /{db}/_index — create a Mango index.
 ///
 /// Like CouchDB, the index is stored in a `language: "query"` design
-/// document, so it survives restarts and replicates.
+/// document, so it survives restarts and replicates. An index is identified
+/// by its design document and name: sending the same pair with other fields
+/// replaces its definition (`"created"`), with the same fields it is
+/// `"exists"`.
 pub async fn create_index(
     State(state): State<AppState>,
     Writer(writer): Writer,
@@ -278,10 +296,11 @@ pub async fn create_index(
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     state.check_db(&db)?;
 
+    // An empty list is accepted, as by CouchDB 3.5.1 and PouchDB.
     let fields = body.index.fields;
-    if fields.is_empty() || !fields.iter().all(valid_field) {
+    if !fields.iter().all(valid_field) {
         return Err(AppError(RouchError::BadRequest(
-            "index.fields must be a non-empty list of field names or {field: direction}".into(),
+            "index.fields must be a list of field names or {field: direction}".into(),
         )));
     }
     // Same automatic name as Database::create_index; the design document
@@ -292,19 +311,21 @@ pub async fn create_index(
     });
     let ddoc_id = design_id(body.ddoc.as_deref().unwrap_or(&name));
 
-    persist_index(&writer, &ddoc_id, &name, &fields).await?;
+    let changed = persist_index(&writer, &ddoc_id, &name, &fields).await?;
+    // The in-memory index follows the stored definition (built, or rebuilt
+    // when the definition changed).
     let def = IndexDefinition {
-        name,
+        name: name.clone(),
         fields,
         ddoc: Some(ddoc_id.clone()),
     };
-    let result = state.db.create_index(def).await?;
+    state.db.create_index(def).await?;
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({
-            "result": result.result,
+            "result": if changed { "created" } else { "exists" },
             "id": ddoc_id,
-            "name": result.name,
+            "name": name,
         })),
     ))
 }
@@ -348,7 +369,10 @@ pub async fn get_indexes(
         }));
     }
     for idx in state.db.get_indexes().await {
-        if persisted.iter().any(|(_, name, _)| *name == idx.name) {
+        if persisted
+            .iter()
+            .any(|(ddoc, name, _)| *name == idx.name && Some(ddoc) == idx.ddoc.as_ref())
+        {
             continue;
         }
         all_indexes.push(serde_json::json!({
@@ -401,7 +425,7 @@ pub async fn delete_index(
             .await?;
     }
     // The in-memory index may be missing (e.g. never rebuilt); that is fine.
-    let _ = state.db.delete_index(&name).await;
+    let _ = state.db.delete_index_in_ddoc(&ddoc_id, &name).await;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -440,7 +464,7 @@ pub async fn bulk_delete_indexes(
             Ok(r) if r.ok => {
                 if let Some(views) = doc.data.get("views").and_then(|v| v.as_object()) {
                     for name in views.keys() {
-                        let _ = state.db.delete_index(name).await;
+                        let _ = state.db.delete_index_in_ddoc(&ddoc_id, name).await;
                     }
                 }
                 success.push(serde_json::json!({"id": id, "ok": true}));

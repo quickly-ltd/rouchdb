@@ -75,6 +75,8 @@ struct CouchDbInfo {
     #[serde(default)]
     doc_del_count: u64,
     update_seq: serde_json::Value, // Can be integer or string depending on CouchDB version
+    #[serde(default)]
+    purge_seq: serde_json::Value, // An opaque string on a clustered CouchDB
 }
 
 #[derive(Debug, Deserialize)]
@@ -472,7 +474,8 @@ impl Adapter for HttpAdapter {
             info.doc_count,
             info.doc_del_count,
             parse_seq(&info.update_seq),
-        ))
+        )
+        .with_purge_seq(parse_seq(&info.purge_seq)))
     }
 
     async fn id(&self) -> Result<String> {

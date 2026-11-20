@@ -953,6 +953,14 @@ pub struct DbInfo {
     #[serde(default)]
     pub doc_del_count: u64,
     pub update_seq: Seq,
+    /// The purge state, as CouchDB's `purge_seq`: an opaque token that
+    /// changes with every purge request. Do not count purges with it (a
+    /// clustered CouchDB sends a string). The memory and redb adapters
+    /// report the number of purge requests applied since the database was
+    /// created (or last destroyed); a custom adapter that does not set it
+    /// reports `0`.
+    #[serde(default)]
+    pub purge_seq: Seq,
 }
 
 impl DbInfo {
@@ -969,7 +977,15 @@ impl DbInfo {
             doc_count,
             doc_del_count,
             update_seq: update_seq.into(),
+            purge_seq: Seq::zero(),
         }
+    }
+
+    /// The same information with the purge state `purge_seq` (see
+    /// [`DbInfo::purge_seq`]).
+    pub fn with_purge_seq(mut self, purge_seq: impl Into<Seq>) -> Self {
+        self.purge_seq = purge_seq.into();
+        self
     }
 }
 
