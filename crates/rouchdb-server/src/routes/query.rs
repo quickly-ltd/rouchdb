@@ -228,12 +228,15 @@ fn body_of(doc: &rouchdb::Document) -> serde_json::Map<String, serde_json::Value
 }
 
 /// Store the index in its design document (creating it when needed).
+/// Returns `false` when the design document already had this exact index
+/// (CouchDB's `"exists"`), `true` when it was added or its definition
+/// replaced (`"created"`).
 async fn persist_index(
     db: &Database,
     ddoc_id: &str,
     name: &str,
     fields: &[SortField],
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     let view = index_view(fields);
     match db.get(ddoc_id).await {
         Ok(doc) => {
@@ -248,19 +251,19 @@ async fn persist_index(
                 *views = serde_json::json!({});
             }
             if views.get(name) == Some(&view) {
-                return Ok(());
+                return Ok(false);
             }
             views[name] = view;
             let rev = doc.rev.map(|r| r.to_string()).unwrap_or_default();
             // `update` / `put` / `remove` report a failed write as an error.
             db.update(ddoc_id, &rev, serde_json::Value::Object(body))
                 .await?;
-            Ok(())
+            Ok(true)
         }
         Err(RouchError::NotFound(_)) => {
             let body = serde_json::json!({ "language": "query", "views": { name: view } });
             db.put(ddoc_id, body).await?;
-            Ok(())
+            Ok(true)
         }
         Err(e) => Err(AppError(e)),
     }
@@ -269,7 +272,10 @@ async fn persist_index(
 /// POST /{db}/_index — create a Mango index.
 ///
 /// Like CouchDB, the index is stored in a `language: "query"` design
-/// document, so it survives restarts and replicates.
+/// document, so it survives restarts and replicates. An index is identified
+/// by its design document and name: sending the same pair with other fields
+/// replaces its definition (`"created"`), with the same fields it is
+/// `"exists"`.
 pub async fn create_index(
     State(state): State<AppState>,
     Writer(writer): Writer,
@@ -292,19 +298,21 @@ pub async fn create_index(
     });
     let ddoc_id = design_id(body.ddoc.as_deref().unwrap_or(&name));
 
-    persist_index(&writer, &ddoc_id, &name, &fields).await?;
+    let changed = persist_index(&writer, &ddoc_id, &name, &fields).await?;
+    // The in-memory index follows the stored definition (built, or rebuilt
+    // when the definition changed).
     let def = IndexDefinition {
-        name,
+        name: name.clone(),
         fields,
         ddoc: Some(ddoc_id.clone()),
     };
-    let result = state.db.create_index(def).await?;
+    state.db.create_index(def).await?;
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({
-            "result": result.result,
+            "result": if changed { "created" } else { "exists" },
             "id": ddoc_id,
-            "name": result.name,
+            "name": name,
         })),
     ))
 }
@@ -348,7 +356,10 @@ pub async fn get_indexes(
         }));
     }
     for idx in state.db.get_indexes().await {
-        if persisted.iter().any(|(_, name, _)| *name == idx.name) {
+        if persisted
+            .iter()
+            .any(|(ddoc, name, _)| *name == idx.name && Some(ddoc) == idx.ddoc.as_ref())
+        {
             continue;
         }
         all_indexes.push(serde_json::json!({
@@ -401,7 +412,7 @@ pub async fn delete_index(
             .await?;
     }
     // The in-memory index may be missing (e.g. never rebuilt); that is fine.
-    let _ = state.db.delete_index(&name).await;
+    let _ = state.db.delete_index_in_ddoc(&ddoc_id, &name).await;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -440,7 +451,7 @@ pub async fn bulk_delete_indexes(
             Ok(r) if r.ok => {
                 if let Some(views) = doc.data.get("views").and_then(|v| v.as_object()) {
                     for name in views.keys() {
-                        let _ = state.db.delete_index(name).await;
+                        let _ = state.db.delete_index_in_ddoc(&ddoc_id, name).await;
                     }
                 }
                 success.push(serde_json::json!({"id": id, "ok": true}));
