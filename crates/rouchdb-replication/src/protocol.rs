@@ -62,7 +62,8 @@ impl Clone for ReplicationFilter {
 /// # let _ = opts;
 /// ```
 pub struct ReplicationOptions {
-    /// Number of documents to process per batch.
+    /// Number of documents to process per batch (default 100). As in
+    /// PouchDB, `0` means the default.
     pub batch_size: u64,
     /// Maximum number of batches to buffer (PouchDB option). Currently has
     /// no effect: batches are fetched and written one at a time.
@@ -92,10 +93,13 @@ pub struct ReplicationOptions {
     pub checkpoint: bool,
 }
 
+/// The default [`ReplicationOptions::batch_size`], also used for `0`.
+const DEFAULT_BATCH_SIZE: u64 = 100;
+
 impl Default for ReplicationOptions {
     fn default() -> Self {
         Self {
-            batch_size: 100,
+            batch_size: DEFAULT_BATCH_SIZE,
             batches_limit: 10,
             filter: None,
             live: false,
@@ -268,6 +272,7 @@ pub async fn replicate(
     target: &dyn Adapter,
     opts: ReplicationOptions,
 ) -> Result<ReplicationResult> {
+    let opts = normalized(opts);
     let selector = compile_filter(&opts.filter)?;
     let session = new_session(source, target, &opts.filter).await?;
     let since = opts.since.clone();
@@ -296,6 +301,7 @@ pub async fn replicate_with_events(
     opts: ReplicationOptions,
     events_tx: mpsc::Sender<ReplicationEvent>,
 ) -> Result<ReplicationResult> {
+    let opts = normalized(opts);
     let selector = compile_filter(&opts.filter)?;
     let session = new_session(source, target, &opts.filter).await?;
     for warning in &session.warnings {
@@ -318,6 +324,16 @@ pub async fn replicate_with_events(
         .send(ReplicationEvent::Complete(outcome.result.clone()))
         .await;
     Ok(outcome.result)
+}
+
+/// The options every entry point runs with: a `batch_size` of 0 means the
+/// default, as PouchDB's `opts.batch_size || 100` (a changes request with
+/// `limit=0` would end the pass at once and report it successful).
+fn normalized(mut opts: ReplicationOptions) -> ReplicationOptions {
+    if opts.batch_size == 0 {
+        opts.batch_size = DEFAULT_BATCH_SIZE;
+    }
+    opts
 }
 
 /// Result of one pass of the replication loop.
@@ -725,7 +741,7 @@ pub fn replicate_live(
     opts: ReplicationOptions,
 ) -> (mpsc::Receiver<ReplicationEvent>, ReplicationHandle) {
     let (tx, rx) = mpsc::channel(64);
-    let mut opts = opts;
+    let mut opts = normalized(opts);
     let poll_interval = opts.poll_interval;
     let retry = opts.retry;
     let back_off = opts.back_off_function.take();
@@ -1636,6 +1652,70 @@ mod tests {
 
         assert!(result.ok);
         assert_eq!(result.docs_written, 0);
+    }
+
+    /// F06: a batch size of 0 is the default (100), as in PouchDB 9, on
+    /// every entry point; it used to read `limit=0` changes and report an
+    /// empty pass as a successful replication.
+    #[tokio::test]
+    async fn zero_batch_size_means_the_default() {
+        let source = Arc::new(MemoryAdapter::new("source"));
+        for i in 0..150 {
+            put_doc(
+                source.as_ref(),
+                &format!("doc{i:03}"),
+                serde_json::json!({"i": i}),
+            )
+            .await;
+        }
+        let zero = || ReplicationOptions {
+            batch_size: 0,
+            ..Default::default()
+        };
+
+        let target = MemoryAdapter::new("one-shot");
+        let r = replicate(source.as_ref(), &target, zero()).await.unwrap();
+        assert!(r.ok, "{:?}", r.errors);
+        assert_eq!((r.docs_read, r.docs_written), (150, 150));
+        assert_eq!(target.info().await.unwrap().doc_count, 150);
+        // The checkpoint reached the end: nothing is read again.
+        let again = replicate(source.as_ref(), &target, zero()).await.unwrap();
+        assert_eq!((again.ok, again.docs_read), (true, 0));
+
+        let target = MemoryAdapter::new("events");
+        let (tx, mut rx) = mpsc::channel(1024);
+        let r = replicate_with_events(source.as_ref(), &target, zero(), tx)
+            .await
+            .unwrap();
+        assert_eq!((r.ok, r.docs_written), (true, 150));
+        let mut batches = 0;
+        while let Ok(event) = rx.try_recv() {
+            batches += usize::from(matches!(event, ReplicationEvent::Change { .. }));
+        }
+        assert_eq!(batches, 2, "150 documents in batches of 100");
+
+        let target: Arc<dyn Adapter> = Arc::new(MemoryAdapter::new("live"));
+        let (mut rx, handle) = replicate_live(
+            source.clone(),
+            target.clone(),
+            ReplicationOptions {
+                live: true,
+                poll_interval: Duration::from_millis(20),
+                ..zero()
+            },
+        );
+        let caught_up = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, ReplicationEvent::Paused) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        handle.cancel();
+        assert_eq!(caught_up, Ok(true));
+        assert_eq!(target.info().await.unwrap().doc_count, 150);
     }
 
     #[tokio::test]
