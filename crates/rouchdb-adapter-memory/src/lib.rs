@@ -178,7 +178,8 @@ impl Adapter for MemoryAdapter {
             doc_count,
             doc_del_count,
             inner.update_seq,
-        ))
+        )
+        .with_purge_seq(inner.purge_seq))
     }
 
     async fn id(&self) -> Result<String> {

@@ -24,7 +24,7 @@ pub async fn get_db_info(
         "doc_count": info.doc_count,
         "doc_del_count": info.doc_del_count,
         "update_seq": info.update_seq,
-        "purge_seq": 0,
+        "purge_seq": info.purge_seq,
         "compact_running": false,
         "disk_size": 0,
         "data_size": 0,

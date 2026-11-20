@@ -88,3 +88,23 @@ async fn http_changes_feed() {
     let changes = db.changes(ChangesOptions::default()).await.unwrap();
     assert_eq!(changes.results.len(), 2);
 }
+
+/// F08: the HTTP adapter reports CouchDB's purge state (an opaque string on
+/// a clustered CouchDB), which changes with every purge request.
+#[tokio::test]
+#[ignore = "requires CouchDB"]
+async fn http_info_reports_purge_seq() {
+    let url = fresh_remote_db("http_purge_seq").await;
+    let db = Database::http(&url);
+    let before = db.info().await.unwrap().purge_seq;
+    let rev = db
+        .put("d", serde_json::json!({}))
+        .await
+        .unwrap()
+        .rev
+        .unwrap();
+    db.purge("d", vec![rev]).await.unwrap();
+    let after = db.info().await.unwrap().purge_seq;
+    assert!(matches!(after, rouchdb::Seq::Str(_)), "{after:?}");
+    assert_ne!(before, after);
+}

@@ -1513,7 +1513,31 @@ async fn purge_conflict_loser(mut fx: Fx) {
     );
 }
 
-conformance!(purge: purge_leaf_removes_doc, purge_conflict_loser);
+/// F08: `info().purge_seq` follows the purge state (CouchDB 3.5.1 changes
+/// it with every purge request, also one that purges nothing), survives a
+/// reopen and starts over with `destroy()`.
+async fn purge_seq_in_info(mut fx: Fx) {
+    let purge_seq = |info: DbInfo| info.purge_seq;
+    assert_eq!(purge_seq(fx.db().info().await.unwrap()), Seq::Num(0));
+    let r1 = write(fx.db(), serde_json::json!({"_id": "d"})).await;
+    // Writes do not change it.
+    assert_eq!(purge_seq(fx.db().info().await.unwrap()), Seq::Num(0));
+
+    fx.db().purge("d", vec![r1.clone()]).await.unwrap();
+    let after_one = purge_seq(fx.db().info().await.unwrap());
+    assert_ne!(after_one, Seq::Num(0));
+    fx.db().purge("missing", vec![r1]).await.unwrap();
+    let after_two = purge_seq(fx.db().info().await.unwrap());
+    assert_ne!(after_two, after_one);
+
+    fx.reopen();
+    assert_eq!(purge_seq(fx.db().info().await.unwrap()), after_two);
+
+    fx.db().destroy().await.unwrap();
+    assert_eq!(purge_seq(fx.db().info().await.unwrap()), Seq::Num(0));
+}
+
+conformance!(purge: purge_leaf_removes_doc, purge_conflict_loser, purge_seq_in_info);
 
 // === section: facade ===
 
