@@ -59,9 +59,19 @@ was written with, through storage, replication and the HTTP adapter: big
 integers round-trip with CouchDB, and decimals are kept more precisely than
 by CouchDB, which rewrites them as doubles (`1.50` as `1.5`, `-0.0` as
 `0.0`). It turns on `serde_json`'s
-`arbitrary_precision` for the whole build: numbers then compare by their
-text (`1.0` is not `1.00`), and revision ids of documents holding such
-numbers differ from those computed without the feature. See
+`arbitrary_precision` for the whole build: `serde_json::Number` values
+then compare by their text (`1.0` is not `1.00`), and revision ids of
+documents holding such numbers differ from those computed without the
+feature. Collation (Mango selectors, sorting, indexes, views) follows
+CouchDB: an integer written without `.` or an exponent is compared exactly
+(`18446744073709551617` sorts after `18446744073709551616`), every other
+number as the nearest double (`1.8446744073709552e19` equals
+`18446744073709551616`, `1.00` equals `1`, and two long decimals that round
+to the same double are equal). A literal beyond the double range (which
+CouchDB rejects) collates as an infinity. Comparing a number that is not an
+`i64`/`u64` reads its text, which costs an allocation per comparison in
+number-heavy sorts. Crates that depend on `rouchdb-core` directly turn the
+mode on with its own `arbitrary-precision` feature. See
 [Installation](../getting-started/installation.md#exact-numbers); pinned by
 `big_numbers.rs`.
 

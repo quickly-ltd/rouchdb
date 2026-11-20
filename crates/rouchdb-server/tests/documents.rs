@@ -312,3 +312,70 @@ async fn big_numbers_are_served_as_stored() {
     );
     assert_eq!(body.contains(r#""dec":1.50"#), exact, "{body}");
 }
+
+/// A `PUT` with `_deleted: true` stores the rest of its body in the
+/// tombstone, as CouchDB does; a plain `DELETE` still writes an empty one.
+/// Both answer 200 OK, like CouchDB 3.5.1.
+#[tokio::test]
+async fn delete_via_put_keeps_the_tombstone_body() {
+    let (db, app, rev) = with_doc().await;
+    let rev = db
+        .put_attachment("a", "note.txt", &rev, b"hi".to_vec(), "text/plain")
+        .await
+        .unwrap()
+        .rev
+        .unwrap();
+    let resp = put(
+        &app,
+        "/db/a",
+        json!({"_rev": rev, "_deleted": true, "kind": "order", "deleted_at": "2026-11-14"}),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let tomb_rev = resp.json()["rev"].as_str().unwrap().to_string();
+
+    let doc = get(&app, &format!("/db/a?rev={tomb_rev}")).await.json();
+    assert_eq!(doc["_deleted"], true);
+    assert_eq!(doc["kind"], "order");
+    assert_eq!(doc["deleted_at"], "2026-11-14");
+    // An attachment the body does not name is not inherited by the
+    // tombstone (rouchdb drops attachments on delete; see `write.rs`).
+    assert!(doc.get("_attachments").is_none());
+
+    let changes = get(&app, "/db/_changes?include_docs=true").await.json();
+    let row = &changes["results"][0];
+    assert_eq!(row["deleted"], true);
+    assert_eq!(row["doc"]["kind"], "order");
+
+    // Deleting the tombstone again is a conflict, as in CouchDB.
+    let again = put(&app, "/db/a", json!({"_rev": tomb_rev, "_deleted": true})).await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+
+    let rev_b = db.put("b", json!({"v": 1})).await.unwrap().rev.unwrap();
+    let resp = delete(&app, &format!("/db/b?rev={rev_b}")).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let rev_b = resp.json()["rev"].as_str().unwrap().to_string();
+    let doc = get(&app, &format!("/db/b?rev={rev_b}")).await.json();
+    assert_eq!(doc.as_object().unwrap().len(), 3, "{doc}");
+}
+
+/// Without a revision, CouchDB 3.5.1 creates a tombstone (with its body)
+/// for a new id and answers 409 for a live or deleted document.
+#[tokio::test]
+async fn delete_via_put_without_a_revision() {
+    let (db, app, _rev) = with_doc().await;
+    let resp = put(&app, "/db/n", json!({"_deleted": true, "kind": "x"})).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let rev = resp.json()["rev"].as_str().unwrap().to_string();
+    assert!(rev.starts_with("1-"), "{rev}");
+    let doc = get(&app, &format!("/db/n?rev={rev}")).await.json();
+    assert_eq!(doc["_deleted"], true);
+    assert_eq!(doc["kind"], "x");
+
+    let live = put(&app, "/db/a", json!({"_deleted": true})).await;
+    assert_eq!(live.status, StatusCode::CONFLICT);
+    assert!(db.get("a").await.is_ok());
+
+    let tomb = put(&app, "/db/n", json!({"_deleted": true, "k": 1})).await;
+    assert_eq!(tomb.status, StatusCode::CONFLICT);
+}

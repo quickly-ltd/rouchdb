@@ -549,6 +549,38 @@ struct MangoIndex {
     built: BuiltIndex,
     /// Sequence of the last change applied to the index.
     last_seq: Seq,
+    /// `Adapter::id()` of the storage the index was built from. `destroy()`
+    /// gives memory and redb storage a new id, also when another handle on
+    /// the same adapter calls it, so a different id means the index (and
+    /// `last_seq`) describe a database that no longer exists.
+    identity: String,
+}
+
+impl MangoIndex {
+    /// Build an index from the whole changes feed of `adapter`, so it knows
+    /// the sequence it is up to date with.
+    async fn build(adapter: &dyn Adapter, def: IndexDefinition) -> Result<MangoIndex> {
+        loop {
+            let identity = adapter.id().await?;
+            let changes = adapter
+                .changes(ChangesOptions {
+                    include_docs: true,
+                    ..Default::default()
+                })
+                .await?;
+            // A reset while the feed was read: read the new database.
+            if adapter.id().await? != identity {
+                continue;
+            }
+            let mut built = BuiltIndex::new(def);
+            built.apply_changes(&changes.results);
+            return Ok(MangoIndex {
+                built,
+                last_seq: changes.last_seq,
+                identity,
+            });
+        }
+    }
 }
 
 /// Name of an index whose first field the selector constrains (the one
@@ -1102,8 +1134,12 @@ impl Database {
         selector: &serde_json::Value,
     ) -> Result<Option<Vec<String>>> {
         loop {
-            let since = match self.indexes.read().await.get(name) {
-                Some(index) => index.last_seq.clone(),
+            let (since, built_from, def) = match self.indexes.read().await.get(name) {
+                Some(index) => (
+                    index.last_seq.clone(),
+                    index.identity.clone(),
+                    index.built.def.clone(),
+                ),
                 None => return Ok(None),
             };
             let changes = self
@@ -1114,6 +1150,23 @@ impl Database {
                     ..Default::default()
                 })
                 .await?;
+            // Checked after reading the feed: `destroy()` always gives a new
+            // id, so an unchanged id means no reset happened before or while
+            // the feed was read.
+            if self.adapter.id().await? != built_from {
+                // The storage was reset (possibly through another handle):
+                // the index and its sequence describe the old database.
+                let rebuilt = MangoIndex::build(self.adapter.as_ref(), def).await?;
+                let mut indexes = self.indexes.write().await;
+                match indexes.get_mut(name) {
+                    Some(index) if index.identity == built_from && index.last_seq == since => {
+                        *index = rebuilt;
+                    }
+                    Some(_) => {}
+                    None => return Ok(None),
+                }
+                continue;
+            }
 
             if changes.results.is_empty() {
                 let indexes = self.indexes.read().await;
@@ -1126,8 +1179,9 @@ impl Database {
             let Some(index) = indexes.get_mut(name) else {
                 return Ok(None);
             };
-            // Another query applied changes meanwhile: catch up from there.
-            if index.last_seq != since {
+            // Another query applied changes (or rebuilt the index after a
+            // reset) meanwhile: catch up from there.
+            if index.last_seq != since || index.identity != built_from {
                 continue;
             }
             index.built.apply_changes(&changes.results);
@@ -1180,29 +1234,13 @@ impl Database {
             ddoc: def.ddoc,
         };
 
-        // Build from the changes feed, so the index knows the sequence it is
-        // up to date with.
-        let changes = self
-            .adapter
-            .changes(ChangesOptions {
-                include_docs: true,
-                ..Default::default()
-            })
-            .await?;
-        let mut built = BuiltIndex::new(index_def);
-        built.apply_changes(&changes.results);
+        let index = MangoIndex::build(self.adapter.as_ref(), index_def).await?;
 
         let mut indexes = self.indexes.write().await;
         if indexes.contains_key(&name) {
             return Ok(exists());
         }
-        indexes.insert(
-            name.clone(),
-            MangoIndex {
-                built,
-                last_seq: changes.last_seq,
-            },
-        );
+        indexes.insert(name.clone(), index);
 
         Ok(CreateIndexResponse::new("created", name))
     }
